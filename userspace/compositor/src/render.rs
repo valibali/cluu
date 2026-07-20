@@ -235,6 +235,14 @@ fn unicode_to_cp437(cp: u32) -> u8 {
         0x2591 => 0xB0,                 // ░ light shade
         0x2592 => 0xB1,                 // ▒ medium shade
         0x2593 => 0xB2,                 // ▓ dark shade
+        0x2581 => 0x01,                 // ▁ eighth block 1/8 (hand glyph)
+        0x2582 => 0x02,                 // ▂ eighth block 2/8 (hand glyph)
+        0x2583 => 0x03,                 // ▃ eighth block 3/8 (hand glyph)
+        0x2585 => 0x04,                 // ▅ eighth block 5/8 (hand glyph)
+        0x2586 => 0x05,                 // ▆ eighth block 6/8 (hand glyph)
+        0x2587 => 0x06,                 // ▇ eighth block 7/8 (hand glyph)
+        0x25B6 => 0x10,                 // ▶ play (CP437 ► hand glyph)
+        0x25A0 => 0xFE,                 // ■ stop (CP437 ■ hand glyph)
         _ => b'?',
     }
 }

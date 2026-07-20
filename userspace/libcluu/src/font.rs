@@ -9,6 +9,10 @@
 //! ARC_CORNERS overrides CP437 indices 0xF0..0xF3 with 4 single-cell
 //! Unicode arc corner bitmaps (U+256D..U+2570). Box-drawing verticals
 //! are thinned from 2px to 1px to match horizontal stroke width.
+//! EIGHTH_BLOCKS overrides CP437 0x01..=0x06 with sub-cell "eighth block"
+//! bitmaps (U+2581/2582/2583/2585/2586/2587) and TRANSPORT_GLYPHS overrides
+//! 0x10/0xFE with ▶/■ transport icons — both repurpose slots the 0xProto
+//! raster bank cannot render (fontdue falls back to `.notdef` tofu there).
 //!
 //! Always go through `glyph_for_cp437` / `glyph_for_cp437_bold` /
 //! `glyph_for_cp437_italic`; they fold the overrides in.
@@ -71,6 +75,98 @@ pub const FONT_CP437_BOXES: [u8; 768] = [
     0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+/// Sub-cell "eighth block" bitmaps (▁▂▃▅▆▇, U+2581/2582/2583/2585/2586/2587).
+///
+/// Mapped onto CP437 control-range indices 0x01..=0x06 (☺☻♥♦♣♠ in the
+/// classic code page). The 0xProto TTF raster bank has no real glyphs for
+/// these dingbats — `build.rs`'s fontdue rasterizer silently falls back to
+/// the font's `.notdef` box for all of them, so the slots render as an
+/// identical, meaningless tofu glyph today. That makes them safe, already
+/// "blank in practice" targets to repurpose for real content, following the
+/// same override pattern as `ARC_CORNERS` (0xF0..=0xF3) and
+/// `thinned_box_glyph` (0xB0..=0xDF box-drawing). ▄ (8 rows) and █ (16 rows)
+/// already exist as CP437 0xDC/0xDB and are not duplicated here.
+///
+/// Each entry is a lower-k-eighths block: the bottom N pixel rows of the
+/// 8x16 cell are fully set (N = 2, 4, 6, 10, 12, 14 respectively).
+pub const EIGHTH_BLOCKS: [[u8; GLYPH_H]; 6] = [
+    // 0x01  ▁  U+2581  1/8 block: bottom 2 rows
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+    ],
+    // 0x02  ▂  U+2582  2/8 block: bottom 4 rows
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    ],
+    // 0x03  ▃  U+2583  3/8 block: bottom 6 rows
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ],
+    // 0x04  ▅  U+2585  5/8 block: bottom 10 rows
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ],
+    // 0x05  ▆  U+2586  6/8 block: bottom 12 rows
+    [
+        0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ],
+    // 0x06  ▇  U+2587  7/8 block: bottom 14 rows
+    [
+        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ],
+];
+
+/// ▶ play / ■ stop transport glyphs (U+25B6, U+25A0).
+///
+/// Mapped onto CP437 0x10 (► classic right-pointing triangle) and 0xFE
+/// (■ classic filled square) — the natural CP437 analogs of these
+/// transport icons. Like the eighth-block slots above, the 0xProto raster
+/// bank falls back to `.notdef` tofu for both indices (confirmed: identical
+/// bytes to the bank's blank/notdef glyph), so these hand bitmaps take
+/// priority the same way `ARC_CORNERS` overrides its slots.
+pub const TRANSPORT_GLYPHS: [(u8, [u8; GLYPH_H]); 2] = [
+    // 0x10  ►  U+25B6 (▶ play): flat left edge, apex pointing right,
+    // widening then narrowing (rows 4..12 of the 16-row cell).
+    (
+        0x10,
+        [
+            0x00, 0x00, 0x00, 0x00,
+            0b10000000, 0b11000000, 0b11100000, 0b11110000,
+            0b11110000, 0b11100000, 0b11000000, 0b10000000,
+            0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    // 0xFE  ■  U+25A0 (stop): centered 6x6 filled block (rows 5..11,
+    // cols 1..7).
+    (
+        0xFE,
+        [
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0b01111110, 0b01111110, 0b01111110, 0b01111110, 0b01111110, 0b01111110,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+];
+
+#[inline]
+fn extra_hand_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
+    if (0x01..=0x06).contains(&ch) {
+        return Some(EIGHTH_BLOCKS[(ch - 0x01) as usize]);
+    }
+    for &(idx, bits) in TRANSPORT_GLYPHS.iter() {
+        if idx == ch {
+            return Some(bits);
+        }
+    }
+    None
+}
 
 /// Single-cell Unicode arc corner bitmaps (╭╮╰╯, U+256D..U+2570).
 ///
@@ -189,6 +285,9 @@ pub fn glyph_alpha_for_cp437(ch: u8) -> [u8; GLYPH_ALPHA_SIZE] {
     if (0xF0..=0xF3).contains(&ch) {
         return bits_to_alpha(&ARC_CORNERS[(ch - 0xF0) as usize]);
     }
+    if let Some(g) = extra_hand_glyph(ch) {
+        return bits_to_alpha(&g);
+    }
     if let Some(g) = thinned_box_glyph(ch) {
         return bits_to_alpha(&g);
     }
@@ -200,6 +299,9 @@ pub fn glyph_alpha_for_cp437_bold(ch: u8) -> [u8; GLYPH_ALPHA_SIZE] {
     if (0xF0..=0xF3).contains(&ch) {
         return bits_to_alpha(&ARC_CORNERS[(ch - 0xF0) as usize]);
     }
+    if let Some(g) = extra_hand_glyph(ch) {
+        return bits_to_alpha(&g);
+    }
     if let Some(g) = thinned_box_glyph(ch) {
         return bits_to_alpha(&g);
     }
@@ -210,6 +312,9 @@ pub fn glyph_alpha_for_cp437_bold(ch: u8) -> [u8; GLYPH_ALPHA_SIZE] {
 pub fn glyph_alpha_for_cp437_italic(ch: u8) -> [u8; GLYPH_ALPHA_SIZE] {
     if (0xF0..=0xF3).contains(&ch) {
         return bits_to_alpha(&ARC_CORNERS[(ch - 0xF0) as usize]);
+    }
+    if let Some(g) = extra_hand_glyph(ch) {
+        return bits_to_alpha(&g);
     }
     if let Some(g) = thinned_box_glyph(ch) {
         return bits_to_alpha(&g);
