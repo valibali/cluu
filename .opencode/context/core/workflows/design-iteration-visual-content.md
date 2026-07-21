@@ -46,7 +46,7 @@ task(
           - External services (Stripe, SendGrid)
           
           Style: Clean, professional, modern
-          Format: PNG, 1920x1080"
+          Format: PNG, 1850x1000"
 )
 ```
 

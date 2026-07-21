@@ -110,7 +110,7 @@ task(
           
           **Style**: Clean, professional, modern tech diagram
           **Colors**: Blue for services, green for databases, orange for external
-          **Format**: PNG, 1920x1080
+          **Format**: PNG, 1850x1000
           **Layout**: Left-to-right flow, clear connections
           
           Output: Save to docs/architecture-diagram.png"
@@ -394,7 +394,7 @@ GEMINI_API_KEY=your_api_key_here
 
 Style: Clean, professional, modern
 Colors: Blue for services, green for databases
-Format: PNG, 1920x1080
+Format: PNG, 1850x1000
 Layout: Left-to-right flow with clear connections
 
 Output: docs/system-architecture.png"

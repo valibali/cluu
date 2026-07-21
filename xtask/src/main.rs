@@ -1668,8 +1668,25 @@ fn create_initrd(profile: &str) -> Result<()> {
 
     if let Some(kernel_entry) = kernel_src {
         let dst = initrd_dir.join("sys/core");
-        fs::copy(kernel_entry.path(), &dst).context("Failed to copy kernel as sys/core")?;
-        println!("  Copied kernel as sys/core");
+        // Strip debug sections to reduce initrd size — the full debug ELF
+        // remains in target/ for GDB. Same treatment as userspace binaries
+        // below. Without this the kernel is ~14 MB with debug info vs ~3 MB
+        // stripped, which can exceed BOOTBOOT's decompression buffer.
+        let strip_result = Command::new("strip")
+            .args(["--strip-debug", "-o"])
+            .arg(&dst)
+            .arg(kernel_entry.path())
+            .status();
+        match strip_result {
+            Ok(s) if s.success() => {
+                println!("  Copied kernel as sys/core (stripped)");
+            }
+            _ => {
+                // Fall back to plain copy if strip is unavailable.
+                fs::copy(kernel_entry.path(), &dst).context("Failed to copy kernel as sys/core")?;
+                println!("  Copied kernel as sys/core");
+            }
+        }
     } else {
         bail!("Kernel binary not found in {:?}", deps_dir);
     }
@@ -1897,7 +1914,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1700x850\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1850x1000\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -2168,14 +2185,28 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Resul
         .context("OVMF.fd not found. Install ovmf package.")?;
 
     let qemu_bin = std::env::var("QEMU_BIN").unwrap_or_else(|_| {
-        let local = format!("{}/.local/bin/qemu-system-x86_64", std::env::var("HOME").unwrap_or_default());
-        if std::path::Path::new(&local).exists() { local } else { "qemu-system-x86_64".to_string() }
+        let local = format!(
+            "{}/.local/bin/qemu-system-x86_64",
+            std::env::var("HOME").unwrap_or_default()
+        );
+        if std::path::Path::new(&local).exists() {
+            local
+        } else {
+            "qemu-system-x86_64".to_string()
+        }
     });
     // Ensure custom QEMU finds its bundled libslirp (if built with internal slirp subproject).
-    let local_lib = format!("{}/.local/lib/x86_64-linux-gnu", std::env::var("HOME").unwrap_or_default());
+    let local_lib = format!(
+        "{}/.local/lib/x86_64-linux-gnu",
+        std::env::var("HOME").unwrap_or_default()
+    );
     if std::path::Path::new(&local_lib).exists() {
         let cur = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
-        let new_ld = if cur.is_empty() { local_lib.clone() } else { format!("{}:{}", local_lib, cur) };
+        let new_ld = if cur.is_empty() {
+            local_lib.clone()
+        } else {
+            format!("{}:{}", local_lib, cur)
+        };
         std::env::set_var("LD_LIBRARY_PATH", new_ld);
     }
     let mut cmd = if let Some(core) = pin_core {
@@ -3169,7 +3200,17 @@ fn build_micropython() -> Result<()> {
         .status()
         .context("Failed to build MicroPython")?;
     if !status.success() {
-        bail!("MicroPython build failed");
+        // MicroPython's qstr generation has a known race with -j4 on clean
+        // builds: gc.c references MP_QSTR___del__ before the qstrdefs header
+        // is generated. A second make picks up the now-generated qstrdefs.
+        let status2 = Command::new("make")
+            .current_dir(&micropython_dir)
+            .arg("-j4")
+            .status()
+            .context("Failed to build MicroPython (second pass)")?;
+        if !status2.success() {
+            bail!("MicroPython build failed");
+        }
     }
     println!("  ✓ MicroPython built");
     Ok(())

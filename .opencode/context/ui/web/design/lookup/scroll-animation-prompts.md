@@ -174,7 +174,7 @@ ffmpeg -i animation.mp4 -vf fps=30 -quality 90 frame_%04d.webp
 
 ### For High-End Results
 
-- **Resolution**: 1920x1080 minimum (4K for high-DPI)
+- **Resolution**: 1850x1000 minimum (4K for high-DPI)
 - **Format**: WebP (compression) or PNG (quality)
 - **Frame count**: 90-150 frames (3-5 seconds at 30fps)
 - **Total size**: Target <50MB for all frames combined

@@ -109,8 +109,13 @@ class QemuMonitor:
         self.send(f"mouse_button {button}")
 
     def pmemsave(self, phys_addr: int, size: int, out_path: Path) -> str:
-        """Save guest physical memory range to a file (used by FB dump)."""
-        return self.send(f"pmemsave 0x{phys_addr:x} {size} {out_path}")
+        """Save guest physical memory range to a file (used by FB dump).
+
+        The filename must be quoted: QEMU >= ~11 HMP otherwise parses a
+        path like /tmp/x.bin as an arithmetic expression ("invalid char
+        't' in expression").
+        """
+        return self.send(f'pmemsave 0x{phys_addr:x} {size} "{out_path}"')
 
     def quit(self) -> None:
         """Send the ``quit`` HMP command and close the socket."""
