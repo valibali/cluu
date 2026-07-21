@@ -58,25 +58,23 @@ Pure modules (`fft`, `scope`, `viscolor`, `equalizer`, `gain`, `layout`,
 `widgets`) are host-tested with `cargo test`; runtime modules build only
 for the CLUU target under the `runtime` feature.
 
-## Spectrum — Winamp-exact temporal dynamics
+## Spectrum — Winamp-style bar dynamics
 
 Ported from Winamp `draw_sa.cpp`. The 75-bar spectrum follows Winamp's
-temporal ordering precisely:
+temporal ordering:
 
 1. **Retained target on no-new-frame.** When no new PCM period has
    arrived since the last frame, the bar targets hold their previous
    values. The spectrum does not decay to zero between frames.
-2. **Instant attack.** `peak = max(peak, target)` — a louder frame snaps
-   the bar up immediately.
+2. **Instant attack.** A louder frame snaps the bar up immediately to
+   the new target.
 3. **Falloff subtracts toward zero, not toward target.** Each frame the
-   peak loses `falloff = 12` (in 1/16 units): `peak = peak.saturating_sub(falloff)`.
-   The subtraction never clamps to the target — bars fall at a fixed
-   rate regardless of where the target sits.
-4. **Peak snap before display.** After falloff, `peak = max(peak, target)`
-   is applied again so a still-loud target prevents the peak from
-   dropping below it.
-5. **Peak velocity.** `peak -= peak * 3 * 1.1 / scale` — exponential
-   decay scalar on top of the linear falloff.
+   bar loses `falloff = 12` (in 1/16 units). The subtraction never
+   clamps to the target — bars fall at a fixed rate regardless of where
+   the target sits.
+
+No peak-holds are drawn. The spectrum shows only the bar fill with
+gravity falloff — no held-peak markers above the bars.
 
 DC removal runs in `process_pcm` before the FFT. Band values are 0-255
 (Winamp sadata); pixel height is `value >> 4` (0-15) — see spec
@@ -85,6 +83,22 @@ DC removal runs in `process_pcm` before the FFT. Band values are 0-255
 The 512-point Hann FFT uses `microfft` with `size-512`. 75 bands map to
 semitone spans (Winamp's band table); each band takes the max magnitude
 in its span.
+
+### Color palette
+
+Blue → orange → red gradient (bottom to top), matching the three-color
+request. Bottom rows use xterm 256-color blue indices (17-33), middle
+rows orange (130-214), top rows red (196-52). The palette is defined in
+`viscolor.rs::BAR_COLORS`.
+
+### Tap point
+
+The FFT/scope tap reads from `eq_scratch` — post-EQ, pre-volume. This
+matches Winamp, where `SAAddPCMData` is called from the decoder with
+raw decoded PCM before any output-stage processing. The spectrum is
+independent of the volume slider: turning the volume up or down does
+not change the spectrum amplitude, and high volume cannot cause
+overdrive artifacts in the FFT.
 
 ## Equalizer — SSE2 10-band RBJ peaking
 
