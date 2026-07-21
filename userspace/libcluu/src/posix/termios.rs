@@ -140,6 +140,9 @@ fn pts_call_raw(label: u32, endpoint: usize, remote_fd: usize, request_payload: 
     let mut reply_buf = [0u8; 4096];
     loop {
         match crate::syscall::ipc_call(endpoint, &send_buf, &mut reply_buf) {
+            Ok(0) => {
+                let _ = crate::syscall::yield_cpu();
+            }
             Ok(reply_len) => {
                 if reply_len < hdr_len {
                     set_errno(EIO);

@@ -72,7 +72,7 @@ impl Pts {
             id,
             line_discipline: libcluu::tty_core::line_discipline::LineDiscipline::new(),
             fg_pgid: None,
-            winsize: Winsize { rows: 24, cols: 80, xpixel: 640, ypixel: 480 },
+            winsize: Winsize { rows: 25, cols: 80, xpixel: 640, ypixel: 480 },
             ready_bytes: VecDeque::new(),
             drain_requested: None,
             eof_pending: false,
@@ -382,6 +382,12 @@ pub struct Cluuterm {
     saved_cursor_y: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    /// xterm-style deferred wrap: set when a printable char was written to
+    /// the last column. The cursor logically stays at `cols-1` until the
+    /// *next* printable char arrives, at which point the wrap (and any
+    /// scroll) actually happens. Any cursor-moving or screen-restructuring
+    /// event cancels a pending wrap.
+    pub wrap_pending: bool,
     pub current_attr: Attr,
 
     // ── Cursor-blink state ──────────────────────────────────────────────
@@ -452,6 +458,7 @@ impl Cluuterm {
             saved_cursor_y: 0,
             cursor_x: 0,
             cursor_y: 0,
+            wrap_pending: false,
             current_attr: default_attr,
             time_ep: 0,
             blink_armed: false,
@@ -485,19 +492,28 @@ impl Cluuterm {
         let s = unsafe { &mut *term };
         match ev {
             Event::Print(b) => {
+                // xterm-style deferred wrap (DECAWM): a pending wrap from the
+                // previous char is only resolved once the *next* printable
+                // char arrives — not immediately at the last column. See
+                // `wrap_pending` doc comment on the struct field.
+                if s.wrap_pending {
+                    s.wrap_pending = false;
+                    s.cursor_x = 0;
+                    s.cursor_y += 1;
+                    if s.cursor_y >= rows {
+                        s.scroll_up();
+                    }
+                }
                 let pos = s.cursor_y * cols + s.cursor_x;
                 let attr = s.current_attr;
                 s.cells[pos] = b;
                 s.fg_cells[pos] = encode_color(attr.fg, attr.fg_index);
                 s.bg_cells[pos] = encode_color(attr.bg, attr.bg_index);
                 s.attr_cells[pos] = pack_attrs(attr);
-                s.cursor_x += 1;
-                if s.cursor_x >= cols {
-                    s.cursor_x = 0;
-                    s.cursor_y += 1;
-                }
-                if s.cursor_y >= rows {
-                    s.scroll_up();
+                if s.cursor_x == cols - 1 {
+                    s.wrap_pending = true;
+                } else {
+                    s.cursor_x += 1;
                 }
             }
             Event::Newline => {
@@ -505,35 +521,46 @@ impl Cluuterm {
                 // typically include only `\n` after a line, and there is
                 // no kernel tty driver in the pts data path to translate
                 // for us, so without this every line cascades right.
+                s.wrap_pending = false;
                 s.cursor_x = 0;
                 s.cursor_y += 1;
                 if s.cursor_y >= rows {
                     s.scroll_up();
                 }
             }
-            Event::CarriageReturn => s.cursor_x = 0,
+            Event::CarriageReturn => {
+                s.wrap_pending = false;
+                s.cursor_x = 0;
+            }
             Event::Backspace => {
+                s.wrap_pending = false;
                 if s.cursor_x > 0 {
                     s.cursor_x -= 1;
                 }
             }
             Event::MoveCursorUp(n) => {
+                s.wrap_pending = false;
                 s.cursor_y = s.cursor_y.saturating_sub(n as usize);
             }
             Event::MoveCursorDown(n) => {
+                s.wrap_pending = false;
                 s.cursor_y = (s.cursor_y + n as usize).min(rows - 1);
             }
             Event::MoveCursorLeft(n) => {
+                s.wrap_pending = false;
                 s.cursor_x = s.cursor_x.saturating_sub(n as usize);
             }
             Event::MoveCursorRight(n) => {
+                s.wrap_pending = false;
                 s.cursor_x = (s.cursor_x + n as usize).min(cols - 1);
             }
             Event::MoveCursorAbs { row, col } => {
+                s.wrap_pending = false;
                 s.cursor_y = (row.saturating_sub(1) as usize).min(rows - 1);
                 s.cursor_x = (col.saturating_sub(1) as usize).min(cols - 1);
             }
             Event::EraseLine(mode) => {
+                s.wrap_pending = false;
                 let row = s.cursor_y;
                 let (start, end) = match mode {
                     EraseMode::ToEnd   => (s.cursor_x, cols),
@@ -550,6 +577,7 @@ impl Cluuterm {
                 }
             }
             Event::EraseDisplay(mode) => {
+                s.wrap_pending = false;
                 let total = cols * rows;
                 let attr = s.current_attr;
                 let fg = encode_color(attr.fg, attr.fg_index);
@@ -609,13 +637,17 @@ impl Cluuterm {
             }
             Event::ResetAttr   => s.current_attr = Attr::default_attr(),
             Event::Tab => {
+                s.wrap_pending = false;
                 s.cursor_x = ((s.cursor_x / 8) + 1) * 8;
                 if s.cursor_x >= cols {
                     s.cursor_x = cols - 1;
                 }
             }
             Event::Bell  => {}
-            Event::Scroll(_n) => s.scroll_up(),
+            Event::Scroll(_n) => {
+                s.wrap_pending = false;
+                s.scroll_up();
+            }
             Event::SetCursorVisible(v) => {
                 s.cursor_user_visible = v;
                 // Reflect immediately in SHM so the compositor un-inverts
@@ -643,6 +675,7 @@ impl Cluuterm {
                 let _ = ipc::send(s.comp_ep, &dmg, IpcFlags::empty());
             }
             Event::AltScreen(enter) => {
+                s.wrap_pending = false;
                 if enter {
                     if s.in_alt_screen {
                         return;
@@ -762,6 +795,10 @@ impl Cluuterm {
         self.alt_bg_cells.clear();
         self.alt_attr_cells.clear();
 
+        // Grid dimensions changed under us — any pending wrap referred to
+        // the old `cols - 1`, which is meaningless now.
+        self.wrap_pending = false;
+
         // Clamp cursor.
         if self.cursor_x >= new_cols {
             self.cursor_x = new_cols.saturating_sub(1);
@@ -818,13 +855,11 @@ impl Cluuterm {
             match action {
                 ServiceAction::DeliverBytes(bytes) => {
                     self.pts.ready_bytes.extend(bytes.iter().cloned());
-                    // If VFS is waiting for a drain, satisfy it now.
                     if let Some(requested) = self.pts.drain_requested.take() {
                         if let Some(cooked) = self.pts.try_take_cooked_bytes(requested) {
                             let vfs_ep = self.vfs_ep;
                             self.pts.send_deliver(vfs_ep, &cooked);
                         } else {
-                            // Bytes were consumed by something else; re-arm.
                             self.pts.drain_requested = Some(requested);
                         }
                     }
@@ -835,7 +870,6 @@ impl Cluuterm {
                     }
                 }
                 ServiceAction::Echo(bytes) => {
-                    // Echo bytes go through process_output (OPOST) then render.
                     let cooked = self.pts.line_discipline.process_output(&bytes);
                     self.handle_pts_write(&cooked);
                 }

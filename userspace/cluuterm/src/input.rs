@@ -16,23 +16,18 @@
 
 use crate::tty_backend::Cluuterm;
 use libcluu::tty_core::keymap::encode_extended;
+use libcluu::tty_core::routing::ServiceAction;
 use libcluu::types::Message;
 
-/// Handle a `COMP_INPUT_FORWARD_LABEL` message.
-///
-/// Extracts the key event, runs it through the shared keymap, then feeds
-/// each byte through `route_input_byte` which drives the unified PTS verb
-/// set line discipline. The resulting `ServiceAction`s are dispatched via
-/// `term.apply_service_actions`.
 pub fn handle(term: &mut Cluuterm, msg: &Message, _payload: &[u8]) {
     let ascii    = msg.words[1] as u8;
     let extended = msg.words[4] as u8;
 
     if let Some(bytes) = encode_extended(extended) {
-        for &b in bytes {
-            let actions = term.pts.on_input_byte(b);
-            term.apply_service_actions(actions);
-        }
+        let actions = alloc::vec![ServiceAction::DeliverBytes(
+            bytes.iter().cloned().collect()
+        )];
+        term.apply_service_actions(actions);
     } else if ascii != 0 {
         let actions = term.pts.on_input_byte(ascii);
         term.apply_service_actions(actions);

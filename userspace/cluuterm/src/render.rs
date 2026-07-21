@@ -148,7 +148,7 @@ fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u8) -> u64 {
 /// `hdr.width * hdr.height` u64 cells in row-major order.
 /// Interior cells begin at offset (1,1) inside the window (chrome = 1 cell).
 ///
-/// This function writes only the 80×24 terminal interior; the compositor
+/// This function writes only the 80×25 terminal interior; the compositor
 /// owns the 1-cell chrome border on all sides.
 pub fn render(term: &mut Cluuterm) {
     let cols = term.cols;

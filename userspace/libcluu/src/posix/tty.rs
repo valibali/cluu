@@ -7,6 +7,21 @@ pub const TTY_LFLAG_ICANON: usize = 0x02;
 pub const TTY_LFLAG_ECHO: usize = 0x08;
 pub const TTY_LFLAG_ISIG: usize = 0x01;
 
+// PTS protocol c_lflag bits match cluu_wire::pts::Termios and sys/termios.h.
+const PTS_LFLAG_ECHO: u32 = 0x04;
+const PTS_LFLAG_ECHOE: u32 = 0x08;
+const PTS_LFLAG_ICANON: u32 = 0x02;
+const PTS_LFLAG_ISIG: u32 = 0x01;
+
+const fn pts_raw_lflag(lflag: u32) -> u32 {
+    lflag & !(PTS_LFLAG_ICANON | PTS_LFLAG_ECHO | PTS_LFLAG_ISIG)
+}
+
+const _: () = assert!(
+    pts_raw_lflag(PTS_LFLAG_ISIG | PTS_LFLAG_ICANON | PTS_LFLAG_ECHO | PTS_LFLAG_ECHOE)
+        == PTS_LFLAG_ECHOE
+);
+
 fn tty_ctl_call_with_retry(tty_endpoint: usize, msg: &mut Message) -> Result<()> {
     const RETRIES: usize = 128;
     for _ in 0..RETRIES {
@@ -89,7 +104,7 @@ fn try_pts_enter_raw() -> Result<usize> {
         return Err(Error::InvalidState);
     }
     let saved = t.c_lflag;
-    t.c_lflag &= !(TTY_LFLAG_ICANON as u32 | TTY_LFLAG_ECHO as u32 | TTY_LFLAG_ISIG as u32);
+    t.c_lflag = pts_raw_lflag(t.c_lflag);
     if unsafe { tcsetattr(1, 0, &t as *const _ as *const core::ffi::c_void) } != 0 {
         return Err(Error::InvalidState);
     }
@@ -133,5 +148,22 @@ pub fn restore(saved: SavedTty) -> Result<()> {
         Ok(())
     } else {
         set_lflag(saved.tty_endpoint, saved.saved_lflag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pts_raw_lflag_clears_protocol_echo_without_clearing_echoe() {
+        // Given: PTS defaults with all raw-mode flags and ECHOE enabled.
+        let lflag = PTS_LFLAG_ISIG | PTS_LFLAG_ICANON | PTS_LFLAG_ECHO | PTS_LFLAG_ECHOE;
+
+        // When: raw mode is entered through the PTS fallback.
+        let raw_lflag = pts_raw_lflag(lflag);
+
+        // Then: protocol ECHO, ISIG, and ICANON clear while ECHOE remains.
+        assert_eq!(raw_lflag, PTS_LFLAG_ECHOE);
     }
 }

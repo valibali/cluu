@@ -36,7 +36,7 @@ extern "C" {
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
 const COLS: usize = 80;
-const ROWS: usize = 24;
+const ROWS: usize = 25;
 
 const CHROME: usize = 1;
 const PAD_TOP: usize = 0;
