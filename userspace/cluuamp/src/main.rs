@@ -37,17 +37,8 @@ extern "C" {
     fn _ioctl(fd: i32, req: u32, arg: *mut core::ffi::c_void) -> i32;
 }
 
-use core::sync::atomic::{AtomicU16, Ordering};
-
-static CACHED_W: AtomicU16 = AtomicU16::new(0);
-static CACHED_H: AtomicU16 = AtomicU16::new(0);
 
 fn terminal_size() -> (usize, usize) {
-    let cw = CACHED_W.load(Ordering::Relaxed);
-    let ch = CACHED_H.load(Ordering::Relaxed);
-    if cw > 0 && ch > 0 {
-        return (cw as usize, ch as usize);
-    }
     let mut ws = WinSize {
         ws_row: 0,
         ws_col: 0,
@@ -57,8 +48,6 @@ fn terminal_size() -> (usize, usize) {
     for _ in 0..10 {
         let ret = unsafe { _ioctl(1, TIOCGWINSZ, &mut ws as *mut _ as *mut core::ffi::c_void) };
         if ret == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            CACHED_W.store(ws.ws_col, Ordering::Relaxed);
-            CACHED_H.store(ws.ws_row, Ordering::Relaxed);
             return (ws.ws_col as usize, ws.ws_row as usize);
         }
         let _ = libcluu::syscall::yield_cpu();

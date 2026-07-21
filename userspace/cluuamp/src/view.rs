@@ -551,13 +551,13 @@ mod tests {
     #[test]
     fn focused_eq_slider_and_label_are_yellow_without_reverse() {
         let view = render(&focused_model(FocusArea::Eq));
-        for row in 12..15 {
+        for row in 13..16 {
             let cell = view.get(row, 3).unwrap();
             assert_eq!(cell.fg, 226);
             assert_eq!(cell.attrs & ATTR_REVERSE, 0);
         }
         for col in 2..5 {
-            let cell = view.get(15, col).unwrap();
+            let cell = view.get(16, col).unwrap();
             assert_eq!(cell.fg, 226);
             assert_eq!(cell.attrs & ATTR_REVERSE, 0);
         }

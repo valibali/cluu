@@ -543,6 +543,14 @@ impl AudioEngine {
             self.submit_period()?;
         }
 
+        let at_eof = self.decode_pos >= self.mp3_data.len();
+        if at_eof && !self.pcm_s16.is_empty() && self.ring_inflight < RING_SLOTS as u32 {
+            self.submit_period()?;
+        }
+        if at_eof && self.pcm_s16.is_empty() {
+            self.advance_to_next()?;
+        }
+
         Ok(())
     }
 
@@ -567,14 +575,13 @@ impl AudioEngine {
 
     fn decode_one_frame(&mut self) -> Result<()> {
         if self.decode_pos >= self.mp3_data.len() {
-            self.advance_to_next()?;
             return Ok(());
         }
         let (consumed, info) = self
             .decoder
             .decode(&self.mp3_data[self.decode_pos..], &mut self.pcm_f32);
         if consumed == 0 && info.is_none() {
-            self.advance_to_next()?;
+            self.decode_pos = self.mp3_data.len();
             return Ok(());
         }
         self.decode_pos += consumed;

@@ -58,7 +58,7 @@ pub struct Layout {
     pub sliders_row: usize,     // 5
     pub position_row: usize,    // 7
     pub transport_row: usize,   // 9
-    // EQUALIZER window (6 rows; fields valid only when show_eq)
+    // EQUALIZER window (7 rows; fields valid only when show_eq)
     pub eq_title_row: usize,
     pub eq_buttons_row: usize,
     pub eq_slider_top: usize, // 3 rows tall
@@ -83,8 +83,8 @@ impl Layout {
         let mut next_row = 10; // first row after MAIN
         let (eq_title_row, eq_buttons_row, eq_slider_top, eq_labels_row) = if show_eq {
             let t = next_row;
-            next_row += 6;
-            (t, t + 1, t + 2, t + 5)
+            next_row += 7;
+            (t, t + 1, t + 3, t + 6)
         } else {
             (0, 0, 0, 0)
         };
@@ -172,12 +172,12 @@ mod tests {
         assert_eq!(l.transport_row, 9);
         assert_eq!(l.eq_title_row, 10);
         assert_eq!(l.eq_buttons_row, 11);
-        assert_eq!(l.eq_slider_top, 12);
-        assert_eq!(l.eq_labels_row, 15);
-        assert_eq!(l.pl_title_row, 16);
-        assert_eq!(l.playlist_top, 17);
+        assert_eq!(l.eq_slider_top, 13);
+        assert_eq!(l.eq_labels_row, 16);
+        assert_eq!(l.pl_title_row, 17);
+        assert_eq!(l.playlist_top, 18);
         assert_eq!(l.pl_buttons_row, 23);
-        assert_eq!(l.playlist_height, 6);
+        assert_eq!(l.playlist_height, 5);
         assert_eq!(l.footer_row, 24);
         assert_eq!(l.scrollbar_col, 79);
     }
@@ -199,8 +199,8 @@ mod tests {
         assert!(l.fits());
         assert_eq!(l.eq_title_row, 10);
         assert_eq!(l.eq_buttons_row, 11);
-        assert_eq!(l.eq_slider_top, 12);
-        assert_eq!(l.eq_labels_row, 15);
+        assert_eq!(l.eq_slider_top, 13);
+        assert_eq!(l.eq_labels_row, 16);
         assert_eq!(l.playlist_height, 0);
         assert_eq!(l.footer_row, 24);
     }

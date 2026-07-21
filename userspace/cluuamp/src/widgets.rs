@@ -233,13 +233,18 @@ pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8, 
 pub fn draw_eq_slider(view: &mut View, top: usize, col: usize, value: i8, focused: bool) {
     let f = (value as i32 + 12).clamp(0, 24) as usize;
     let fg = if focused { 226 } else { 46 };
+    let track_fg = if focused { 226 } else { 238 };
     let fills = [f.saturating_sub(16), f.saturating_sub(8).min(8), f.min(8)];
     for (r, &fill) in fills.iter().enumerate() {
-        if fill > 0 {
-            view.set(top + r, col, Cell::new(eighth_block(fill)).fg(fg));
-        } else if focused {
-            view.set(top + r, col, Cell::new('░').fg(226));
-        }
+        let ch = if fill >= 8 {
+            '█'
+        } else if fill > 0 {
+            eighth_block(fill)
+        } else {
+            '░'
+        };
+        let cell_fg = if fill > 0 { fg } else { track_fg };
+        view.set(top + r, col, Cell::new(ch).fg(cell_fg));
     }
 }
 
@@ -617,18 +622,16 @@ mod tests {
 
     #[test]
     fn eq_slider_fill_math() {
-        // v=-12 -> 0 eighths: nothing drawn (unfocused)
         let mut v = View::new(4, 4);
         draw_eq_slider(&mut v, 0, 0, -12, false);
-        assert_eq!(v.get(0, 0).unwrap().ch, ' ');
-        assert_eq!(v.get(1, 0).unwrap().ch, ' ');
-        // v=0 -> 12 eighths: bottom full, middle half, top empty
+        assert_eq!(v.get(0, 0).unwrap().ch, '░');
+        assert_eq!(v.get(1, 0).unwrap().ch, '░');
+        assert_eq!(v.get(2, 0).unwrap().ch, '░');
         let mut v = View::new(4, 4);
         draw_eq_slider(&mut v, 0, 0, 0, false);
         assert_eq!(v.get(2, 0).unwrap().ch, '█');
         assert_eq!(v.get(1, 0).unwrap().ch, '▄');
-        assert_eq!(v.get(0, 0).unwrap().ch, ' ');
-        // v=12 -> 24 eighths: all rows full
+        assert_eq!(v.get(0, 0).unwrap().ch, '░');
         let mut v = View::new(4, 4);
         draw_eq_slider(&mut v, 0, 0, 12, false);
         assert_eq!(v.get(0, 0).unwrap().ch, '█');
@@ -642,12 +645,23 @@ mod tests {
         draw_eq_slider(&mut v, 0, 0, -12, true);
         assert_eq!(v.get(0, 0).unwrap().ch, '░');
         assert_eq!(v.get(1, 0).unwrap().ch, '░');
+        assert_eq!(v.get(2, 0).unwrap().ch, '░');
         for row in 0..3 {
             let cell = v.get(row, 0).unwrap();
             assert_eq!(cell.fg, 226);
             assert_eq!(cell.bg, 0);
             assert_eq!(cell.attrs & ATTR_REVERSE, 0);
         }
+    }
+
+    #[test]
+    fn eq_slider_unfocused_shows_track() {
+        let mut v = View::new(4, 4);
+        draw_eq_slider(&mut v, 0, 0, -12, false);
+        assert_eq!(v.get(0, 0).unwrap().ch, '░');
+        assert_eq!(v.get(1, 0).unwrap().ch, '░');
+        assert_eq!(v.get(2, 0).unwrap().ch, '░');
+        assert_eq!(v.get(0, 0).unwrap().fg, 238);
     }
 
     #[test]
