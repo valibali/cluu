@@ -12,6 +12,7 @@ const MAX_LEVEL: u8 = 15;
 
 const DEFAULT_FALLOFF: i32 = 12;
 const SPEC_SCALE: f32 = 2.0;
+const SCHMITT_HYSTERESIS: i32 = 12;
 const DB_FLOOR: f32 = -60.0;
 const DB_REFERENCE: f32 = 128.0;
 const DB_EPSILON: f32 = 1.0e-12;
@@ -22,6 +23,7 @@ pub struct SpectrumAnalyzer {
     magnitudes: [f32; 256],
     bar_values: [u8; NUM_BARS],
     bar_state: [i32; NUM_BARS],
+    display_state: [i32; NUM_BARS],
     falloff: i32,
 }
 
@@ -38,6 +40,7 @@ impl SpectrumAnalyzer {
             magnitudes: [0f32; 256],
             bar_values: [0u8; NUM_BARS],
             bar_state: [0i32; NUM_BARS],
+            display_state: [0i32; NUM_BARS],
             falloff: DEFAULT_FALLOFF,
         }
     }
@@ -128,6 +131,12 @@ impl SpectrumAnalyzer {
             } else {
                 self.bar_state[x] = v16;
             }
+            // Schmitt trigger: only update display when bar_state exits
+            // the hysteresis band, preventing glyph dancing at boundaries.
+            let diff = self.bar_state[x] - self.display_state[x];
+            if diff > SCHMITT_HYSTERESIS || diff < -SCHMITT_HYSTERESIS {
+                self.display_state[x] = self.bar_state[x];
+            }
         }
     }
 
@@ -135,7 +144,7 @@ impl SpectrumAnalyzer {
         if x >= NUM_BARS {
             return 0;
         }
-        (self.bar_state[x] >> 4) as u8
+        (self.display_state[x] >> 4) as u8
     }
 
     pub const fn num_bars() -> usize {
@@ -342,6 +351,51 @@ mod tests {
         sa.tick();
 
         assert_eq!(sa.bar_state[0], 124);
+    }
+
+    #[test]
+    fn schmitt_trigger_holds_display_within_hysteresis_band() {
+        let mut sa = SpectrumAnalyzer::new();
+
+        // Phase 1: establish bar_state at 96 (level 6). display jumps from 0.
+        sa.bar_values[..4].fill(96);
+        sa.tick();
+        assert_eq!(sa.display_state[0], 96, "initial jump crosses threshold");
+
+        // Phase 2: target jumps to 112 (level 7). bar_state attacks, display follows.
+        sa.bar_values[..4].fill(112);
+        sa.tick();
+        assert_eq!(sa.display_state[0], 112, "upward jump crosses threshold");
+
+        // Phase 3-6: target alternates 96/112. bar_state oscillates 100↔112
+        // (decay 112→100, attack 100→112). Without Schmitt, bar_height would
+        // dance between levels 6 and 7. With Schmitt (hysteresis=12), the
+        // 12-unit gap never exceeds the band, so display holds at 112.
+        for _ in 0..4 {
+            sa.bar_values[..4].fill(96);
+            sa.tick();
+            assert_eq!(
+                sa.display_state[0], 112,
+                "downward jitter within band holds"
+            );
+            sa.bar_values[..4].fill(112);
+            sa.tick();
+            assert_eq!(
+                sa.display_state[0], 112,
+                "upward jitter within band holds"
+            );
+        }
+
+        // Phase 7: large drop to 48 (level 3). bar_state decays past band.
+        sa.bar_values[..4].fill(48);
+        sa.tick();
+        sa.tick();
+        sa.tick();
+        sa.tick();
+        assert!(
+            sa.display_state[0] < 112,
+            "sustained drop crosses band downward"
+        );
     }
 
     #[test]
