@@ -93,6 +93,9 @@ impl<M: Model> Program<M> {
                 self.renderer.write(&cursor_move(row + 1, col + 1));
             }
 
+            if !self.reader.wait_for_data(200) {
+                continue;
+            }
             let Some(key) = decode(&mut self.reader) else {
                 continue;
             };

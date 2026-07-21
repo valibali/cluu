@@ -759,6 +759,8 @@ impl Cluuterm {
             return;
         }
 
+        let old_cols = self.cols;
+        let old_rows = self.rows;
         let total = new_cols * new_rows;
         let default_attr = Attr::default_attr();
 
@@ -768,10 +770,10 @@ impl Cluuterm {
         let mut new_attr = alloc::vec![0u8; total];
 
         // Copy-over existing content that fits in the new grid.
-        let copy_cols = new_cols.min(self.cols);
-        let copy_rows = new_rows.min(self.rows);
+        let copy_cols = new_cols.min(old_cols);
+        let copy_rows = new_rows.min(old_rows);
         for r in 0..copy_rows {
-            let old_start = r * self.cols;
+            let old_start = r * old_cols;
             let new_start = r * new_cols;
             new_cells[new_start..new_start + copy_cols]
                 .copy_from_slice(&self.cells[old_start..old_start + copy_cols]);
@@ -790,10 +792,42 @@ impl Cluuterm {
         self.cols = new_cols;
         self.rows = new_rows;
 
-        self.alt_cells.clear();
-        self.alt_fg_cells.clear();
-        self.alt_bg_cells.clear();
-        self.alt_attr_cells.clear();
+        // Alt-screen buffer: if we are IN alt screen, alt_cells holds the
+        // saved primary screen — resize it too, otherwise the alt-screen
+        // exit swap (Event::AltScreen(false)) puts an empty vec into cells
+        // and the next render panics on index-out-of-bounds.
+        if self.in_alt_screen {
+            let mut new_alt = alloc::vec![0x20u32; total];
+            let mut new_alt_fg = alloc::vec![default_attr.fg; total];
+            let mut new_alt_bg = alloc::vec![default_attr.bg; total];
+            let mut new_alt_attr = alloc::vec![0u8; total];
+            if !self.alt_cells.is_empty() {
+                for r in 0..copy_rows {
+                    let old_start = r * old_cols;
+                    let new_start = r * new_cols;
+                    let cc = copy_cols.min(self.alt_cells.len().saturating_sub(old_start));
+                    if cc > 0 {
+                        new_alt[new_start..new_start + cc]
+                            .copy_from_slice(&self.alt_cells[old_start..old_start + cc]);
+                        new_alt_fg[new_start..new_start + cc]
+                            .copy_from_slice(&self.alt_fg_cells[old_start..old_start + cc]);
+                        new_alt_bg[new_start..new_start + cc]
+                            .copy_from_slice(&self.alt_bg_cells[old_start..old_start + cc]);
+                        new_alt_attr[new_start..new_start + cc]
+                            .copy_from_slice(&self.alt_attr_cells[old_start..old_start + cc]);
+                    }
+                }
+            }
+            self.alt_cells = new_alt;
+            self.alt_fg_cells = new_alt_fg;
+            self.alt_bg_cells = new_alt_bg;
+            self.alt_attr_cells = new_alt_attr;
+        } else {
+            self.alt_cells.clear();
+            self.alt_fg_cells.clear();
+            self.alt_bg_cells.clear();
+            self.alt_attr_cells.clear();
+        }
 
         // Grid dimensions changed under us — any pending wrap referred to
         // the old `cols - 1`, which is meaningless now.
