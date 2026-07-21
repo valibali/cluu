@@ -140,6 +140,66 @@ Modules: `backend` (backend trait + double-buffering), `backend/simd` (SIMD
 backend), `protocol` (wire protocol), `renderer` (text grid renderer),
 `simd` (SIMD primitives).
 
+## Unicode glyph rendering
+
+Three Unicode blocks are rendered end-to-end across both pipelines (legacy
+console + compositor/cluuterm): **Box Drawing** (U+2500–U+257F, 128 glyphs),
+**Block Elements** (U+2580–U+259F, 32 glyphs), and **Braille Patterns**
+(U+2800–U+28FF, 256 glyphs).
+
+### Glyph sources
+
+| Block | Source | Reason |
+|---|---|---|
+| Box Drawing U+2500–U+257F | `fontdue` rasterized from 0xProto TTF | 0xProto has full 128/128 cmap coverage |
+| Block Elements U+2580–U+259F | Programmatic generation at build time | 0xProto has 0/32; all shapes are rectangular fills |
+| Braille U+2800–U+28FF | Programmatic generation at build time | 0xProto has 0/256; 2×4 dot grid is algorithmic |
+
+`libcluu/build.rs` emits five new const arrays to `font_unicode_ext.rs`:
+`FONT_BOX_{REGULAR,BOLD,ITALIC}_ALPHA` (16384 B each), `FONT_BLOCK_ALPHA`
+(4096 B), `FONT_BRAILLE_ALPHA` (32768 B). Block and Braille are
+weight-independent (filled rectangles / dots), so one bank serves all
+three attribute variants. Total added .rodata: ~96 KiB.
+
+### Unified codepoint API
+
+`libcluu::font::glyph_alpha_for_codepoint(cp, bold, italic) -> Option<[u8; 128]>`
+is the single entry point. Both renderers call it first; if it returns
+`None`, they fall back to their local `unicode_to_cp437` + the existing
+`glyph_alpha_for_cp437(u8)` CP437 path (ASCII, Latin-1, Greek, math,
+currency, PUA arc corners).
+
+### Phase 1 conservative mapping
+
+34 Box Drawing codepoints already mapped to CP437 slots (via
+`FONT_CP437_BOXES` VGA bitmaps + `thinned_box_glyph` overrides) are
+deliberately NOT overridden by the new 0xProto rasterization.
+`is_already_cp437_mapped_box(cp)` returns `true` for these, causing
+`glyph_alpha_for_codepoint` to return `None` so the CP437 fallback path
+renders them. This preserves the existing 1px-stroke VGA look for the
+common box-drawing characters (─│┌┐└┘├┤┬┴┼, ═║╔╗╚╝╠╣╦╩╬, mixed
+single/double, arc corners ╭╮╰╯) while filling the gaps (heavy lines,
+dashed lines, diagonals, etc.) from 0xProto. Shades U+2591–U+2593
+similarly stay on the VGA dithered bitmaps.
+
+### Cell storage
+
+The legacy console's `VtScreen.cells` was widened from `Vec<u8>` (CP437
+byte) to `Vec<u32>` (full Unicode codepoint), aligning it with
+cluuterm's existing `Vec<u32>` cell grid and the compositor's 21-bit
+codepoint packing in the SHM `u64` cell format. The console's inline
+UTF-8 decoder was removed; all bytes now flow through
+`libcluu::ansi::Parser`, which decodes UTF-8 internally and emits
+`Event::Print(u32)` with the real codepoint. Invalid UTF-8 produces
+`Event::Print(0xFFFD)` (REPLACEMENT CHARACTER) per the Unicode standard,
+replacing the console's previous non-standard `?` substitution.
+
+### What renders now (previously `?`)
+
+- **Braille**: all 256 patterns (U+2800–U+28FF)
+- **Block Elements**: 29 of 32 (shades U+2591–93 stay on VGA dithered path)
+- **Box Drawing**: 94 of 128 (34 already-CP437-mapped stay on VGA/thinned path)
+
 ## tty — legacy text-VT terminal service
 
 `userspace/tty/src/main.rs`
