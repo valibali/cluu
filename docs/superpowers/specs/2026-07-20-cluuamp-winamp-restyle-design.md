@@ -233,8 +233,8 @@ No box border.
 
 ### Oscilloscope (VisMode::Oscilloscope)
 - 75 points → 24 columns, point idx = `j*75/24`.
-- Vertical resolution 6 half-cells (3 rows × 2). `y = 3 + val*6/128`
-  clamped 0–5 (val is i8 −64..63 scaled — keep existing scope.point()).
+- Vertical resolution 6 half-cells (3 rows × 2). `y = 3 + val*6/64`
+  clamped 0–5 (val is i8 −32..31 from existing `scope.point()`).
   Cell row = `y/2`; char = `▀` if `y%2==0` else `▄`.
 - Color: existing `SCOPE_COLORS[|y-3| ]` clamped (keep current formula
   adapted to 6-range).

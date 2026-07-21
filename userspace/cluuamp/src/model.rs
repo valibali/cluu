@@ -58,7 +58,7 @@ pub struct CluuampModel {
 
 impl CluuampModel {
     pub fn new(playlist: Vec<String>, width: usize, height: usize) -> Self {
-        Self {
+        let mut model = Self {
             audio: AudioEngine::new(playlist),
             fft: SpectrumAnalyzer::new(),
             scope: Oscilloscope::new(),
@@ -82,7 +82,13 @@ impl CluuampModel {
             confirm_just_happened: false,
             browser_just_closed: false,
             force_redraw: false,
-        }
+        };
+        model.sync_equalizer();
+        model
+    }
+
+    fn sync_equalizer(&mut self) {
+        self.audio.set_equalizer(self.eq_enabled, self.eq_bands);
     }
 
     pub fn on_resize(&mut self, width: usize, height: usize) {
@@ -203,6 +209,7 @@ impl CluuampModel {
             }
             KeyEvent::Char('E') => {
                 self.eq_enabled = !self.eq_enabled;
+                self.sync_equalizer();
             }
             KeyEvent::Char('p') => {
                 self.show_playlist = !self.show_playlist;
@@ -346,6 +353,7 @@ impl CluuampModel {
                 if self.eq_selected < 11 {
                     self.eq_bands[self.eq_selected] =
                         (self.eq_bands[self.eq_selected] + 1).min(12);
+                    self.sync_equalizer();
                 }
             }
             FocusArea::Playlist => {
@@ -368,6 +376,7 @@ impl CluuampModel {
                 if self.eq_selected < 11 {
                     self.eq_bands[self.eq_selected] =
                         (self.eq_bands[self.eq_selected] - 1).max(-12);
+                    self.sync_equalizer();
                 }
             }
             FocusArea::Playlist => {

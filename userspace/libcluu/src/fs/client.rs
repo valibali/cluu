@@ -224,16 +224,14 @@ impl VfsClient {
 
     /// Close a file descriptor in the VFS service.
     ///
-    /// Uses `call_with_timeout` (5s) so a transiently backlogged VFS recv
-    /// queue cannot wedge the caller indefinitely. Close is best-effort —
-    /// on timeout the fd may leak in VFS bookkeeping until the calling
-    /// process exits (procmgr's PROC_EXIT teardown reclaims).
+    /// VFS is async (libcluu::async_runtime) so a backlogged recv queue
+    /// won't deadlock — the blocking `ipc::call` will eventually complete.
     pub fn close(&self, file: VfsFile) -> Result<()> {
         let mut msg = Message::new(VFS_CLOSE, [0; 6], 3);
         msg.words[0] = 0;
         msg.words[1] = self.client_id;
         msg.words[2] = file.fd;
-        ipc::call_with_timeout(self.endpoint, &mut msg, crate::IpcFlags::empty(), 5000)?;
+        ipc::call(self.endpoint, &mut msg, crate::IpcFlags::empty())?;
         parse_status(msg.words[0])?;
         Ok(())
     }
@@ -261,6 +259,33 @@ impl VfsClient {
         );
         let mut reply = Message::new(0, [0; 6], 0);
         ipc::call_with_payload(self.endpoint, &msg, &payload, &mut reply)?;
+        parse_status(reply.words[0])?;
+        Ok(VfsGrant {
+            base: target_base,
+            offset: reply.words[2],
+            len: reply.words[1],
+        })
+    }
+
+    pub fn read_grant_timeout(
+        &self,
+        file: VfsFile,
+        offset: usize,
+        len: usize,
+        target_space_token: usize,
+        target_base: usize,
+        timeout_ms: usize,
+    ) -> Result<VfsGrant> {
+        let mut payload = [0u8; core::mem::size_of::<usize>() * 2];
+        payload[..core::mem::size_of::<usize>()].copy_from_slice(&target_base.to_ne_bytes());
+        payload[core::mem::size_of::<usize>()..].copy_from_slice(&target_space_token.to_ne_bytes());
+        let msg = make_payload_message(
+            VFS_READ_GRANT,
+            payload.len(),
+            &[self.client_id, file.fd, offset, len],
+        );
+        let mut reply = Message::new(0, [0; 6], 0);
+        ipc::call_with_payload_timeout(self.endpoint, &msg, &payload, &mut reply, timeout_ms)?;
         parse_status(reply.words[0])?;
         Ok(VfsGrant {
             base: target_base,

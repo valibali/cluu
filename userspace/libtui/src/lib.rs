@@ -132,6 +132,12 @@ pub const COLOR_WHITE: u8 = 37;
 pub const ATTR_NONE: u8 = 0;
 pub const ATTR_BOLD: u8 = 1;
 pub const ATTR_UNDERLINE: u8 = 2;
+pub const ATTR_REVERSE: u8 = 4;
+
+/// Threshold at which fg/bg values switch from basic SGR (30-37/40-47)
+/// to 256-color SGR (38;5;N / 48;5;N). Values >= 100 are treated as
+/// 256-color palette indices (0-255). Values 0-99 use the basic path.
+pub const COLOR_256_THRESHOLD: u8 = 100;
 
 /// A single styled cell in the view grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

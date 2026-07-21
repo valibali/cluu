@@ -1,8 +1,8 @@
 //! TUI widgets: horizontal/vertical sliders, marquee, scrollbar, buttons.
 
-use libtui::{Cell, View, ATTR_BOLD, ATTR_REVERSE};
-use alloc::vec::Vec;
 use crate::viscolor;
+use alloc::vec::Vec;
+use libtui::{Cell, View, ATTR_BOLD};
 
 pub fn draw_h_slider(
     view: &mut View,
@@ -17,7 +17,7 @@ pub fn draw_h_slider(
         return;
     }
     let filled = (value as usize * width) / max as usize;
-    let fg = if focused { 255 } else { 250 };
+    let fg = if focused { 226 } else { 250 };
     for i in 0..width {
         let ch = if i < filled { '\u{2588}' } else { '\u{2591}' };
         view.set(row, col + i, Cell::new(ch).fg(fg));
@@ -107,14 +107,28 @@ pub fn draw_button(
 ) {
     let prefix = if focused { '[' } else { ' ' };
     let suffix = if focused { ']' } else { ' ' };
-    let attrs = if active { ATTR_REVERSE } else { ATTR_BOLD };
-    let fg = if active { 255 } else { 252 };
+    let attrs = ATTR_BOLD;
+    let fg = if focused {
+        226
+    } else if active {
+        255
+    } else {
+        252
+    };
 
-    view.set(row, col, Cell::new(prefix).fg(244));
+    view.set(
+        row,
+        col,
+        Cell::new(prefix).fg(if focused { 226 } else { 244 }),
+    );
     for (i, ch) in label.chars().enumerate() {
         view.set(row, col + 1 + i, Cell::new(ch).fg(fg).attrs(attrs));
     }
-    view.set(row, col + 1 + label.chars().count(), Cell::new(suffix).fg(244));
+    view.set(
+        row,
+        col + 1 + label.chars().count(),
+        Cell::new(suffix).fg(if focused { 226 } else { 244 }),
+    );
 }
 
 pub fn draw_frame(
@@ -139,7 +153,11 @@ pub fn draw_frame(
     view.set(row, col, Cell::new(top_left).fg(fg));
     view.set(row, col + width - 1, Cell::new(top_right).fg(fg));
     view.set(row + height - 1, col, Cell::new(bot_left).fg(fg));
-    view.set(row + height - 1, col + width - 1, Cell::new(bot_right).fg(fg));
+    view.set(
+        row + height - 1,
+        col + width - 1,
+        Cell::new(bot_right).fg(fg),
+    );
     for i in 1..width - 1 {
         view.set(row, col + i, Cell::new(h_line).fg(fg));
         view.set(row + height - 1, col + i, Cell::new(h_line).fg(fg));
@@ -209,18 +227,18 @@ pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8, 
     }
 }
 
-/// Two-row vertical EQ slider (spec §3). `value` in [-12,12] ->
-/// filled eighths f = (value+12)*16/24 (0-16), bottom-up. Focused slider
+/// Three-row vertical EQ slider (spec §3). `value` in [-12,12] ->
+/// filled eighths f = (value+12)*24/24 (0-24), bottom-up. Focused slider
 /// renders '░' track in empty cells and a brighter fill color.
 pub fn draw_eq_slider(view: &mut View, top: usize, col: usize, value: i8, focused: bool) {
-    let f = ((value as i32 + 12) * 16 / 24).clamp(0, 16) as usize;
+    let f = (value as i32 + 12).clamp(0, 24) as usize;
     let fg = if focused { 226 } else { 46 };
-    let fills = [f.saturating_sub(8), f.min(8)]; // [top row, bottom row]
+    let fills = [f.saturating_sub(16), f.saturating_sub(8).min(8), f.min(8)];
     for (r, &fill) in fills.iter().enumerate() {
         if fill > 0 {
             view.set(top + r, col, Cell::new(eighth_block(fill)).fg(fg));
         } else if focused {
-            view.set(top + r, col, Cell::new('░').fg(238));
+            view.set(top + r, col, Cell::new('░').fg(226));
         }
     }
 }
@@ -292,7 +310,7 @@ pub fn draw_block_time(
 mod tests {
     use super::*;
     use alloc::string::String;
-    use alloc::vec::Vec;
+    use libtui::ATTR_REVERSE;
 
     #[test]
     fn h_slider_zero_value_all_empty() {
@@ -319,10 +337,20 @@ mod tests {
         let mut v = View::new(10, 1);
         draw_h_slider(&mut v, 0, 0, 10, 50, 100, false);
         for i in 0..5 {
-            assert_eq!(v.get(0, i).unwrap().ch, '\u{2588}', "first half should be filled at {}", i);
+            assert_eq!(
+                v.get(0, i).unwrap().ch,
+                '\u{2588}',
+                "first half should be filled at {}",
+                i
+            );
         }
         for i in 5..10 {
-            assert_eq!(v.get(0, i).unwrap().ch, '\u{2591}', "second half should be empty at {}", i);
+            assert_eq!(
+                v.get(0, i).unwrap().ch,
+                '\u{2591}',
+                "second half should be empty at {}",
+                i
+            );
         }
     }
 
@@ -334,7 +362,16 @@ mod tests {
         let mut v2 = View::new(10, 1);
         draw_h_slider(&mut v2, 0, 0, 10, 50, 100, true);
         let focused_fg = v2.get(0, 0).unwrap().fg;
-        assert_ne!(unfocused_fg, focused_fg, "focused and unfocused should differ in color");
+        assert_ne!(
+            unfocused_fg, focused_fg,
+            "focused and unfocused should differ in color"
+        );
+        for col in 0..10 {
+            let cell = v2.get(0, col).unwrap();
+            assert_eq!(cell.fg, 226);
+            assert_eq!(cell.bg, 0);
+            assert_eq!(cell.attrs & ATTR_REVERSE, 0);
+        }
     }
 
     #[test]
@@ -398,7 +435,10 @@ mod tests {
         let max_offset = total - visible;
         draw_scrollbar(&mut v, 0, 0, 10, total, visible, max_offset);
         let bottom_cell = v.get(9, 0).unwrap();
-        assert_eq!(bottom_cell.ch, '\u{2588}', "bottom should be thumb at max offset");
+        assert_eq!(
+            bottom_cell.ch, '\u{2588}',
+            "bottom should be thumb at max offset"
+        );
     }
 
     #[test]
@@ -423,6 +463,12 @@ mod tests {
         draw_button(&mut v, 0, 0, "OK", false, true);
         assert_eq!(v.get(0, 0).unwrap().ch, '[');
         assert_eq!(v.get(0, 3).unwrap().ch, ']');
+        for col in 0..4 {
+            let cell = v.get(0, col).unwrap();
+            assert_eq!(cell.fg, 226);
+            assert_eq!(cell.bg, 0);
+            assert_eq!(cell.attrs & ATTR_REVERSE, 0);
+        }
     }
 
     #[test]
@@ -461,7 +507,13 @@ mod tests {
     fn block_digit_glyphs_are_3x3() {
         for (d, glyph) in BLOCK_DIGITS.iter().enumerate() {
             for (r, row) in glyph.iter().enumerate() {
-                assert_eq!(row.chars().count(), 3, "digit {} row {} must be 3 chars", d, r);
+                assert_eq!(
+                    row.chars().count(),
+                    3,
+                    "digit {} row {} must be 3 chars",
+                    d,
+                    r
+                );
             }
         }
         for row in BLOCK_MINUS.iter() {
@@ -520,7 +572,7 @@ mod tests {
         assert_eq!(v.get(0, 0).unwrap().ch, '█'); // top
         assert_eq!(v.get(1, 0).unwrap().ch, '█');
         assert_eq!(v.get(2, 0).unwrap().ch, '█'); // bottom
-        // color zones bottom->top: green(2), yellow-ish(7), red-ish(12)
+                                                  // color zones bottom->top: green(2), yellow-ish(7), red-ish(12)
         assert_eq!(v.get(2, 0).unwrap().fg, crate::viscolor::bar_color(2));
         assert_eq!(v.get(1, 0).unwrap().fg, crate::viscolor::bar_color(7));
         assert_eq!(v.get(0, 0).unwrap().fg, crate::viscolor::bar_color(12));
@@ -570,16 +622,18 @@ mod tests {
         draw_eq_slider(&mut v, 0, 0, -12, false);
         assert_eq!(v.get(0, 0).unwrap().ch, ' ');
         assert_eq!(v.get(1, 0).unwrap().ch, ' ');
-        // v=0 -> 8 eighths: bottom row full, top empty
+        // v=0 -> 12 eighths: bottom full, middle half, top empty
         let mut v = View::new(4, 4);
         draw_eq_slider(&mut v, 0, 0, 0, false);
-        assert_eq!(v.get(1, 0).unwrap().ch, '█');
+        assert_eq!(v.get(2, 0).unwrap().ch, '█');
+        assert_eq!(v.get(1, 0).unwrap().ch, '▄');
         assert_eq!(v.get(0, 0).unwrap().ch, ' ');
-        // v=12 -> 16 eighths: both rows full
+        // v=12 -> 24 eighths: all rows full
         let mut v = View::new(4, 4);
         draw_eq_slider(&mut v, 0, 0, 12, false);
         assert_eq!(v.get(0, 0).unwrap().ch, '█');
         assert_eq!(v.get(1, 0).unwrap().ch, '█');
+        assert_eq!(v.get(2, 0).unwrap().ch, '█');
     }
 
     #[test]
@@ -588,6 +642,12 @@ mod tests {
         draw_eq_slider(&mut v, 0, 0, -12, true);
         assert_eq!(v.get(0, 0).unwrap().ch, '░');
         assert_eq!(v.get(1, 0).unwrap().ch, '░');
+        for row in 0..3 {
+            let cell = v.get(row, 0).unwrap();
+            assert_eq!(cell.fg, 226);
+            assert_eq!(cell.bg, 0);
+            assert_eq!(cell.attrs & ATTR_REVERSE, 0);
+        }
     }
 
     #[test]

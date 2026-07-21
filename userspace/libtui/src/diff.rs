@@ -99,7 +99,10 @@ impl ScreenBuffer {
     /// For each cell that differs from `prev`:
     /// - Cursor move to (row+1, col+1) — skipped if the last emitted cell
     ///   was at (row, col-1) (adjacency optimization).
-    /// - SGR reset + new style if fg/bg/attrs changed.
+    /// - SGR reset + new style if the style differs from the last EMITTED
+    ///   style. The terminal's SGR state is whatever was last written to the
+    ///   stream — comparing against the prev *buffer* cell instead lets a
+    ///   colored cell's style bleed into following default-style cells.
     /// - The character itself.
     ///
     /// If the two buffers have different dimensions, all cells are emitted.
@@ -107,6 +110,7 @@ impl ScreenBuffer {
         let mut out: Vec<u8> = Vec::new();
         let same_dims = self.width == prev.width && self.height == prev.height;
         let mut last_pos: Option<(usize, usize)> = None;
+        let mut last_style: Option<(u8, u8, u8)> = None;
 
         for i in 0..self.cells.len() {
             let curr = self.cells[i];
@@ -125,13 +129,17 @@ impl ScreenBuffer {
                 out.extend_from_slice(&cursor_move(row + 1, col + 1));
             }
 
-            // SGR if style changed from prev.
-            if curr.fg != prev_cell.fg
-                || curr.bg != prev_cell.bg
-                || curr.attrs != prev_cell.attrs
-            {
-                out.extend_from_slice(RESET_SGR);
-                out.extend_from_slice(&sgr_for(&curr));
+            // SGR when style differs from the last emitted style (terminal
+            // state), or when nothing has been emitted yet this frame.
+            let style = (curr.fg, curr.bg, curr.attrs);
+            if last_style != Some(style) {
+                let sgr = sgr_for(&curr);
+                // sgr_for on a fully-default cell is already a bare reset.
+                if sgr.as_slice() != RESET_SGR {
+                    out.extend_from_slice(RESET_SGR);
+                }
+                out.extend_from_slice(&sgr);
+                last_style = Some(style);
             }
 
             push_char(&mut out, curr.ch);
@@ -278,6 +286,37 @@ mod tests {
         assert_eq!(buf.dirty_count(), 4);
         buf.clear_dirty();
         assert_eq!(buf.dirty_count(), 0);
+    }
+
+    #[test]
+    fn diff_no_style_bleed_on_full_redraw() {
+        // Dims-mismatch full redraw: colored cell followed by a default-style
+        // cell. The default cell MUST get a reset before its char, otherwise
+        // the colored style bleeds across the rest of the frame.
+        let prev = ScreenBuffer::new(1, 1); // dims mismatch → full redraw
+        let mut curr = ScreenBuffer::new(2, 1);
+        curr.set(0, 0, Cell::new('A').fg(COLOR_RED));
+        curr.set(0, 1, Cell::new('B')); // default style
+        let out = curr.diff_render(&prev);
+        let a = out.find('A').expect("A emitted");
+        let b = out.find('B').expect("B emitted");
+        let between = &out[a + 1..b];
+        assert!(
+            between.contains("\x1b[0m"),
+            "reset must be emitted between colored and default cell, got: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn diff_same_style_run_emits_sgr_once() {
+        // Two consecutive red cells: SGR emitted for the first only.
+        let prev = ScreenBuffer::new(2, 1);
+        let mut curr = ScreenBuffer::new(2, 1);
+        curr.set(0, 0, Cell::new('A').fg(COLOR_RED));
+        curr.set(0, 1, Cell::new('B').fg(COLOR_RED));
+        let out = curr.diff_render(&prev);
+        assert_eq!(out.matches("\x1b[31m").count(), 1);
     }
 
     #[test]

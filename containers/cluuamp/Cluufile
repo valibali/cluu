@@ -1,0 +1,7 @@
+FROM minimal
+PROFILE ipc vfs registry
+MOUNT /tmp inherit
+MOUNT /host inherit
+BUILD "cargo build --manifest-path userspace/cluuamp/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem --features runtime" target/x86_64-cluu-user/debug/cluuamp.elf /bin/cluuamp
+ENTRYPOINT /bin/cluuamp
+PRELOAD

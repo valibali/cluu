@@ -1,0 +1,27 @@
+[package]
+name = "cluu-cluuamp"
+version = "0.1.0"
+edition = "2021"
+description = "CLUUamp — Winamp-style TUI audio player"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[[bin]]
+name = "cluuamp"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[lib]
+name = "cluu_cluuamp"
+path = "src/lib.rs"
+
+[features]
+default = []
+runtime = ["dep:libcluu", "dep:nanomp3", "libtui/runtime"]
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"], optional = true }
+libtui = { package = "cluu-libtui", path = "../libtui" }
+nanomp3 = { version = "0.1.1", optional = true }
+microfft = { version = "0.6", default-features = false, features = ["size-512"] }
+libm = "0.2"

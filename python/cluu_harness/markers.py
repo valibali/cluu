@@ -563,6 +563,17 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             description="mp3player MP3 playback via virtio-snd",
         ),
         MarkerModeSpec(
+            name="l2_cluuamp",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+                "VIRTIO_SND_PCI",
+                "VIRTIO_SND_OK",
+                "CLUUAMP_STARTING",
+            ],
+            description="cluuamp TUI audio player startup via virtio-snd",
+        ),
+        MarkerModeSpec(
             name="l2_blk_basic",
             required_markers=[_TSC, _SHELL_READY, "blkprobe: ALL OK"],
             fail_marker="blkprobe: [FAIL]",

@@ -33,19 +33,25 @@ pub fn cursor_move(row: usize, col: usize) -> Vec<u8> {
     format!("\x1b[{};{}H", row, col).into_bytes()
 }
 
-/// Set SGR foreground color: `CSI fg m`.
+/// Set SGR foreground color. Values >= 100 use 256-color (`CSI 38;5;N m`);
+/// values 30-37 use basic SGR; 0 = default fg (`CSI 39 m`).
 pub fn sgr_fg(fg: u8) -> Vec<u8> {
     if fg == COLOR_DEFAULT {
         b"\x1b[39m".to_vec()
+    } else if fg >= crate::COLOR_256_THRESHOLD {
+        format!("\x1b[38;5;{}m", fg).into_bytes()
     } else {
         format!("\x1b[{}m", fg).into_bytes()
     }
 }
 
-/// Set SGR background color: `CSI bg m`. Converts fg code to bg (fg+10).
+/// Set SGR background color. Values >= 100 use 256-color (`CSI 48;5;N m`);
+/// values 30-37 use basic SGR (+10); 0 = default bg (`CSI 49 m`).
 pub fn sgr_bg(bg: u8) -> Vec<u8> {
     if bg == COLOR_DEFAULT {
         b"\x1b[49m".to_vec()
+    } else if bg >= crate::COLOR_256_THRESHOLD {
+        format!("\x1b[48;5;{}m", bg).into_bytes()
     } else {
         format!("\x1b[{}m", bg + 10).into_bytes()
     }
@@ -60,17 +66,26 @@ pub fn sgr_for(cell: &Cell) -> Vec<u8> {
     if cell.attrs & crate::ATTR_UNDERLINE != 0 {
         parts.extend_from_slice(b"4;");
     }
+    if cell.attrs & crate::ATTR_REVERSE != 0 {
+        parts.extend_from_slice(b"7;");
+    }
     if cell.fg != COLOR_DEFAULT {
-        parts.extend_from_slice(format!("{};", cell.fg).as_bytes());
+        if cell.fg >= crate::COLOR_256_THRESHOLD {
+            parts.extend_from_slice(format!("38;5;{};", cell.fg).as_bytes());
+        } else {
+            parts.extend_from_slice(format!("{};", cell.fg).as_bytes());
+        }
     }
     if cell.bg != COLOR_DEFAULT {
-        let bg_code = cell.bg + 10; // 30->40, 37->47
-        parts.extend_from_slice(format!("{};", bg_code).as_bytes());
+        if cell.bg >= crate::COLOR_256_THRESHOLD {
+            parts.extend_from_slice(format!("48;5;{};", cell.bg).as_bytes());
+        } else {
+            parts.extend_from_slice(format!("{};", cell.bg + 10).as_bytes());
+        }
     }
     if parts.is_empty() {
         return RESET_SGR.to_vec();
     }
-    // Replace trailing ';' with 'm'
     if parts.last() == Some(&b';') {
         parts.pop();
     }
@@ -124,16 +139,22 @@ impl Renderer {
         Renderer
     }
 
-    /// Write raw bytes to stdout.
+    /// Write raw bytes to stdout, looping until all are written.
+    /// Short writes happen because the VFS path chunks large buffers;
+    /// dropping the tail silently corrupts the terminal state.
     pub fn write(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
+        let mut sent = 0usize;
+        while sent < bytes.len() {
+            let n = libcluu::posix::_write(
+                1,
+                bytes[sent..].as_ptr() as *const core::ffi::c_void,
+                bytes.len() - sent,
+            );
+            if n <= 0 {
+                return;
+            }
+            sent += n as usize;
         }
-        let _ = libcluu::posix::_write(
-            1,
-            bytes.as_ptr() as *const core::ffi::c_void,
-            bytes.len(),
-        );
     }
 
     pub fn enter_alt_screen(&self) {

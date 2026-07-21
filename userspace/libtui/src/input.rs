@@ -54,14 +54,12 @@ pub fn decode<R: ByteReader>(r: &mut R) -> Option<KeyEvent> {
 }
 
 fn decode_escape<R: ByteReader>(r: &mut R) -> KeyEvent {
-    // 25ms timeout: if no follow-up byte, this is a bare Esc.
     let Some(next) = r.read_byte_with_timeout_ms(25) else {
         return KeyEvent::Esc;
     };
     if next != b'[' {
         return KeyEvent::Esc;
     }
-    // CSI sequence. Read until we see a final byte (0x40..=0x7E).
     let mut buf = [0u8; 8];
     let mut len = 0;
     while len < buf.len() {
@@ -121,7 +119,7 @@ impl StdinReader {
         if !self.pending.is_empty() {
             return true;
         }
-        let n = libcluu::posix::file::read_tty_timeout(&mut self.buf, ms);
+        let n = libcluu::posix::file::read_stdin_timeout(&mut self.buf, ms);
         if n > 0 {
             self.pending.extend_from_slice(&self.buf[..n as usize]);
             true

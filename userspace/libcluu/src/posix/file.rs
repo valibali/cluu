@@ -349,8 +349,6 @@ pub fn get_tty_endpoint() -> Option<usize> {
 }
 
 fn read_tty(_stdin_endpoint: usize, buffer: &mut [u8]) -> ssize_t {
-    // Use the TTY's actual endpoint (fd 1), not fd 0's endpoint which is
-    // the process's own receive endpoint and would deadlock on ipc_call.
     let tty_ep = match get_tty_endpoint() {
         Some(ep) => ep,
         None => {
@@ -363,18 +361,23 @@ fn read_tty(_stdin_endpoint: usize, buffer: &mut [u8]) -> ssize_t {
     msg.words[0] = buffer.len();
 
     let mut reply_buf = [0u8; 512];
-    match crate::syscall::ipc_call(tty_ep, msg.as_bytes(), &mut reply_buf) {
-        Ok(bytes) => {
-            if bytes <= core::mem::size_of::<Message>() {
-                return 0; // No data
+    loop {
+        match crate::syscall::ipc_call(tty_ep, msg.as_bytes(), &mut reply_buf) {
+            Ok(0) => {
+                let _ = crate::syscall::yield_cpu();
             }
-            let data_len = bytes - core::mem::size_of::<Message>();
-            let to_copy = data_len.min(buffer.len());
-            buffer[..to_copy]
-                .copy_from_slice(&reply_buf[core::mem::size_of::<Message>()..][..to_copy]);
-            to_copy as ssize_t
+            Ok(bytes) => {
+                if bytes <= core::mem::size_of::<Message>() {
+                    return 0;
+                }
+                let data_len = bytes - core::mem::size_of::<Message>();
+                let to_copy = data_len.min(buffer.len());
+                buffer[..to_copy]
+                    .copy_from_slice(&reply_buf[core::mem::size_of::<Message>()..][..to_copy]);
+                return to_copy as ssize_t;
+            }
+            Err(e) => return crate::errno::return_error(e),
         }
-        Err(e) => crate::errno::return_error(e),
     }
 }
 
@@ -386,11 +389,16 @@ pub fn read_tty_timeout(buffer: &mut [u8], timeout_ms: usize) -> ssize_t {
             return -1;
         }
     };
-    let mut msg = Message::new(TTY_READ_REQUEST_LABEL, [0; 6], 1);
-    msg.words[0] = buffer.len();
     let mut reply_buf = [0u8; 512];
-    match crate::syscall::ipc_call_timeout(tty_ep, msg.as_bytes(), &mut reply_buf, timeout_ms) {
-        Ok(0) => 0,
+    let msg = Message::new(TTY_READ_REQUEST_LABEL, [0; 6], 1);
+    let mut msg_with_len = msg;
+    msg_with_len.words[0] = buffer.len();
+    match crate::syscall::ipc_call_timeout(
+        tty_ep,
+        msg_with_len.as_bytes(),
+        &mut reply_buf,
+        timeout_ms,
+    ) {
         Ok(bytes) => {
             if bytes <= core::mem::size_of::<Message>() {
                 return 0;
@@ -401,7 +409,63 @@ pub fn read_tty_timeout(buffer: &mut [u8], timeout_ms: usize) -> ssize_t {
                 .copy_from_slice(&reply_buf[core::mem::size_of::<Message>()..][..to_copy]);
             to_copy as ssize_t
         }
+        Err(crate::Error::Timeout) => 0,
         Err(e) => crate::errno::return_error(e),
+    }
+}
+
+pub fn read_stdin_timeout(buffer: &mut [u8], timeout_ms: usize) -> ssize_t {
+    let table = FD_TABLE.lock();
+    let entry = match table.get(0) {
+        Some(e) => e.clone(),
+        None => {
+            set_errno(EBADF);
+            return -1;
+        }
+    };
+    drop(table);
+
+    if !entry.caps.contains(FdCaps::READ) {
+        set_errno(EBADF);
+        return -1;
+    }
+
+    if entry.is_tty() && entry.remote_fd.is_none() {
+        read_tty_timeout(buffer, timeout_ms)
+    } else if let Some(remote_fd) = entry.remote_fd {
+        let base = match ensure_grant_buffer() {
+            Some(base) => base,
+            None => return -1,
+        };
+        let vfs_client = crate::fs::client::VfsClient::new(entry.endpoint, entry.client_id);
+        let vfs_file = crate::fs::client::VfsFile {
+            fd: remote_fd,
+            size: 0,
+        };
+        let grant = match vfs_client.read_grant_timeout(
+            vfs_file,
+            0,
+            buffer.len(),
+            crate::boot::space_token(),
+            base,
+            timeout_ms,
+        ) {
+            Ok(grant) => grant,
+            Err(crate::Error::Timeout) => return 0,
+            Err(e) => return return_error(e) as ssize_t,
+        };
+        if grant.len == 0 {
+            return 0;
+        }
+        let src = unsafe {
+            slice::from_raw_parts((grant.base + grant.offset) as *const u8, grant.len)
+        };
+        let to_copy = src.len().min(buffer.len());
+        buffer[..to_copy].copy_from_slice(&src[..to_copy]);
+        to_copy as ssize_t
+    } else {
+        set_errno(EBADF);
+        -1
     }
 }
 
@@ -498,6 +562,12 @@ fn read_vfs(fd: c_int, entry: &FdEntry, buffer: &mut [u8]) -> ssize_t {
     total as ssize_t
 }
 
+/// Max bytes per VFS write IPC. Bounded by kernel IPC_MESSAGE_MAX (8192,
+/// kernel/src/ipc/endpoint.rs) minus the Message header, AND by cluuterm's
+/// PTS_WRITE recv buffer (4096, cluuterm/src/tty_backend.rs) minus the 56-byte
+/// Message — the tighter cap. 3900 leaves headroom under both.
+const WRITE_CHUNK_MAX: usize = 3900;
+
 fn write_vfs(fd: c_int, entry: &FdEntry, buffer: &[u8]) -> ssize_t {
     let remote_fd = match entry.remote_fd {
         Some(fd) => fd,
@@ -513,11 +583,27 @@ fn write_vfs(fd: c_int, entry: &FdEntry, buffer: &[u8]) -> ssize_t {
         size: 0,
     };
 
-    let offset = entry.position as usize;
-    let written = match vfs_client.write(vfs_file, offset, buffer) {
-        Ok(bytes) => bytes,
-        Err(e) => return return_error(e) as ssize_t,
-    };
+    let mut offset = entry.position as usize;
+    let mut written = 0usize;
+    while written < buffer.len() {
+        let chunk_len = (buffer.len() - written).min(WRITE_CHUNK_MAX);
+        let chunk = &buffer[written..written + chunk_len];
+        match vfs_client.write(vfs_file, offset, chunk) {
+            Ok(bytes) => {
+                written += bytes;
+                offset += bytes;
+                if bytes < chunk_len {
+                    break;
+                }
+            }
+            Err(e) => {
+                if written > 0 {
+                    break;
+                }
+                return return_error(e) as ssize_t;
+            }
+        }
+    }
 
     if written > 0 {
         let mut table = FD_TABLE.lock();

@@ -14,8 +14,10 @@ const DEFAULT_FALLOFF: i32 = 12;
 const DEFAULT_PEAK_FALLOFF: f32 = 1.1;
 const PEAK_INITIAL_VEL: f32 = 3.0;
 // Full-scale sine through the Hann window yields peak-bin magnitude ≈ N/4 = 128;
-// ×2.0 → ≈255 = top of the 0–255 sadata scale.
 const SPEC_SCALE: f32 = 2.0;
+const DB_FLOOR: f32 = -60.0;
+const DB_REFERENCE: f32 = 128.0;
+const DB_EPSILON: f32 = 1.0e-12;
 
 pub struct SpectrumAnalyzer {
     window: [f32; FFT_SIZE],
@@ -24,10 +26,10 @@ pub struct SpectrumAnalyzer {
     bar_values: [u8; NUM_BARS],
     bar_state: [i32; NUM_BARS],
     peak_state: [i32; NUM_BARS],
+    peak_display: [u8; NUM_BARS],
     peak_vel: [f32; NUM_BARS],
     falloff: i32,
     peak_falloff: f32,
-    has_new_data: bool,
 }
 
 impl SpectrumAnalyzer {
@@ -44,10 +46,10 @@ impl SpectrumAnalyzer {
             bar_values: [0u8; NUM_BARS],
             bar_state: [0i32; NUM_BARS],
             peak_state: [0i32; NUM_BARS],
+            peak_display: [0u8; NUM_BARS],
             peak_vel: [PEAK_INITIAL_VEL; NUM_BARS],
             falloff: DEFAULT_FALLOFF,
             peak_falloff: DEFAULT_PEAK_FALLOFF,
-            has_new_data: false,
         }
     }
 
@@ -55,8 +57,9 @@ impl SpectrumAnalyzer {
         if pcm_mono.len() < FFT_SIZE {
             return;
         }
+        let mean = pcm_mono[..FFT_SIZE].iter().sum::<f32>() / FFT_SIZE as f32;
         for i in 0..FFT_SIZE {
-            self.fft_buffer[i] = Complex32::new(pcm_mono[i] * self.window[i], 0.0);
+            self.fft_buffer[i] = Complex32::new((pcm_mono[i] - mean) * self.window[i], 0.0);
         }
         let spectrum = cfft_512(&mut self.fft_buffer);
         for i in 0..256 {
@@ -65,7 +68,6 @@ impl SpectrumAnalyzer {
             self.magnitudes[i] = libm::sqrtf(re * re + im * im) * SPEC_SCALE;
         }
         self.compute_bands();
-        self.has_new_data = true;
     }
 
     fn compute_bands(&mut self) {
@@ -74,7 +76,7 @@ impl SpectrumAnalyzer {
             let bin_f = (libm::powf(2.0, x as f32 / 12.0) - 1.0) * bla + 1.0;
             let next = (libm::powf(2.0, (x + 1) as f32 / 12.0) - 1.0) * bla + 1.0;
             let val = self.hermite_sample(bin_f, next);
-            self.bar_values[x] = if val > 255.0 { 255 } else { val as u8 };
+            self.bar_values[x] = perceptual_level(val);
         }
     }
 
@@ -118,13 +120,6 @@ impl SpectrumAnalyzer {
     }
 
     pub fn tick(&mut self) {
-        let has_data = self.has_new_data;
-        self.has_new_data = false;
-        if !has_data {
-            for v in &mut self.bar_values {
-                *v = 0;
-            }
-        }
         for x in 0..NUM_BARS {
             let raw = self.bar_values[x];
             let t = x & !3;
@@ -137,15 +132,10 @@ impl SpectrumAnalyzer {
             } else {
                 raw
             };
-            // sadata values are 0-255; pixel height is value/16 -> 0-15
-            // (Winamp draw_sa convention). Shift, don't clamp.
             let v = (v >> 4).min(MAX_LEVEL);
             let v16 = (v as i32) << 4;
             let new_v = if v16 < self.bar_state[x] {
-                self.bar_state[x] -= self.falloff;
-                if self.bar_state[x] < 0 {
-                    self.bar_state[x] = 0;
-                }
+                self.bar_state[x] = (self.bar_state[x] - self.falloff).max(0);
                 (self.bar_state[x] >> 4) as u8
             } else {
                 self.bar_state[x] = v16;
@@ -156,6 +146,7 @@ impl SpectrumAnalyzer {
                 self.peak_state[x] = v256;
                 self.peak_vel[x] = PEAK_INITIAL_VEL;
             }
+            self.peak_display[x] = (self.peak_state[x] / 256) as u8;
             self.peak_state[x] -= self.peak_vel[x] as i32;
             self.peak_vel[x] *= self.peak_falloff;
             if self.peak_state[x] < 0 {
@@ -175,12 +166,21 @@ impl SpectrumAnalyzer {
         if x >= NUM_BARS {
             return 0;
         }
-        (self.peak_state[x] / 256) as u8
+        self.peak_display[x]
     }
 
     pub const fn num_bars() -> usize {
         NUM_BARS
     }
+}
+
+fn perceptual_level(magnitude: f32) -> u8 {
+    if magnitude <= DB_EPSILON {
+        return 0;
+    }
+    let db = 20.0 * libm::log10f(magnitude / DB_REFERENCE);
+    let normalized = ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0);
+    (normalized * 255.0) as u8
 }
 
 #[inline]
@@ -214,11 +214,19 @@ mod tests {
         sa.process_pcm(&pcm);
         sa.tick();
         let excited = (12..16).map(|x| sa.bar_height(x)).max().unwrap_or(0);
-        assert!(excited >= 2, "440 Hz band should be visible, got {}", excited);
+        assert!(
+            excited >= 2,
+            "440 Hz band should be visible, got {}",
+            excited
+        );
         let far: u16 = (40..75).map(|x| sa.bar_height(x) as u16).sum();
         assert!(far <= 8, "distant bars should be near zero, got {}", far);
         let pegged = (0..75).filter(|&x| sa.bar_height(x) == 15).count();
-        assert!(pegged <= 8, "only a narrow group may peg at 15, got {}", pegged);
+        assert!(
+            pegged <= 8,
+            "only a narrow group may peg at 15, got {}",
+            pegged
+        );
     }
 
     #[test]
@@ -231,6 +239,7 @@ mod tests {
         let mut sa = SpectrumAnalyzer::new();
         let silence = [0.0f32; FFT_SIZE];
         sa.process_pcm(&silence);
+        sa.tick();
         for x in 0..NUM_BARS {
             assert_eq!(sa.bar_height(x), 0, "bar {} should be 0 for silence", x);
         }
@@ -241,6 +250,7 @@ mod tests {
         let mut sa = SpectrumAnalyzer::new();
         let dc = [0.5f32; FFT_SIZE];
         sa.process_pcm(&dc);
+        sa.tick();
         for x in 0..NUM_BARS {
             assert_eq!(sa.bar_height(x), 0, "bar {} should be 0 for DC offset", x);
         }
@@ -263,6 +273,28 @@ mod tests {
     }
 
     #[test]
+    fn sine_amplitudes_preserve_visible_order_after_tick() {
+        let mut levels = [0u8; 4];
+        for (index, amplitude) in [1.0f32, 0.1, 0.01, 0.0].iter().enumerate() {
+            let mut sa = SpectrumAnalyzer::new();
+            let mut pcm = [0.0f32; FFT_SIZE];
+            for i in 0..FFT_SIZE {
+                let t = i as f32 / 44100.0;
+                pcm[i] = amplitude * libm::sinf(2.0 * core::f32::consts::PI * 440.0 * t);
+            }
+            sa.process_pcm(&pcm);
+            sa.tick();
+            levels[index] = (12..16).map(|x| sa.bar_height(x)).max().unwrap_or(0);
+        }
+
+        assert!(
+            levels[0] > levels[1] && levels[1] > levels[2] && levels[2] > levels[3],
+            "expected descending levels, got {:?}",
+            levels
+        );
+    }
+
+    #[test]
     fn high_frequency_sine_excites_upper_bars() {
         let mut sa = SpectrumAnalyzer::new();
         let freq = 8000.0f32;
@@ -273,6 +305,7 @@ mod tests {
             pcm[i] = libm::sinf(2.0 * core::f32::consts::PI * freq * t);
         }
         sa.process_pcm(&pcm);
+        sa.tick();
         let low_energy: u16 = (0..10).map(|x| sa.bar_height(x) as u16).sum();
         let high_energy: u16 = (60..75).map(|x| sa.bar_height(x) as u16).sum();
         assert!(
@@ -284,34 +317,92 @@ mod tests {
     }
 
     #[test]
-    fn gravity_decreases_bar_height_over_ticks() {
+    fn unequal_tones_excite_their_regions_without_broad_saturation() {
         let mut sa = SpectrumAnalyzer::new();
-        let freq = 440.0f32;
-        let sample_rate = 44100.0f32;
         let mut pcm = [0.0f32; FFT_SIZE];
         for i in 0..FFT_SIZE {
-            let t = i as f32 / sample_rate;
-            pcm[i] = libm::sinf(2.0 * core::f32::consts::PI * freq * t);
+            let t = i as f32 / 44100.0;
+            pcm[i] = libm::sinf(2.0 * core::f32::consts::PI * 440.0 * t)
+                + 0.1 * libm::sinf(2.0 * core::f32::consts::PI * 8000.0 * t);
         }
         sa.process_pcm(&pcm);
         sa.tick();
-        let heights_after_tick1: Vec<u8> = (0..NUM_BARS).map(|x| sa.bar_height(x)).collect();
-        for _ in 0..50 {
-            sa.tick();
-        }
-        let heights_after_tick50: Vec<u8> = (0..NUM_BARS).map(|x| sa.bar_height(x)).collect();
-        let sum1: u16 = heights_after_tick1.iter().map(|&h| h as u16).sum();
-        let sum50: u16 = heights_after_tick50.iter().map(|&h| h as u16).sum();
+
+        let low = (12..16).map(|x| sa.bar_height(x)).max().unwrap_or(0);
+        let high = (56..60).map(|x| sa.bar_height(x)).max().unwrap_or(0);
+        let pegged = (0..NUM_BARS)
+            .filter(|&x| sa.bar_height(x) == MAX_LEVEL)
+            .count();
         assert!(
-            sum50 < sum1,
-            "bars should decrease after 50 ticks without new PCM. tick1={}, tick50={}",
-            sum1,
-            sum50
+            low > high && high > 0,
+            "expected unequal regions: low={low}, high={high}"
         );
+        assert!(pegged <= 8, "unexpected broad saturation: {pegged} bars");
     }
 
     #[test]
-    fn bars_fall_to_zero_without_input() {
+    fn retains_latest_target_when_tick_has_no_new_frame() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.bar_values[..4].fill(160);
+
+        sa.tick();
+        sa.tick();
+
+        assert_eq!(sa.bar_state[0], 160);
+    }
+
+    #[test]
+    fn attack_reaches_target_immediately() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.bar_state[0] = 32;
+        sa.bar_values[..4].fill(160);
+
+        sa.tick();
+
+        assert_eq!(sa.bar_state[0], 160);
+    }
+
+    #[test]
+    fn decay_crosses_below_retained_lower_target() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.bar_state[0] = 160;
+        sa.bar_values[..4].fill(128);
+
+        sa.tick();
+        sa.tick();
+        sa.tick();
+
+        assert_eq!(sa.bar_state[0], 124);
+    }
+
+    #[test]
+    fn peak_height_is_snapped_bar_before_peak_decay() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.bar_values[..4].fill(160);
+
+        sa.tick();
+
+        assert_eq!(sa.peak_height(0), 10);
+    }
+
+    #[test]
+    fn peak_velocity_uses_initial_velocity_and_multiplier() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.peak_state[0] = 10 * 256;
+        sa.peak_vel[0] = PEAK_INITIAL_VEL;
+
+        sa.tick();
+        let first_drop = 10 * 256 - sa.peak_state[0];
+        sa.tick();
+        let second_drop = 10 * 256 - first_drop - sa.peak_state[0];
+
+        assert_eq!(first_drop, 3);
+        assert_eq!(second_drop, 3);
+        assert!((sa.peak_vel[0] - 3.63).abs() < 0.001);
+    }
+
+    #[test]
+    fn processed_silence_sets_zero_target_and_decays_bars() {
         let mut sa = SpectrumAnalyzer::new();
         let freq = 440.0f32;
         let sample_rate = 44100.0f32;
@@ -322,11 +413,13 @@ mod tests {
         }
         sa.process_pcm(&pcm);
         sa.tick();
-        for _ in 0..500 {
-            sa.tick();
-        }
+        let prior = sa.bar_state;
+        sa.process_pcm(&[0.0; FFT_SIZE]);
+        sa.tick();
+
         for x in 0..NUM_BARS {
-            assert_eq!(sa.bar_height(x), 0, "bar {} should fall to 0 without input", x);
+            assert_eq!(sa.bar_values[x], 0);
+            assert_eq!(sa.bar_state[x], (prior[x] - DEFAULT_FALLOFF).max(0));
         }
     }
 
@@ -345,6 +438,7 @@ mod tests {
         let peak_initial: Vec<u8> = (0..NUM_BARS).map(|x| sa.peak_height(x)).collect();
         let max_peak_initial = peak_initial.iter().max().copied().unwrap_or(0);
         assert!(max_peak_initial > 0, "peak should be nonzero after input");
+        sa.process_pcm(&[0.0; FFT_SIZE]);
         for _ in 0..200 {
             sa.tick();
         }
@@ -385,18 +479,30 @@ mod tests {
     #[test]
     fn hermite_at_t_zero_returns_p1() {
         let result = hermite(0.0, 1.0, 5.0, 9.0, 13.0);
-        assert!((result - 5.0).abs() < 0.001, "hermite(0) should return p1=5.0, got {}", result);
+        assert!(
+            (result - 5.0).abs() < 0.001,
+            "hermite(0) should return p1=5.0, got {}",
+            result
+        );
     }
 
     #[test]
     fn hermite_at_t_one_returns_p2() {
         let result = hermite(1.0, 1.0, 5.0, 9.0, 13.0);
-        assert!((result - 9.0).abs() < 0.001, "hermite(1) should return p2=9.0, got {}", result);
+        assert!(
+            (result - 9.0).abs() < 0.001,
+            "hermite(1) should return p2=9.0, got {}",
+            result
+        );
     }
 
     #[test]
     fn hermite_is_symmetric_for_linear_data() {
         let result = hermite(0.5, 0.0, 1.0, 2.0, 3.0);
-        assert!((result - 1.5).abs() < 0.001, "hermite(0.5) on linear should be 1.5, got {}", result);
+        assert!(
+            (result - 1.5).abs() < 0.001,
+            "hermite(0.5) on linear should be 1.5, got {}",
+            result
+        );
     }
 }
