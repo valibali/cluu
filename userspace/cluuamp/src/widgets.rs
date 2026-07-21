@@ -201,10 +201,10 @@ pub fn eighth_block(filled: usize) -> char {
     EIGHTH_BLOCKS[filled.min(8)]
 }
 
-/// One spectrum column of the 24x3 vis box (spec §5). `level` and `peak`
-/// are 0-15; 3 rows = 24 vertical eighths, drawn bottom-up. Row colors
-/// bottom->top come from viscolor levels 2 / 7 / 12 (green/yellow/red).
-pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8, peak: u8) {
+/// One spectrum column of the 24x3 vis box (spec §5). `level` is 0-15;
+/// 3 rows = 24 vertical eighths, drawn bottom-up. Row colors
+/// bottom->top come from viscolor levels 2 / 7 / 12 (blue/orange/red).
+pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8) {
     let h = (level.min(15) as usize) * 24 / 15;
     for r in 0..3usize {
         let fill = (h as i32 - (2 - r as i32) * 8).clamp(0, 8) as usize;
@@ -215,14 +215,6 @@ pub fn draw_spectrum_column(view: &mut View, top: usize, col: usize, level: u8, 
                 col,
                 Cell::new(eighth_block(fill)).fg(viscolor::bar_color(color_level)),
             );
-        }
-    }
-    let pk = (peak.min(15) as usize) * 24 / 15;
-    if pk > 0 {
-        let pr = 2usize.saturating_sub(pk / 8);
-        let bar_fill_at_pr = (h as i32 - (2 - pr as i32) * 8).clamp(0, 8);
-        if bar_fill_at_pr < 8 {
-            view.set(top + pr, col, Cell::new('▀').fg(viscolor::PEAK_COLOR));
         }
     }
 }
@@ -573,11 +565,10 @@ mod tests {
     #[test]
     fn spectrum_column_level_15_fills_all_three_rows() {
         let mut v = View::new(4, 4);
-        draw_spectrum_column(&mut v, 0, 0, 15, 0);
-        assert_eq!(v.get(0, 0).unwrap().ch, '█'); // top
+        draw_spectrum_column(&mut v, 0, 0, 15);
+        assert_eq!(v.get(0, 0).unwrap().ch, '█');
         assert_eq!(v.get(1, 0).unwrap().ch, '█');
-        assert_eq!(v.get(2, 0).unwrap().ch, '█'); // bottom
-                                                  // color zones bottom->top: green(2), yellow-ish(7), red-ish(12)
+        assert_eq!(v.get(2, 0).unwrap().ch, '█');
         assert_eq!(v.get(2, 0).unwrap().fg, crate::viscolor::bar_color(2));
         assert_eq!(v.get(1, 0).unwrap().fg, crate::viscolor::bar_color(7));
         assert_eq!(v.get(0, 0).unwrap().fg, crate::viscolor::bar_color(12));
@@ -586,7 +577,7 @@ mod tests {
     #[test]
     fn spectrum_column_level_0_draws_nothing() {
         let mut v = View::new(4, 4);
-        draw_spectrum_column(&mut v, 0, 0, 0, 0);
+        draw_spectrum_column(&mut v, 0, 0, 0);
         for r in 0..3 {
             assert_eq!(v.get(r, 0).unwrap().ch, ' ');
         }
@@ -594,30 +585,11 @@ mod tests {
 
     #[test]
     fn spectrum_column_partial_fill_bottom_up() {
-        // level 8 -> h = 8*24/15 = 12 eighths: bottom row full (8),
-        // middle row 4 eighths, top row empty.
         let mut v = View::new(4, 4);
-        draw_spectrum_column(&mut v, 0, 0, 8, 0);
+        draw_spectrum_column(&mut v, 0, 0, 8);
         assert_eq!(v.get(2, 0).unwrap().ch, '█');
         assert_eq!(v.get(1, 0).unwrap().ch, '▄');
         assert_eq!(v.get(0, 0).unwrap().ch, ' ');
-    }
-
-    #[test]
-    fn spectrum_peak_marker_on_top_of_empty_bar() {
-        // bar 0, peak 15 -> '▀' fg 255 in top row
-        let mut v = View::new(4, 4);
-        draw_spectrum_column(&mut v, 0, 0, 0, 15);
-        assert_eq!(v.get(0, 0).unwrap().ch, '▀');
-        assert_eq!(v.get(0, 0).unwrap().fg, crate::viscolor::PEAK_COLOR);
-    }
-
-    #[test]
-    fn spectrum_peak_not_drawn_over_full_cell() {
-        // level 15 fills all cells; peak 15 must NOT overwrite the full '█'.
-        let mut v = View::new(4, 4);
-        draw_spectrum_column(&mut v, 0, 0, 15, 15);
-        assert_eq!(v.get(0, 0).unwrap().ch, '█');
     }
 
     #[test]

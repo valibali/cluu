@@ -607,12 +607,12 @@ impl AudioEngine {
             &mut self.eq_scratch,
             self.eq_enabled,
         );
+        let metadata = tap_metadata(&self.eq_scratch[..to_copy], to_copy, self.channels);
         apply_period(
             &self.eq_scratch[..to_copy],
             scratch,
             Gain::new(self.volume, self.balance, self.channels),
         );
-        let metadata = tap_metadata(scratch, to_copy, self.channels);
         let handle = match self.audio.as_mut() {
             Some(audio) => audio.submit_grant(slot, PERIOD_BYTES)?,
             None => return Err(Error::InvalidState),

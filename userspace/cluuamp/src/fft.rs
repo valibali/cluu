@@ -1,6 +1,6 @@
 //! Winamp-faithful spectrum analyzer: 512-point Hann-windowed FFT,
-//! semitone band mapping (75 bars), Hermite interpolation, gravity +
-//! exponential peak dynamics. Ported from Winamp C++ `classic_vis.cpp`
+//! semitone band mapping (75 bars), Hermite interpolation, gravity
+//! falloff dynamics. Ported from Winamp C++ `classic_vis.cpp`
 //! and `draw_sa.cpp`.
 
 use microfft::complex::cfft_512;
@@ -11,9 +11,6 @@ const NUM_BARS: usize = 75;
 const MAX_LEVEL: u8 = 15;
 
 const DEFAULT_FALLOFF: i32 = 12;
-const DEFAULT_PEAK_FALLOFF: f32 = 1.1;
-const PEAK_INITIAL_VEL: f32 = 3.0;
-// Full-scale sine through the Hann window yields peak-bin magnitude ≈ N/4 = 128;
 const SPEC_SCALE: f32 = 2.0;
 const DB_FLOOR: f32 = -60.0;
 const DB_REFERENCE: f32 = 128.0;
@@ -25,11 +22,7 @@ pub struct SpectrumAnalyzer {
     magnitudes: [f32; 256],
     bar_values: [u8; NUM_BARS],
     bar_state: [i32; NUM_BARS],
-    peak_state: [i32; NUM_BARS],
-    peak_display: [u8; NUM_BARS],
-    peak_vel: [f32; NUM_BARS],
     falloff: i32,
-    peak_falloff: f32,
 }
 
 impl SpectrumAnalyzer {
@@ -45,11 +38,7 @@ impl SpectrumAnalyzer {
             magnitudes: [0f32; 256],
             bar_values: [0u8; NUM_BARS],
             bar_state: [0i32; NUM_BARS],
-            peak_state: [0i32; NUM_BARS],
-            peak_display: [0u8; NUM_BARS],
-            peak_vel: [PEAK_INITIAL_VEL; NUM_BARS],
             falloff: DEFAULT_FALLOFF,
-            peak_falloff: DEFAULT_PEAK_FALLOFF,
         }
     }
 
@@ -134,23 +123,10 @@ impl SpectrumAnalyzer {
             };
             let v = (v >> 4).min(MAX_LEVEL);
             let v16 = (v as i32) << 4;
-            let new_v = if v16 < self.bar_state[x] {
+            if v16 < self.bar_state[x] {
                 self.bar_state[x] = (self.bar_state[x] - self.falloff).max(0);
-                (self.bar_state[x] >> 4) as u8
             } else {
                 self.bar_state[x] = v16;
-                v
-            };
-            let v256 = (new_v as i32) * 256;
-            if self.peak_state[x] <= v256 {
-                self.peak_state[x] = v256;
-                self.peak_vel[x] = PEAK_INITIAL_VEL;
-            }
-            self.peak_display[x] = (self.peak_state[x] / 256) as u8;
-            self.peak_state[x] -= self.peak_vel[x] as i32;
-            self.peak_vel[x] *= self.peak_falloff;
-            if self.peak_state[x] < 0 {
-                self.peak_state[x] = 0;
             }
         }
     }
@@ -160,13 +136,6 @@ impl SpectrumAnalyzer {
             return 0;
         }
         (self.bar_state[x] >> 4) as u8
-    }
-
-    pub fn peak_height(&self, x: usize) -> u8 {
-        if x >= NUM_BARS {
-            return 0;
-        }
-        self.peak_display[x]
     }
 
     pub const fn num_bars() -> usize {
@@ -376,32 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn peak_height_is_snapped_bar_before_peak_decay() {
-        let mut sa = SpectrumAnalyzer::new();
-        sa.bar_values[..4].fill(160);
-
-        sa.tick();
-
-        assert_eq!(sa.peak_height(0), 10);
-    }
-
-    #[test]
-    fn peak_velocity_uses_initial_velocity_and_multiplier() {
-        let mut sa = SpectrumAnalyzer::new();
-        sa.peak_state[0] = 10 * 256;
-        sa.peak_vel[0] = PEAK_INITIAL_VEL;
-
-        sa.tick();
-        let first_drop = 10 * 256 - sa.peak_state[0];
-        sa.tick();
-        let second_drop = 10 * 256 - first_drop - sa.peak_state[0];
-
-        assert_eq!(first_drop, 3);
-        assert_eq!(second_drop, 3);
-        assert!((sa.peak_vel[0] - 3.63).abs() < 0.001);
-    }
-
-    #[test]
     fn processed_silence_sets_zero_target_and_decays_bars() {
         let mut sa = SpectrumAnalyzer::new();
         let freq = 440.0f32;
@@ -424,46 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn peak_decays_exponentially() {
-        let mut sa = SpectrumAnalyzer::new();
-        let freq = 1000.0f32;
-        let sample_rate = 44100.0f32;
-        let mut pcm = [0.0f32; FFT_SIZE];
-        for i in 0..FFT_SIZE {
-            let t = i as f32 / sample_rate;
-            pcm[i] = libm::sinf(2.0 * core::f32::consts::PI * freq * t);
-        }
-        sa.process_pcm(&pcm);
-        sa.tick();
-        let peak_initial: Vec<u8> = (0..NUM_BARS).map(|x| sa.peak_height(x)).collect();
-        let max_peak_initial = peak_initial.iter().max().copied().unwrap_or(0);
-        assert!(max_peak_initial > 0, "peak should be nonzero after input");
-        sa.process_pcm(&[0.0; FFT_SIZE]);
-        for _ in 0..200 {
-            sa.tick();
-        }
-        let peak_late: Vec<u8> = (0..NUM_BARS).map(|x| sa.peak_height(x)).collect();
-        let max_peak_late = peak_late.iter().max().copied().unwrap_or(0);
-        assert!(
-            max_peak_late < max_peak_initial,
-            "peak should decay over time. initial={}, late={}",
-            max_peak_initial,
-            max_peak_late
-        );
-    }
-
-    #[test]
     fn bar_height_out_of_bounds_returns_zero() {
         let sa = SpectrumAnalyzer::new();
         assert_eq!(sa.bar_height(75), 0);
         assert_eq!(sa.bar_height(100), 0);
-    }
-
-    #[test]
-    fn peak_height_out_of_bounds_returns_zero() {
-        let sa = SpectrumAnalyzer::new();
-        assert_eq!(sa.peak_height(75), 0);
-        assert_eq!(sa.peak_height(999), 0);
     }
 
     #[test]

@@ -238,7 +238,6 @@ fn draw_visualizer(view: &mut View, model: &CluuampModel) {
                     layout.vis_top,
                     layout.vis_left + j,
                     model.fft.bar_height(bar_idx),
-                    model.fft.peak_height(bar_idx),
                 );
             }
         }

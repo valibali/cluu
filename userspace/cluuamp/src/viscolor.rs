@@ -1,33 +1,30 @@
 //! Winamp classic viscolor palette mapped to xterm-256-color indices.
 //!
-//! 16 bar levels (0-15) + peak color. Gradient: green (low) -> yellow -> red (high).
-//! Peak rendered in white.
+//! 16 bar levels (0-15). Gradient: blue (low) -> orange (mid) -> red (high).
+//! Matches the Winamp default viscolor.txt red-orange-green palette but
+//! with blue replacing green for the low band.
 
-/// 16-entry palette for bar levels 0-15. Values are xterm 256-color indices.
 pub const BAR_COLORS: [u8; 16] = [
-    232, // 0  — near black
-    22,  // 1  — dark green
-    28,  // 2  — green
-    34,  // 3  — medium green
-    40,  // 4  — bright green
-    46,  // 5  — lime
-    70,  // 6  — yellow-green
-    76,  // 7  — yellow
-    190, // 8  — light yellow
-    220, // 9  — gold
-    214, // 10 — orange
-    208, // 11 — dark orange
-    202, // 12 — red-orange
-    196, // 13 — red
-    160, // 14 — bright red
-    124, // 15 — dark red
+    17,  // 0  — dark blue
+    18,  // 1  — blue
+    20,  // 2  — medium blue
+    21,  // 3  — bright blue
+    27,  // 4  — dodger blue
+    33,  // 5  — light blue
+    130, // 6  — dark orange
+    166, // 7  — orange
+    172, // 8  — medium orange
+    208, // 9  — bright orange
+    214, // 10 — light orange
+    202, // 11 — red-orange
+    196, // 12 — red
+    203, // 13 — bright red
+    160, // 14 — dark red
+    52,  // 15 — very dark red
 ];
 
-/// Peak marker color (white).
-pub const PEAK_COLOR: u8 = 255;
-
 /// Oscilloscope trace colors — 6 shades from center.
-pub const SCOPE_COLORS: [u8; 6] = [46, 76, 190, 220, 208, 196];
+pub const SCOPE_COLORS: [u8; 6] = [33, 75, 117, 209, 203, 196];
 
 /// Bar color for a given level (0-15). Clamps to range.
 pub fn bar_color(level: u8) -> u8 {
@@ -61,23 +58,26 @@ mod tests {
     }
 
     #[test]
-    fn peak_color_is_white() {
-        assert_eq!(PEAK_COLOR, 255);
-    }
-
-    #[test]
     fn scope_colors_has_6_entries() {
         assert_eq!(SCOPE_COLORS.len(), 6);
     }
 
     #[test]
-    fn gradient_progresses_green_to_red() {
-        let green = bar_color(1);
-        let mid = bar_color(8);
-        let red = bar_color(14);
-        assert_ne!(green, mid, "low and mid colors should differ");
-        assert_ne!(mid, red, "mid and high colors should differ");
-        assert_ne!(green, red, "low and high colors should differ");
+    fn bottom_row_is_blue() {
+        let bottom = bar_color(2);
+        assert!(bottom >= 17 && bottom <= 39, "bottom should be blue, got {}", bottom);
+    }
+
+    #[test]
+    fn middle_row_is_orange() {
+        let middle = bar_color(7);
+        assert!(middle >= 130 && middle <= 220, "middle should be orange, got {}", middle);
+    }
+
+    #[test]
+    fn top_row_is_red() {
+        let top = bar_color(12);
+        assert!(top >= 52 && top <= 203, "top should be red, got {}", top);
     }
 
     #[test]
@@ -85,7 +85,6 @@ mod tests {
         for &c in BAR_COLORS.iter() {
             assert!(c <= 255, "color {} > 255", c);
         }
-        assert!(PEAK_COLOR <= 255);
         for &c in SCOPE_COLORS.iter() {
             assert!(c <= 255, "scope color {} > 255", c);
         }
