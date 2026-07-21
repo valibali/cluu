@@ -342,9 +342,11 @@ impl ProcfsBackend {
     }
 
     async fn proc_info_async(&self, pid: i32, caller_tid: usize) -> Result<ProcInfo> {
+        // pid MUST NOT go in words[0]: IpcCallFuture overwrites words[0]
+        // with payload_len (0 here) — data lives in words[1..6].
         let req = Message::new(
             PROCMGR_PROC_INFO_LABEL,
-            [pid as usize, 0, caller_tid, 0, 0, 0],
+            [0, pid as usize, caller_tid, 0, 0, 0],
             6,
         );
         let (reply, payload) = IpcCallFuture::new(self.procmgr_endpoint, req).await?;

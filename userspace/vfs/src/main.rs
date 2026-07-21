@@ -39,6 +39,7 @@ pub mod memfs;
 mod mount;
 mod procfs;
 mod pts;
+mod pts_queue;
 mod view;
 
 use fd_table::{FdTable, OpenFile};
@@ -911,6 +912,7 @@ struct VfsServer {
     /// the payload bytes into the shell's address space, and replies the parked
     /// `reply_token` to unblock the shell.
     pending_pts_reads: BTreeMap<u32, VecDeque<ParkedRead>>,
+    pending_pts_data: BTreeMap<u32, Vec<u8>>,
     /// Open handles for synthesised virtual-root directories (e.g. `/`, `/dev`
     /// under a USER view).  High bit is always set so they are distinguishable
     /// from real fd_table entries at zero cost.
@@ -989,6 +991,7 @@ impl VfsServer {
             dev_registry,
             tty_endpoints: [0usize; 4],
             pending_pts_reads: BTreeMap::new(),
+            pending_pts_data: BTreeMap::new(),
             virtual_fds: BTreeMap::new(),
             virtual_fd_counter: 0,
         }
@@ -1931,10 +1934,12 @@ impl VfsServer {
         {
             Some(p) => p,
             None => {
-                let _ = debug_print(&format!(
-                    "vfs: pts_read_deliver pts_id={} — no parked read (stale delivery?)",
-                    pts_id
-                ));
+                if !payload.is_empty() {
+                    self.pending_pts_data
+                        .entry(pts_id)
+                        .or_insert_with(Vec::new)
+                        .extend(payload.iter().copied());
+                }
                 return Ok(());
             }
         };
@@ -1978,7 +1983,38 @@ impl VfsServer {
             data.len()
         ));
 
-        reply_parked(&parked, &reply_msg, &[])
+        match reply_parked(&parked, &reply_msg, &[]) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let _ = debug_print(&format!(
+                    "vfs: pts_read_deliver pts_id={} reply failed (caller timed out), trying next parked read\n",
+                    pts_id
+                ));
+                while let Some(next_parked) = self
+                    .pending_pts_reads
+                    .get_mut(&pts_id)
+                    .and_then(pts_queue::take_parked_read)
+                {
+                    let mut next_reply = Message::new(VFS_READ_GRANT, [0; 6], 3);
+                    self.grant_data_to_caller(
+                        &data,
+                        next_parked.target_base,
+                        next_parked.caller_space,
+                        &mut next_reply,
+                    )?;
+                    if reply_parked(&next_parked, &next_reply, &[]).is_ok() {
+                        return Ok(());
+                    }
+                }
+                pts_queue::prepend_delivered_data(
+                    self.pending_pts_data
+                        .entry(pts_id)
+                        .or_insert_with(Vec::new),
+                    &data,
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Proxy a PTS_* verb from a VFS client to the owning cluuterm instance.
@@ -4284,15 +4320,26 @@ impl VfsServer {
             // back; the handler below grants bytes into shell's space and
             // replies the parked token to unblock the shell.
             OpenFile::Pts(pts) => {
-                let ep = match self.pts_registry.notify_endpoint(pts.pts_id) {
+                let pts_id = pts.pts_id;
+                let buffered_data = self.pending_pts_data.get_mut(&pts_id)
+                    .and_then(|b| if b.is_empty() { None } else { Some(b.drain(..b.len().min(requested)).collect::<Vec<u8>>()) });
+                if let Some(data) = buffered_data {
+                    self.pending_pts_data.retain(|_, v| !v.is_empty());
+                    self.grant_data_to_caller(
+                        &data,
+                        target_base,
+                        target_space,
+                        &mut reply_msg,
+                    )?;
+                    return reply_simple(&reply_msg);
+                }
+                let ep = match self.pts_registry.notify_endpoint(pts_id) {
                     Some(ep) if ep != 0 => ep,
                     _ => {
                         reply_msg.words[0] = Error::NotFound.to_errno() as usize;
                         return reply_simple(&reply_msg);
                     }
                 };
-
-                // Park the shell's blocked read.
                 let (reply_ep, cookie) = if msg.tag.extra == libcluu::ipc::ASYNC_REPLY_TAG {
                     (
                         msg.words[libcluu::ipc::ASYNC_REPLY_EP_WORD],
@@ -4309,17 +4356,15 @@ impl VfsServer {
                     target_base,
                     requested,
                 };
-                self.pending_pts_reads
-                    .entry(pts.pts_id)
-                    .or_insert_with(VecDeque::new)
-                    .push_back(parked);
+                let queue = self
+                    .pending_pts_reads
+                    .entry(pts_id)
+                    .or_insert_with(VecDeque::new);
+                pts_queue::park_read(queue, parked);
 
-                // Drain-hint to cluuterm: words[0] clobbered by
-                // send_msg_with_payload, so pts_id lives in words[1] and
-                // requested lives in words[2].
                 let drain_hint = Message::new(
                     libcluu::proto::pts::PTS_READ_LABEL,
-                    [0, pts.pts_id as usize, requested, 0, 0, 0],
+                    [0, pts_id as usize, requested, 0, 0, 0],
                     3,
                 );
                 let _ = ipc::send_msg_with_payload(ep, &drain_hint, &[]);

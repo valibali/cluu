@@ -34,7 +34,8 @@ pub fn list_pids_handler(state: &SessionState, _msg: &InboundMsg<'_>) -> Result<
 }
 
 pub fn proc_info_handler(state: &SessionState, msg: &InboundMsg<'_>) -> Result<Reply> {
-    let pid = msg.words[0] as Pid;
+    // words[0] is payload_len (clobbered by IpcCallFuture); pid is in words[1].
+    let pid = msg.words[1] as Pid;
 
     let child = state.child_table.lookup_by_pid(pid);
 
