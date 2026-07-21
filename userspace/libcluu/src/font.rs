@@ -22,6 +22,7 @@ pub const GLYPH_H: usize = 16;
 pub const GLYPH_ALPHA_SIZE: usize = GLYPH_W * GLYPH_H;
 
 include!(concat!(env!("OUT_DIR"), "/font_0xproto.rs"));
+include!(concat!(env!("OUT_DIR"), "/font_unicode_ext.rs"));
 
 /// Original CP437 box-drawing and block element glyphs (0xB0-0xDF).
 /// Kept from the classic VGA font for consistent border/block rendering.
@@ -342,4 +343,58 @@ fn thinned_box_glyph(ch: u8) -> Option<[u8; GLYPH_H]> {
         0xBC => Some([DV, DV, DV, DV, DV, DH_L, DV, DH_L, 0, 0, 0, 0, 0, 0, 0, 0]),
         _ => None,
     }
+}
+
+/// Check whether a Box Drawing codepoint (U+2500-U+257F) is already mapped
+/// to a CP437 slot by both renderers' `unicode_to_cp437` tables. If so,
+/// the CP437 fallback path (VGA bitmaps / thinned overrides) handles it
+/// and the new 0xProto bank is skipped — preserving existing rendering.
+fn is_already_cp437_mapped_box(cp: u32) -> bool {
+    matches!(cp,
+        0x2500 | 0x2502 | 0x250C | 0x2510 | 0x2514 | 0x2518 |
+        0x251C | 0x2524 | 0x252C | 0x2534 | 0x253C |
+        0x2550 | 0x2551 | 0x2554 | 0x2557 | 0x255A | 0x255D |
+        0x2560 | 0x2563 | 0x2566 | 0x2569 | 0x256C |
+        0x2555 | 0x2556 | 0x2558 | 0x2559 | 0x255B | 0x255C |
+        0x2561 | 0x2562 | 0x2564 | 0x2565 | 0x2567 | 0x2568
+    )
+}
+
+/// Resolve a Unicode codepoint to an 8×16 alpha bitmap via the Unicode
+/// extension banks (Box Drawing, Block Elements, Braille). Returns `None`
+/// for codepoints not covered by the extension banks — callers fall back
+/// to `glyph_alpha_for_cp437` via their local `unicode_to_cp437`.
+pub fn glyph_alpha_for_codepoint(
+    cp: u32,
+    bold: bool,
+    italic: bool,
+) -> Option<[u8; GLYPH_ALPHA_SIZE]> {
+    if (0x2500..=0x257F).contains(&cp) {
+        if is_already_cp437_mapped_box(cp) {
+            return None;
+        }
+        let idx = (cp - 0x2500) as usize * GLYPH_ALPHA_SIZE;
+        let bank = if italic { &FONT_BOX_ITALIC_ALPHA[..] }
+                   else if bold { &FONT_BOX_BOLD_ALPHA[..] }
+                   else { &FONT_BOX_REGULAR_ALPHA[..] };
+        let mut alpha = [0u8; GLYPH_ALPHA_SIZE];
+        alpha.copy_from_slice(&bank[idx..idx + GLYPH_ALPHA_SIZE]);
+        return Some(alpha);
+    }
+    if (0x2580..=0x259F).contains(&cp) {
+        if matches!(cp, 0x2591 | 0x2592 | 0x2593) {
+            return None;
+        }
+        let idx = (cp - 0x2580) as usize * GLYPH_ALPHA_SIZE;
+        let mut alpha = [0u8; GLYPH_ALPHA_SIZE];
+        alpha.copy_from_slice(&FONT_BLOCK_ALPHA[idx..idx + GLYPH_ALPHA_SIZE]);
+        return Some(alpha);
+    }
+    if (0x2800..=0x28FF).contains(&cp) {
+        let idx = (cp - 0x2800) as usize * GLYPH_ALPHA_SIZE;
+        let mut alpha = [0u8; GLYPH_ALPHA_SIZE];
+        alpha.copy_from_slice(&FONT_BRAILLE_ALPHA[idx..idx + GLYPH_ALPHA_SIZE]);
+        return Some(alpha);
+    }
+    None
 }

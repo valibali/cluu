@@ -40,6 +40,33 @@ fn main() {
     write_font_array(&mut file, "FONT_0XPROTO_BOLD_ALPHA", &bold_data);
     write_font_array(&mut file, "FONT_0XPROTO_ITALIC_ALPHA", &italic_data);
 
+    // ── Unicode extension banks ─────────────────────────────────────────
+    //
+    // Three new glyph banks covering Box Drawing (U+2500-U+257F),
+    // Block Elements (U+2580-U+259F), and Braille Patterns (U+2800-U+28FF).
+    //
+    // Box Drawing is rasterized from 0xProto (which has full 128/128
+    // coverage). Block Elements and Braille are generated programmatically
+    // (0xProto has zero coverage for both; the shapes are geometric).
+    // Block and Braille are weight-independent (filled rectangles / dots),
+    // so only one bank each is emitted.
+
+    let box_reg  = rasterize_range(&regular, 0x2500..=0x257F);
+    let box_bold = rasterize_range(&bold,    0x2500..=0x257F);
+    let box_ital = rasterize_range(&italic,  0x2500..=0x257F);
+
+    let block   = generate_block_elements();
+    let braille = generate_braille();
+
+    let ext_path = std::path::Path::new(&out_dir).join("font_unicode_ext.rs");
+    let mut ext_file = std::fs::File::create(&ext_path).expect("failed to create font_unicode_ext.rs");
+
+    write_font_slice(&mut ext_file, "FONT_BOX_REGULAR_ALPHA", &box_reg);
+    write_font_slice(&mut ext_file, "FONT_BOX_BOLD_ALPHA", &box_bold);
+    write_font_slice(&mut ext_file, "FONT_BOX_ITALIC_ALPHA", &box_ital);
+    write_font_slice(&mut ext_file, "FONT_BLOCK_ALPHA", &block);
+    write_font_slice(&mut ext_file, "FONT_BRAILLE_ALPHA", &braille);
+
     write_srgb_luts();
 }
 
@@ -133,6 +160,174 @@ fn rasterize_font(font: &Font, cp437: &[char; 256]) -> [u8; 32768] {
         }
     }
     result
+}
+
+fn rasterize_range(font: &Font, range: std::ops::RangeInclusive<u32>) -> Vec<u8> {
+    let count = (range.end() - range.start() + 1) as usize;
+    let mut result = vec![0u8; count * GLYPH_ALPHA_SIZE];
+    for (i, cp) in range.enumerate() {
+        let ch = char::from_u32(cp).unwrap_or('\0');
+        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+        let gw = metrics.width;
+        let gh = metrics.height as i32;
+        if gw == 0 || gh == 0 {
+            continue;
+        }
+        let x_start = if metrics.xmin > 0 { metrics.xmin as usize } else { 0 };
+        let y_start = BASELINE - metrics.ymin - gh;
+        for row in 0..gh {
+            let cell_row = y_start + row;
+            if cell_row < 0 || cell_row >= GLYPH_H as i32 {
+                continue;
+            }
+            for col in 0..gw {
+                let cell_col = x_start + col;
+                if cell_col >= GLYPH_W {
+                    break;
+                }
+                let alpha = bitmap[(row as usize) * gw + col];
+                result[i * GLYPH_ALPHA_SIZE + (cell_row as usize) * GLYPH_W + cell_col] = alpha;
+            }
+        }
+    }
+    result
+}
+
+fn generate_block_elements() -> Vec<u8> {
+    let mut out = vec![0u8; 32 * GLYPH_ALPHA_SIZE];
+    for cp in 0x2580u32..=0x259F {
+        let idx = ((cp - 0x2580) as usize) * GLYPH_ALPHA_SIZE;
+        let glyph = &mut out[idx..idx + GLYPH_ALPHA_SIZE];
+        match cp {
+            0x2580 => fill_rows(glyph, 0, 8),
+            0x2581 => fill_rows(glyph, 14, 16),
+            0x2582 => fill_rows(glyph, 12, 16),
+            0x2583 => fill_rows(glyph, 10, 16),
+            0x2584 => fill_rows(glyph, 8, 16),
+            0x2585 => fill_rows(glyph, 6, 16),
+            0x2586 => fill_rows(glyph, 4, 16),
+            0x2587 => fill_rows(glyph, 2, 16),
+            0x2588 => fill_rows(glyph, 0, 16),
+            0x2589 => fill_cols_rows(glyph, 0, 7, 0, 16),
+            0x258A => fill_cols_rows(glyph, 0, 6, 0, 16),
+            0x258B => fill_cols_rows(glyph, 0, 5, 0, 16),
+            0x258C => fill_cols_rows(glyph, 0, 4, 0, 16),
+            0x258D => fill_cols_rows(glyph, 0, 3, 0, 16),
+            0x258E => fill_cols_rows(glyph, 0, 2, 0, 16),
+            0x258F => fill_cols_rows(glyph, 0, 1, 0, 16),
+            0x2590 => fill_cols_rows(glyph, 4, 8, 0, 16),
+            0x2591 => fill_dither(glyph, 0x25),
+            0x2592 => fill_dither(glyph, 0x50),
+            0x2593 => fill_dither(glyph, 0x75),
+            0x2594 => fill_rows(glyph, 0, 2),
+            0x2595 => fill_cols_rows(glyph, 7, 8, 0, 16),
+            0x2596 => fill_cols_rows(glyph, 0, 4, 8, 16),
+            0x2597 => fill_cols_rows(glyph, 4, 8, 8, 16),
+            0x2598 => fill_cols_rows(glyph, 0, 4, 0, 8),
+            0x2599 => {
+                fill_cols_rows(glyph, 0, 4, 0, 8);
+                fill_rows(glyph, 8, 16);
+            }
+            0x259A => {
+                fill_cols_rows(glyph, 0, 4, 0, 8);
+                fill_cols_rows(glyph, 4, 8, 8, 16);
+            }
+            0x259B => {
+                fill_rows(glyph, 0, 8);
+                fill_cols_rows(glyph, 0, 4, 8, 16);
+            }
+            0x259C => {
+                fill_rows(glyph, 0, 8);
+                fill_cols_rows(glyph, 4, 8, 8, 16);
+            }
+            0x259D => fill_cols_rows(glyph, 4, 8, 0, 8),
+            0x259E => {
+                fill_cols_rows(glyph, 4, 8, 0, 8);
+                fill_cols_rows(glyph, 0, 4, 8, 16);
+            }
+            0x259F => {
+                fill_cols_rows(glyph, 4, 8, 0, 8);
+                fill_rows(glyph, 8, 16);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+// Dot positions (top-left corner of 2×2 dot) indexed by Unicode Braille
+// bit number. 2 columns × 4 rows in the 8×16 cell:
+//   col 0 at x=1, col 1 at x=5  (4px apart, 2px from cell edges)
+//   row 0 at y=1, row 1 at y=5, row 2 at y=9, row 3 at y=13
+fn generate_braille() -> Vec<u8> {
+    const DOT_POSITIONS: [(usize, usize); 8] = [
+        (1, 1), (1, 5), (1, 9), (5, 1),
+        (5, 5), (5, 9), (1, 13), (5, 13),
+    ];
+    let mut out = vec![0u8; 256 * GLYPH_ALPHA_SIZE];
+    for cp in 0x2800u32..=0x28FF {
+        let bits = (cp - 0x2800) as u8;
+        let idx = ((cp - 0x2800) as usize) * GLYPH_ALPHA_SIZE;
+        let glyph = &mut out[idx..idx + GLYPH_ALPHA_SIZE];
+        for bit in 0..8 {
+            if (bits >> bit) & 1 != 0 {
+                let (cx, cy) = DOT_POSITIONS[bit];
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let x = cx + dx;
+                        let y = cy + dy;
+                        if x < GLYPH_W && y < GLYPH_H {
+                            glyph[y * GLYPH_W + x] = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn fill_rows(glyph: &mut [u8], y0: usize, y1: usize) {
+    for y in y0..y1 {
+        for x in 0..GLYPH_W {
+            glyph[y * GLYPH_W + x] = 255;
+        }
+    }
+}
+
+fn fill_cols_rows(glyph: &mut [u8], x0: usize, x1: usize, y0: usize, y1: usize) {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            glyph[y * GLYPH_W + x] = 255;
+        }
+    }
+}
+
+fn fill_dither(glyph: &mut [u8], density: u8) {
+    let pattern: [[u8; 2]; 2] = match density {
+        0x25 => [[255, 0], [0, 0]],
+        0x50 => [[255, 0], [0, 255]],
+        0x75 => [[255, 255], [255, 0]],
+        _ => [[0; 2]; 2],
+    };
+    for y in 0..GLYPH_H {
+        for x in 0..GLYPH_W {
+            glyph[y * GLYPH_W + x] = pattern[y % 2][x % 2];
+        }
+    }
+}
+
+fn write_font_slice(file: &mut std::fs::File, name: &str, data: &[u8]) {
+    write!(file, "pub const {}: [u8; {}] = [", name, data.len()).unwrap();
+    for (i, &byte) in data.iter().enumerate() {
+        if i % 16 == 0 {
+            writeln!(file).unwrap();
+            write!(file, "    ").unwrap();
+        }
+        write!(file, "0x{:02x},", byte).unwrap();
+    }
+    writeln!(file, "\n];").unwrap();
+    writeln!(file).unwrap();
 }
 
 fn write_font_array(file: &mut std::fs::File, name: &str, data: &[u8; 32768]) {
