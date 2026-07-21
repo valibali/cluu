@@ -465,6 +465,12 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         sendkey_sequence_nowait=True,
         run_wait_s=30,
     ),
+    "l2_top": CaseDefaults(
+        test_command="top",
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
+    ),
     "l2_pkg_basic": CaseDefaults(
         test_command="pkg list",
         sendkey_sequence=_creds(),

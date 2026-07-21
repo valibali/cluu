@@ -159,6 +159,12 @@ fn run() -> libcluu::Result<()> {
             Err(_) => break,
         };
 
+        // Harness marker: only fires with a non-empty process list, so the
+        // l2_top case actually proves /proc/<pid>/stat reads succeed.
+        if first_frame && !records.is_empty() {
+            let _ = debug_print(&format!("TOP_PROCS_OK count={}", records.len()));
+        }
+
         // Build container hierarchy tree from cid/pcid.
         let mut children_map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         let mut cid_set: BTreeMap<u64, usize> = BTreeMap::new();

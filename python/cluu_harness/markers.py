@@ -510,6 +510,12 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             description="system monitor shows /proc stats",
         ),
         MarkerModeSpec(
+            name="l2_top",
+            required_markers=[_TSC, _SHELL_READY, "TOP_PROCS_OK"],
+            fail_marker=None,
+            description="top reads non-empty /proc/<pid>/stat process list",
+        ),
+        MarkerModeSpec(
             name="l2_pkg_basic",
             required_markers=[_TSC, _SHELL_READY, "PKG_OK"],
             fail_marker=None,

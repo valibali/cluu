@@ -448,6 +448,9 @@ class L2GlowBasic: pass
 @cluu_case("l2_sysmon_basic", marker_mode="l2_sysmon_basic", description="system monitor shows /proc stats", tags=["sys", "sysmon"])
 class L2SysmonBasic: pass
 
+@cluu_case("l2_top", marker_mode="l2_top", description="top reads non-empty /proc/<pid>/stat process list", tags=["sys", "top", "procfs"])
+class L2Top: pass
+
 @cluu_case("l2_pkg_basic", marker_mode="l2_pkg_basic", description="package manager lists installed containers", tags=["sys", "pkg"])
 class L2PkgBasic: pass
 
