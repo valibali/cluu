@@ -211,8 +211,10 @@ pub struct Thread {
     /// Set to true when thread was woken due to timeout expiry
     pub woke_from_timeout: bool,
 
-    /// Information for pending IPC call reply (set when thread is waiting for reply)
-    pub call_reply_info: Option<CallReplyInfo>,
+    /// Reply ID this thread is waiting for in a blocking sys_call.
+    /// Set before blocking, cleared by deliver_reply / check_timeouts / cancel.
+    /// wake_thread gates on this: if set, only the reply/timeout paths may wake.
+    pub pending_call_reply_id: Option<ReplyId>,
 
     /// Set while thread is in recv_any waiter-registration window.
     /// This closes the race where sender arrives between waiter registration
@@ -322,7 +324,8 @@ impl Thread {
             time_slice_remaining: 10, // Default 10 ticks
             timeout_deadline: None,
             woke_from_timeout: false,
-            call_reply_info: None,            recv_wait_armed: false,
+            pending_call_reply_id: None,
+            recv_wait_armed: false,
             recv_wait_ticket: 0,
             recv_wait_buf_ptr: 0,
             recv_wait_buf_len: 0,
@@ -365,7 +368,7 @@ impl Thread {
             time_slice_remaining: 10,
             timeout_deadline: None,
             woke_from_timeout: false,
-            call_reply_info: None,
+            pending_call_reply_id: None,
             recv_wait_armed: false,
             recv_wait_ticket: 0,
             recv_wait_buf_ptr: 0,

@@ -509,6 +509,7 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
             return Err(e);
         }
 
+        crate::sched::ThreadManager::set_current_pending_call_reply_id(reply_id);
         crate::sched::ThreadManager::block_current();
         crate::architecture::x86_64::syscall::request_resched();
         return Ok(0);
@@ -543,15 +544,12 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
         page_table_root,
         reply_id,
     ) {
-        // Rollback: remove orphaned CALL_REPLY_MAP entry on any send error
-        // (prevents leak when caller retries after WouldBlock backpressure)
         let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
         return Err(e);
     }
 
-    // 5. Block waiting for reply, with optional timeout.
-    //    arg6 is only meaningful in the slow path (fast path returned above).
-    //    0 or u64::MAX = block forever; 1..MAX-1 = timeout in ms.
+    crate::sched::ThreadManager::set_current_pending_call_reply_id(reply_id);
+
     let timeout_ms = args.arg6 as u64;
     let has_timeout = timeout_ms != 0 && timeout_ms != u64::MAX;
     if has_timeout {
@@ -562,37 +560,6 @@ pub fn sys_call(args: SyscallArgs) -> SyscallResult {
     }
     crate::architecture::x86_64::syscall::request_resched();
 
-    // After wake: three cases.
-    //
-    // 1. Reply was delivered. has_call_reply_info → false. deliver_reply has
-    //    already written rax. Fall through with Ok(0); the kernel returns
-    //    rax (the byte count) to userspace.
-    //
-    // 2. Timeout fired cleanly. check_and_clear_timeout_wake → true.
-    //    Reply slot is orphaned; clean it up and return Err(Timeout).
-    //
-    // 3. Spurious wake. Reply not delivered AND timeout flag not set —
-    //    something else woke this thread. Fall through with Ok(0) and rax=0.
-    //    Userspace's `request_bytes` already treats Ok(0) as "no data,
-    //    retry," so we don't need to artificially synthesize a Timeout
-    //    here. (An earlier attempt to do that — return Timeout on every
-    //    spurious wake — broke edit: the kernel scheduler wakes blocked
-    //    threads spuriously several times a second, so every TTY_READ_REQUEST
-    //    returned Timeout almost immediately and edit tightloop'd without
-    //    ever observing a key.)
-    if has_timeout {
-        if !crate::sched::ThreadManager::has_call_reply_info(reply_id) {
-            // Case 1.
-            let _ = crate::sched::ThreadManager::check_and_clear_timeout_wake();
-        } else if crate::sched::ThreadManager::check_and_clear_timeout_wake() {
-            // Case 2.
-            let _ = crate::sched::ThreadManager::take_call_reply_info(reply_id);
-            return Err(Error::Timeout);
-        }
-        // Case 3: fall through with rax=0.
-    }
-
-    // Return value will be set by deliver_reply in thread.context.rax
     Ok(0)
 }
 

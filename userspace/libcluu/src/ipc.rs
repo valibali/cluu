@@ -860,6 +860,42 @@ pub fn call_with_payload(
     }
 }
 
+pub fn call_with_payload_timeout(
+    endpoint_token: usize,
+    msg: &Message,
+    payload: &[u8],
+    reply: &mut Message,
+    timeout_ms: usize,
+) -> Result<()> {
+    let header = msg.as_bytes();
+    let total_len = header.len() + payload.len();
+    let reply_bytes = reply.as_bytes_mut();
+    if total_len <= IPC_INLINE_STACK_MAX {
+        let mut buffer = [0u8; IPC_INLINE_STACK_MAX];
+        buffer[..header.len()].copy_from_slice(header);
+        buffer[header.len()..total_len].copy_from_slice(payload);
+        loop {
+            match syscall::ipc_call_timeout(endpoint_token, &buffer[..total_len], reply_bytes, timeout_ms) {
+                Ok(_) => return Ok(()),
+                Err(Error::Timeout) => return Err(Error::Timeout),
+                Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    let mut buffer = Vec::with_capacity(total_len);
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(payload);
+    loop {
+        match syscall::ipc_call_timeout(endpoint_token, &buffer, reply_bytes, timeout_ms) {
+            Ok(_) => return Ok(()),
+            Err(Error::Timeout) => return Err(Error::Timeout),
+            Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Receive a message
 pub fn recv(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Result<()> {
     let msg_bytes = msg.as_bytes_mut();
@@ -876,13 +912,12 @@ pub fn recv(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Resul
 
 /// Call (send + wait for reply)
 pub fn call(endpoint_token: usize, msg: &mut Message, _flags: IpcFlags) -> Result<()> {
-    // We need to send msg and receive reply into the same buffer
-    // Make a temporary copy to send, then receive into the original
     let msg_copy = msg.clone();
     let send_bytes = msg_copy.as_bytes();
     let reply_bytes = msg.as_bytes_mut();
     loop {
         match syscall::ipc_call(endpoint_token, send_bytes, reply_bytes) {
+            Ok(0) => { let _ = syscall::yield_cpu(); }
             Ok(_) => return Ok(()),
             Err(Error::WouldBlock) => { let _ = syscall::yield_cpu(); }
             Err(err) => return Err(err),

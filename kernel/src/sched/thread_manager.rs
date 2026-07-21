@@ -130,6 +130,20 @@ impl<T: Copy> ReplyMap<T> {
         }
         Some(data)
     }
+
+    fn evict_where<F: Fn(&T) -> bool>(&mut self, should_evict: F) {
+        let mut to_remove = alloc::vec::Vec::new();
+        for i in 0..REPLY_MAP_SLOTS {
+            if let Some((rid, data)) = &self.slots[i] {
+                if should_evict(data) {
+                    to_remove.push(*rid);
+                }
+            }
+        }
+        for rid in to_remove {
+            self.remove(rid);
+        }
+    }
 }
 
 use alloc::collections::BinaryHeap;
@@ -626,10 +640,9 @@ impl ThreadManager {
                 map.remove(rid);
             }
             for caller in callers_to_wake {
-                // Encode as negative errno in rax (same convention as syscall return path).
-                // deliver_reply would normally overwrite rax with byte count.
                 Self::with_thread_mut(caller, |t| {
                     t.context.rax = crate::Error::NotFound.to_errno() as u64;
+                    t.pending_call_reply_id = None;
                 });
                 Self::wake_thread(caller);
             }
@@ -682,11 +695,20 @@ impl ThreadManager {
 
     /// Store call reply info for a reply ID. Returns false if map is full.
     pub fn set_call_reply_info(reply_id: ReplyId, info: CallReplyInfo) -> bool {
-        let ok = unsafe { CALL_REPLY_MAP.get() }.insert(reply_id, info);
-        if !ok {
-            crate::telemetry::record_call_reply_map_insert_fail();
+        let map = unsafe { CALL_REPLY_MAP.get() };
+        if map.insert(reply_id, info) {
+            return true;
         }
-        ok
+        // Map full. Evict orphaned entries (caller thread no longer blocked —
+        // leaked by sys_call case 3 spurious wake) and retry.
+        map.evict_where(|ci| {
+            !Self::with_thread(ci.caller, |t| t.is_blocked()).unwrap_or(true)
+        });
+        if map.insert(reply_id, info) {
+            return true;
+        }
+        crate::telemetry::record_call_reply_map_insert_fail();
+        false
     }
 
     /// Take and remove call reply info for a reply ID (one-time use)
@@ -697,6 +719,38 @@ impl ThreadManager {
     /// Check if call reply info exists for a reply ID
     pub fn has_call_reply_info(reply_id: ReplyId) -> bool {
         unsafe { CALL_REPLY_MAP.get() }.get(reply_id).is_some()
+    }
+
+    pub fn set_current_pending_call_reply_id(reply_id: ReplyId) {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |t| {
+            t.pending_call_reply_id = Some(reply_id);
+        });
+    }
+
+    pub fn clear_current_pending_call_reply_id() {
+        let current = match Self::current() {
+            Some(id) => id,
+            None => return,
+        };
+        Self::with_thread_mut(current, |t| {
+            t.pending_call_reply_id = None;
+        });
+    }
+
+    pub fn cancel_call_wait(thread_id: ThreadId) {
+        let rid = Self::with_thread_mut(thread_id, |t| t.pending_call_reply_id.take());
+        let rid = rid.flatten();
+        if let Some(rid) = rid {
+            Self::take_call_reply_info(rid);
+            Self::with_thread_mut(thread_id, |t| {
+                t.context.rax = crate::Error::NotFound.to_errno() as u64;
+            });
+        }
+        Self::wake_thread(thread_id);
     }
 
     /// Store fault reply info for a reply ID. Returns false if map is full.
@@ -830,13 +884,8 @@ impl ThreadManager {
             None => return,
         };
         Self::with_thread_mut(current, |thread| {
-            // Non-recv block: thread is entering sys_call / futex / notification
-            // wait, not a recv-wait. Any leftover recv_wait_ticket from a prior
-            // sys_recv is now stale — clear it so that pop_next_receiver_to_wake
-            // on a prior endpoint scrubs the leftover waiter instead of
-            // direct-delivering to this thread spuriously (rax=0 from sys_call,
-            // VfsFile{fd:0} downstream).
             thread.recv_wait_ticket = 0;
+            thread.woke_from_timeout = false;
             thread.make_blocked();
         });
     }
@@ -869,21 +918,13 @@ impl ThreadManager {
             Some(id) => id,
             None => return,
         };
-        klibcluu::trace("block_current_with_timeout: thread=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current.as_u64());
-        klibcluu::trace(" deadline=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", deadline);
-        klibcluu::trace(" current_tick=");
-        klibcluu::log_dec(klibcluu::LogLevel::Trace, "", Self::current_tick());
         Self::with_thread_mut(current, |thread| {
-            // See block_current: clear stale recv-wait ticket on non-recv block.
             thread.recv_wait_ticket = 0;
+            thread.woke_from_timeout = false;
             thread.set_timeout_deadline(deadline);
             thread.make_blocked();
         });
 
-        // Add to timeout heap for efficient expiry checking.
-        // This runs in syscall/thread context, so we must not drop timeout registration.
         TIMEOUT_HEAP
             .lock()
             .push(Reverse((deadline, current.as_u64())));
@@ -1050,7 +1091,6 @@ impl ThreadManager {
     }
 
     pub fn wake_thread(thread_id: ThreadId) {
-        // Try to wake immediately if locks are available
         let priority = {
             let mut repo = match THREAD_REPOSITORY.try_lock() {
                 Some(repo) => repo,
@@ -1060,17 +1100,19 @@ impl ThreadManager {
                 }
             };
             match repo.get_mut(thread_id) {
-                // Only wake threads that are actually Blocked. Waking a Ready
-                // or Running thread would call scheduler.add() and create a
-                // duplicate entry — the thread would appear in both
-                // self.current AND active, which can cause a dead thread to be
-                // re-scheduled after mark_thread_dead (scheduler.remove only
-                // cleared self.current, not the stale active entry).
                 Some(thread)
                     if !thread.is_dead()
                         && !thread.is_suspended()
                         && thread.is_blocked() =>
                 {
+                    if thread.pending_call_reply_id.is_some() {
+                        klibcluu::log_dec(
+                            klibcluu::LogLevel::Debug,
+                            "wake_thread: dropped gated wake for thread ",
+                            thread_id.as_u64(),
+                        );
+                        return;
+                    }
                     thread.make_ready();
                     thread.clear_timeout_deadline();
                     thread.woke_from_timeout = false;
@@ -1082,7 +1124,7 @@ impl ThreadManager {
 
         let priority = match priority {
             Some(p) => p,
-            None => return, // Thread not found or dead
+            None => return,
         };
 
         if let Some(mut scheduler) = SCHEDULER.try_lock() {
@@ -1438,15 +1480,18 @@ impl ThreadManager {
         let mut to_wake = alloc::vec::Vec::new();
         for thread_id in candidates {
             if let Some(thread) = repo.get_mut(thread_id) {
-                // Only wake if still blocked AND actual deadline has expired
                 if thread.is_blocked() && thread.is_timeout_expired(current_tick) {
                     if thread.is_suspended() {
                         continue;
                     }
-                    klibcluu::trace("check_timeouts: waking thread ");
-                    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", thread_id.as_u64());
-                    klibcluu::trace(" at tick ");
-                    klibcluu::log_dec(klibcluu::LogLevel::Trace, "", current_tick);
+                    if let Some(rid) = thread.pending_call_reply_id {
+                        if Self::take_call_reply_info(rid).is_some() {
+                            thread.pending_call_reply_id = None;
+                            thread.context.rax = crate::Error::Timeout.to_errno() as u64;
+                        } else {
+                            continue;
+                        }
+                    }
                     thread.make_ready();
                     thread.clear_timeout_deadline();
                     thread.woke_from_timeout = true;
@@ -1668,10 +1713,15 @@ impl ThreadManager {
             let mut repo = THREAD_REPOSITORY.lock();
             for thread_id in pending_threads {
                 if let Some(thread) = repo.get_mut(thread_id) {
-                    // Only schedule if still blocked — the thread may have been
-                    // woken by another path while sitting in the pending queue.
-                    // Adding a Ready thread creates a scheduler duplicate.
                     if !thread.is_dead() && thread.is_blocked() {
+                        if thread.pending_call_reply_id.is_some() {
+                            klibcluu::log_dec(
+                                klibcluu::LogLevel::Debug,
+                                "drain_pending_wake: dropped gated wake for thread ",
+                                thread_id.as_u64(),
+                            );
+                            continue;
+                        }
                         thread.make_ready();
                         thread.clear_timeout_deadline();
                         thread.woke_from_timeout = false;

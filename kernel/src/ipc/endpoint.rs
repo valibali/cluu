@@ -598,7 +598,6 @@ pub fn destroy_endpoint_full(id: EndpointId) {
     // Release shard lock BEFORE waking threads (lock ordering compliance)
     drop(shard_guard);
 
-    // Wake all blocked threads — they'll retry and get Error::NotFound
     for tid in receivers {
         crate::sched::ThreadManager::wake_thread(tid);
     }
@@ -606,10 +605,10 @@ pub fn destroy_endpoint_full(id: EndpointId) {
         crate::sched::ThreadManager::wake_thread(tid);
     }
     for tid in callers {
-        crate::sched::ThreadManager::wake_thread(tid);
+        crate::sched::ThreadManager::cancel_call_wait(tid);
     }
     if let Some(tid) = current {
-        crate::sched::ThreadManager::wake_thread(tid);
+        crate::sched::ThreadManager::cancel_call_wait(tid);
     }
 }
 
@@ -1278,6 +1277,7 @@ pub fn deliver_reply(
     let bytes_received = reply_data.len();
     ThreadManager::with_thread_mut(caller, |thread| {
         thread.context.rax = bytes_received as u64;
+        thread.pending_call_reply_id = None;
     });
 
     ThreadManager::wake_thread(caller);
