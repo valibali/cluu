@@ -76,6 +76,17 @@ temporal ordering:
 No peak-holds are drawn. The spectrum shows only the bar fill with
 gravity falloff — no held-peak markers above the bars.
 
+4. **Schmitt trigger on display.** The internal `bar_state` tracks the
+   raw attack/decay dynamics above, but the *displayed* level reads a
+   separate `display_state` that only updates when `bar_state` exits a
+   ±12-unit hysteresis band. Glyph levels are 16 units apart (the `>> 4`
+   step), so a 12-unit threshold requires ¾ of a level of movement
+   before the rendered glyph changes. This suppresses the "dancing"
+   effect where a bar oscillates between two adjacent glyphs when the
+   target hovers near a level boundary (e.g. bar_state cycling
+   100↔112 would flip the displayed glyph between level 6 and 7 every
+   frame without the trigger).
+
 DC removal runs in `process_pcm` before the FFT. Band values are 0-255
 (Winamp sadata); pixel height is `value >> 4` (0-15) — see spec
 `docs/superpowers/specs/2026-07-20-cluuamp-winamp-restyle-design.md`.
