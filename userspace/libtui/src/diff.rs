@@ -213,7 +213,7 @@ mod tests {
         let out = curr.diff_render(&prev);
         // SGR reset + red fg emitted because fg changed.
         assert!(out.contains("\x1b[0m"), "reset SGR should be emitted");
-        assert!(out.contains("\x1b[31m"), "red fg SGR should be emitted");
+        assert!(out.contains("\x1b[38;5;1m"), "red fg SGR should be emitted");
         // Char re-emitted to apply new style.
         assert!(out.contains('X'));
     }
@@ -226,8 +226,7 @@ mod tests {
         curr.set(0, 0, Cell::new('Z').bg(COLOR_WHITE).attrs(ATTR_BOLD));
         let out = curr.diff_render(&prev);
         assert!(out.contains("\x1b[0m"));
-        // sgr_for emits: 1 (bold); 47 (white bg)
-        assert!(out.contains("\x1b[1;47m"));
+        assert!(out.contains("\x1b[1;48;5;7m"));
     }
 
     #[test]
@@ -316,7 +315,7 @@ mod tests {
         curr.set(0, 0, Cell::new('A').fg(COLOR_RED));
         curr.set(0, 1, Cell::new('B').fg(COLOR_RED));
         let out = curr.diff_render(&prev);
-        assert_eq!(out.matches("\x1b[31m").count(), 1);
+        assert_eq!(out.matches("\x1b[38;5;1m").count(), 1);
     }
 
     #[test]
