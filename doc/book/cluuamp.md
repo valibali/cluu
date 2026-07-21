@@ -135,6 +135,19 @@ gate exists for host tests on architectures without SSE2.
 mutation to `AudioEngine::set_equalizer`. The engine rebuilds the biquad
 cascade in place; no re-allocation on gain changes.
 
+### EQ slider visual
+
+The EQ window occupies 7 rows: title, buttons/curve, blank gap, 3 slider
+rows, labels. The gap row separates the curve strip from the slider bar
+tops so the bars don't visually touch the curve.
+
+Each slider is 3 rows tall (24 eighths). The bar fills bottom-up from
+the center (value 0 = 12 eighths = half-filled). Unfilled cells show
+`░` (light shade) as a track — the same style as the horizontal progress
+bar — so the slider is always visible even at minimum value. Focused
+sliders use bright yellow (226); unfocused use dim gray (238) for the
+track and green (46) for the fill.
+
 ## Audio pipeline
 
 `AudioEngine` (in `audio.rs`) owns the decode -> EQ -> gain -> submit
@@ -161,6 +174,16 @@ spectrum.
 `TapMetadata` is keyed by `PcmHandle` so a `stop()` followed by a fresh
 `play()` cannot leak the previous track's tap into the new track's
 visualization.
+
+### EOF flush
+
+When the decoder reaches the end of the MP3 data, the last partial
+period in `pcm_s16` may be shorter than `PERIOD_BYTES` (4096 bytes). At
+low bitrates this tail can be several seconds of audio. `tick()` checks
+for EOF after the normal submit loop: if `pcm_s16` is non-empty, the
+partial period is submitted as-is; only when `pcm_s16` is fully drained
+does `advance_to_next` fire. This ensures the last seconds of every
+track are audible.
 
 ### Heap-safe construction
 
@@ -202,8 +225,10 @@ CLUUamp required a few supporting APIs in the shared libraries:
   backlogged VFS cannot wedge the decode loop.
 - `libcluu::posix::file::read_stdin_timeout` — dispatches to TTY or
   VFS-grant read with timeout; consumed by `libtui::StdinReader`.
-- `libtui` 256-color SGR (`COLOR_256_THRESHOLD = 100`; `38;5;N` /
-  `48;5;N` paths) for the spectrum palette.
+- `libtui` 256-color SGR — all non-default colors use `CSI 38;5;Nm` /
+  `CSI 48;5;Nm`. No basic-SGR path: palette indices like 46 (green), 51
+  (cyan), 8 (gray) are all 256-color, and emitting them as basic SGR
+  (`CSI 46m`) would set background cyan instead of foreground green.
 - `libtui::ATTR_REVERSE` for selection highlights in the browser.
 - `libtui::Renderer::write` loops on short writes (VFS chunks large
   buffers; dropping the tail corrupts terminal state).
@@ -237,6 +262,21 @@ playback continuity, modal browser interaction.
 cd python
 python -m cluu_harness --case l2_cluuamp --no-build
 ```
+
+## Resize handling
+
+cluuamp does not use `libtui::Program` — it has its own event loop that
+polls `ioctl(TIOCGWINSZ)` every iteration (13ms). The terminal size is
+never cached: every tick re-queries the PTS winsize via `ioctl(fd=1,
+TIOCGWINSZ)`, which translates to a `PTS_GET_WINSIZE` IPC to cluuterm.
+When the compositor resizes the window, cluuterm updates the PTS winsize
+and emits `SIGWINCH` to the foreground process group; cluuamp sees the
+new dimensions on the next tick, clears the screen, resets the diff
+buffer, and recalculates the layout.
+
+cluuterm's `resize_grid` resizes both the active cell grid and the
+alt-screen buffer (when in alt screen) so the alt-screen exit swap does
+not panic on an empty buffer.
 
 ## Spec
 
