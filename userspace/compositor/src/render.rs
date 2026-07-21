@@ -124,10 +124,13 @@ impl Compositor {
                     core::mem::swap(&mut fg, &mut bg);
                 }
 
-                // Map Unicode → CP437 → font byte. Codepoints outside
-                // BMP-ASCII / CP437 fall back to '?' via the helper.
-                let ch = unicode_to_cp437(cp);
-                let glyph = font_glyph_alpha(ch, bold, italic);
+                let glyph = match libcluu::font::glyph_alpha_for_codepoint(cp, bold, italic) {
+                    Some(g) => g,
+                    None => {
+                        let ch = unicode_to_cp437(cp);
+                        font_glyph_alpha(ch, bold, italic)
+                    }
+                };
 
                 let px = cx * glyph_w;
                 let py = cy * glyph_h;
