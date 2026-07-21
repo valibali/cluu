@@ -71,7 +71,7 @@ struct VtScreen {
     cursor_y: usize,
     cursor_visible: bool,
     blink_enabled: bool,
-    cells: Vec<u8>,
+    cells: Vec<u32>,
     fg_cells: Vec<u32>,
     bg_cells: Vec<u32>,
     current_fg: u32,
@@ -96,7 +96,7 @@ impl VtScreen {
             cursor_y: 0,
             cursor_visible: true,
             blink_enabled: true,
-            cells: alloc::vec![b' '; cols * rows],
+            cells: alloc::vec![0x20u32; cols * rows],
             fg_cells: alloc::vec![COLOR_FG; cols * rows],
             bg_cells: alloc::vec![COLOR_BG; cols * rows],
             current_fg: COLOR_FG,
@@ -114,58 +114,12 @@ impl VtScreen {
     /// This only modifies the in-memory cell grid — no framebuffer writes.
     /// The caller (Console) is responsible for rendering after this returns.
     ///
-    /// Multi-byte UTF-8 sequences are decoded to CP437 before the byte is
-    /// handed to the ANSI parser, so the parser always sees single bytes.
+    /// Bytes are fed directly to the ANSI parser, which decodes UTF-8
+    /// internally and emits `Event::Print(u32)` with the decoded codepoint.
     fn write_bytes(&mut self, bytes: &[u8]) {
         self.dirty_cells.clear();
-
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-
-            if b < 0x80 {
-                // ASCII byte: feed directly through the parser.
-                self.feed_byte(b);
-                i += 1;
-                continue;
-            }
-
-            // Multi-byte UTF-8 sequence: decode to codepoint, map to CP437,
-            // then feed the resulting single byte as Event::Print.
-            let (codepoint, seq_len) = if b & 0xE0 == 0xC0 && i + 1 < bytes.len() {
-                let cp = ((b as u32 & 0x1F) << 6) | (bytes[i + 1] as u32 & 0x3F);
-                (cp, 2)
-            } else if b & 0xF0 == 0xE0 && i + 2 < bytes.len() {
-                let cp = ((b as u32 & 0x0F) << 12)
-                    | ((bytes[i + 1] as u32 & 0x3F) << 6)
-                    | (bytes[i + 2] as u32 & 0x3F);
-                (cp, 3)
-            } else if b & 0xF8 == 0xF0 && i + 3 < bytes.len() {
-                let cp = ((b as u32 & 0x07) << 18)
-                    | ((bytes[i + 1] as u32 & 0x3F) << 12)
-                    | ((bytes[i + 2] as u32 & 0x3F) << 6)
-                    | (bytes[i + 3] as u32 & 0x3F);
-                (cp, 4)
-            } else {
-                // Invalid / truncated UTF-8: substitute '?'.
-                self.apply_event(Event::Print(b'?' as u32));
-                i += 1;
-                continue;
-            };
-
-            self.apply_event(Event::Print(unicode_to_cp437(codepoint) as u32));
-            i += seq_len;
-        }
-    }
-
-    /// Feed a single ASCII byte through the ANSI parser.
-    ///
-    /// Uses `mem::replace` to work around the double-borrow: the parser is
-    /// temporarily moved out of `self` so that the closure can call
-    /// `self.apply_event` without aliasing the `self.parser` field.
-    fn feed_byte(&mut self, b: u8) {
         let mut parser = core::mem::replace(&mut self.parser, Parser::new());
-        parser.feed(&[b], |ev| self.apply_event(ev));
+        parser.feed(bytes, |ev| self.apply_event(ev));
         self.parser = parser;
     }
 
@@ -176,7 +130,7 @@ impl VtScreen {
                 self.set_cell(
                     self.cursor_x,
                     self.cursor_y,
-                    ch as u8,
+                    ch,
                     self.current_fg,
                     self.current_bg,
                 );
@@ -202,7 +156,7 @@ impl VtScreen {
                 self.set_cell(
                     self.cursor_x,
                     self.cursor_y,
-                    b'\t',
+                    0x09u32,
                     self.current_fg,
                     self.current_bg,
                 );
@@ -238,39 +192,39 @@ impl VtScreen {
             Event::EraseLine(mode) => match mode {
                 EraseMode::ToEnd => {
                     for x in self.cursor_x..self.cols {
-                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                        self.set_cell(x, self.cursor_y, 0x20u32, self.current_fg, self.current_bg);
                     }
                 }
                 EraseMode::ToStart => {
                     for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
-                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                        self.set_cell(x, self.cursor_y, 0x20u32, self.current_fg, self.current_bg);
                     }
                 }
                 EraseMode::All => {
                     for x in 0..self.cols {
-                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                        self.set_cell(x, self.cursor_y, 0x20u32, self.current_fg, self.current_bg);
                     }
                 }
             },
             Event::EraseDisplay(mode) => match mode {
                 EraseMode::ToEnd => {
                     for x in self.cursor_x..self.cols {
-                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                        self.set_cell(x, self.cursor_y, 0x20u32, self.current_fg, self.current_bg);
                     }
                     for y in (self.cursor_y + 1)..self.rows {
                         for x in 0..self.cols {
-                            self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
+                            self.set_cell(x, y, 0x20u32, self.current_fg, self.current_bg);
                         }
                     }
                 }
                 EraseMode::ToStart => {
                     for y in 0..self.cursor_y {
                         for x in 0..self.cols {
-                            self.set_cell(x, y, b' ', self.current_fg, self.current_bg);
+                            self.set_cell(x, y, 0x20u32, self.current_fg, self.current_bg);
                         }
                     }
                     for x in 0..=self.cursor_x.min(self.cols.saturating_sub(1)) {
-                        self.set_cell(x, self.cursor_y, b' ', self.current_fg, self.current_bg);
+                        self.set_cell(x, self.cursor_y, 0x20u32, self.current_fg, self.current_bg);
                     }
                 }
                 EraseMode::All => {
@@ -302,7 +256,7 @@ impl VtScreen {
 
     /// Reset all cells and cursor to defaults.
     fn clear(&mut self) {
-        self.cells.fill(b' ');
+        self.cells.fill(0x20u32);
         self.fg_cells.fill(COLOR_FG);
         self.bg_cells.fill(COLOR_BG);
         self.current_fg = COLOR_FG;
@@ -339,7 +293,7 @@ impl VtScreen {
 
         // Clear last row.
         let last = (self.rows - 1) * w;
-        self.cells[last..last + w].fill(b' ');
+        self.cells[last..last + w].fill(0x20u32);
         self.fg_cells[last..last + w].fill(self.current_fg);
         self.bg_cells[last..last + w].fill(self.current_bg);
 
@@ -356,7 +310,7 @@ impl VtScreen {
     fn push_history_row(&mut self) {
         let w = self.cols;
         let row = HistoryRow {
-            chars: self.cells[..w].iter().map(|&b| b as u32).collect(),
+            chars: self.cells[..w].to_vec(),
             fg: self.fg_cells[..w].to_vec(),
             bg: self.bg_cells[..w].to_vec(),
         };
@@ -376,7 +330,7 @@ impl VtScreen {
     }
 
     /// Update one grid cell and mark it as dirty.
-    fn set_cell(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
+    fn set_cell(&mut self, x: usize, y: usize, ch: u32, fg: u32, bg: u32) {
         if x >= self.cols || y >= self.rows {
             return;
         }
@@ -663,7 +617,7 @@ impl<B: ConsoleBackend> Console<B> {
                         let fg = row.fg[x];
                         let bg = row.bg[x];
                         if ch != 0x20u32 || bg != COLOR_BG {
-                            render_glyph(&mut self.backend, x, y, ch as u8, fg, bg);
+                            render_glyph(&mut self.backend, x, y, ch, fg, bg);
                         }
                     }
                 }
@@ -676,7 +630,7 @@ impl<B: ConsoleBackend> Console<B> {
                         let ch = self.vt_screens[vt_idx].cells[idx];
                         let fg = self.vt_screens[vt_idx].fg_cells[idx];
                         let bg = self.vt_screens[vt_idx].bg_cells[idx];
-                        if ch != b' ' || bg != COLOR_BG {
+                        if ch != 0x20u32 || bg != COLOR_BG {
                             render_glyph(&mut self.backend, x, y, ch, fg, bg);
                         }
                     }
@@ -771,11 +725,17 @@ fn render_glyph<B: ConsoleBackend>(
     backend: &mut B,
     x: usize,
     y: usize,
-    ch: u8,
+    ch: u32,
     fg: u32,
     bg: u32,
 ) {
-    let glyph = font_glyph_alpha(ch);
+    let glyph = match libcluu::font::glyph_alpha_for_codepoint(ch, false, false) {
+        Some(g) => g,
+        None => {
+            let cp437_byte = unicode_to_cp437(ch);
+            font_glyph_alpha(cp437_byte)
+        }
+    };
     let px = x * GLYPH_W;
     let py = y * GLYPH_H;
     let mut row_buffer = [0u32; GLYPH_W];
@@ -792,7 +752,7 @@ fn render_cursor_block<B: ConsoleBackend>(
     backend: &mut B,
     x: usize,
     y: usize,
-    ch: u8,
+    ch: u32,
     fg: u32,
     bg: u32,
 ) {
