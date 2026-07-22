@@ -1103,3 +1103,53 @@ defined as big-endian 32-bit values in the EISA specification. QEMU's
 AML compiler stores EISA ID bytes in big-endian order within the DWORD.
 When parsing AML data that represents EISA IDs, use big-endian; for
 general AML DWORDs (buffer sizes, etc.), use little-endian.
+
+## cluu-rc-boot-replaces-autostart-toml
+
+### The code
+
+CLUU boot service startup was declarative via `etc/autostart.toml`
+(`[[service]] image = "console"`). Replaced with a shell-script-style
+`etc/rc.boot` — a text file with `start`, `wait`, `probe`, `mount` verbs
+interpreted line-by-line by procmgr at boot. After rc.boot completes,
+procmgr proceeds to login.
+
+### Why this was hard to spot
+
+The first attempt had procmgr spawn the shell binary in "script mode"
+(argv[1] = `/etc/rc.boot`) to interpret rc.boot via `shellrc::source_file`.
+The shell binary was mapped and `thread_resume`'d, but `main()` never
+executed — `_start` → `posix::init_tls()` / `init_stdio()` /
+`registry::init()` silently failed because FdInherit and token wiring
+weren't set up for a boot-time shell. No debug_print output, no fault,
+no panic — just silence. The serial log showed the ELF mapped and the
+thread resumed, but nothing after.
+
+### Fix
+
+procmgr reads rc.boot directly (like busybox init reads `/etc/inittab`).
+No shell binary is involved at boot. Each line is parsed as:
+
+- `start <image>` → calls `autostart_container(image)` (same code path
+  as the old autostart.toml)
+- `wait <service> [output]` → polls `registry::subscribe_output` until
+  the service registers (blocking with yield)
+- `probe <bus>` → no-op (drivermgr auto-probes PCI + ACPI at its own
+  startup)
+- `mount <path> <service>` → deferred to service self-registration via
+  `VFS_MOUNT_LABEL`
+
+Shell builtins (`start`, `wait`, `probe`, `mount`) still exist in
+`userspace/shell/src/commands/builtins/rc.rs` for **interactive** use,
+but they use different IPC paths (`PROCMGR_START_IMAGE_LABEL`,
+`DRIVERMGR_PROBE_LABEL`) — procmgr's internal rc.boot interpreter calls
+`autostart_container()` directly.
+
+### Key insight
+
+At boot time, procmgr **IS** the script interpreter. The shell binary is
+for interactive sessions. Trying to use the shell binary as a boot script
+interpreter fails because the shell's `_start` assumes it was spawned by
+a fully-booted system (FdInherit, token table, VFS view all wired by
+procmgr's normal spawn path). The boot script interpreter must run
+**inside** procmgr, before any user shell exists.
