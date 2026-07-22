@@ -217,6 +217,9 @@ class QemuController:
             "-device", "virtio-9p-pci,fsdev=hostshare,mount_tag=hostshare,addr=0x7,disable-legacy=on,disable-modern=off",
             "-audiodev", "pa,id=snd0",
             "-device", "virtio-sound-pci,audiodev=snd0,addr=0x6,disable-legacy=on,disable-modern=off",
+            "-device", "usb-ehci,id=ehci",
+            "-device", "usb-kbd,bus=ehci.0",
+            "-device", "usb-mouse,bus=ehci.0",
         ])
         if cfg.autoexec_cmd:
             # Forwarded to the build via env; xtask reads it. We just
