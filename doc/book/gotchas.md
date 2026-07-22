@@ -1171,3 +1171,40 @@ Driver bringup stays in `etc/drivermgr.toml` (TOML, read by drivermgr).
 Shell builtins (`mount`, `start`, `probe`, `wait`) remain for interactive
 use — manual driver probing, manual service start, manual mounts from
 the shell prompt.
+
+## cluu-wait-for-grant-drops-non-matching-grants
+
+### The code
+
+VFS optional mount `/host` (hostfs) was fire-and-forget
+(`request_subscription`), sent before the blocking
+`subscribe_output("blkdev")` completed. The hostfs grant arrived on the
+shared control endpoint while `wait_for_grant` was blocking for blkdev.
+`wait_for_grant` checked `svc == service_name` (hostfs != blkdev) →
+silently discarded the grant. Session VFS never mounted `/host`.
+
+### Why this was hard to spot
+
+The serial log showed `hostfs:main grant forwarded` — the registry
+delivered the grant. But VFS never logged `mounted /host` for the
+session VFS. No error, no timeout — the grant was silently consumed by
+the wrong `wait_for_grant` call. The root VFS worked because
+`request_subscription` was called after its blocking subscribes (the
+system.toml path), but the session VFS (empty initrd, fallback path)
+called `request_subscription` before `subscribe_output("blkdev")`.
+
+### Fix
+
+Move `request_subscription("hostfs")` to AFTER `setup_mounts()` returns.
+All blocking `subscribe_output` calls complete first; the
+fire-and-forget hostfs subscribe is sent only when the control endpoint
+is free. The grant is then processed by `handle_registry_message` in
+the main loop.
+
+### Key insight
+
+`wait_for_grant` is a filter, not a queue. It receives ALL messages on
+the control endpoint and discards non-matching ones. Never mix
+fire-and-forget `request_subscription` with blocking `subscribe_output`
+on the same control endpoint — the blocking caller will eat the
+fire-and-forget grant.

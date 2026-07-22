@@ -37,6 +37,31 @@ entries, read by VFS from the initrd at boot (like `/etc/fstab`). Internal
 backends (`/proc`, `/proc/devices`, `/dev`, `/dev/pts`, `/dev/input`) are
 created in code by `setup_mounts()`.
 
+### Optional mounts and grant ordering
+
+Optional mounts (`required=false` in system.toml) use
+`request_subscription` (fire-and-forget) instead of `subscribe_output`
+(blocking). The grant arrives later on the registry control endpoint and
+is processed by `handle_registry_message` in the main loop.
+
+**Critical ordering constraint:** `request_subscription` must be called
+AFTER all blocking `subscribe_output` calls complete. The registry client
+uses a single control endpoint per process; `wait_for_grant` (the
+blocking receiver inside `subscribe_output`) receives ALL messages on
+that endpoint and silently discards grants that don't match the expected
+service+name. If a fire-and-forget grant arrives while `wait_for_grant`
+is blocking for a different service, the non-matching grant is consumed
+and lost.
+
+In `setup_mounts`, the call order is:
+1. `subscribe_output("blkdev")` — blocking (required mount)
+2. `subscribe_output("drivermgr")` — blocking (for /proc/devices)
+3. `subscribe_output("procmgr")` — blocking (for /proc)
+4. `request_subscription("hostfs")` — fire-and-forget (after all blocking calls)
+
+This ensures the hostfs grant is not consumed by a blocking `wait_for_grant`
+for blkdev or drivermgr.
+
 ### Sync vs Async backends
 
 Two backend traits:
