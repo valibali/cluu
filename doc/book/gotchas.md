@@ -1153,3 +1153,21 @@ interpreter fails because the shell's `_start` assumes it was spawned by
 a fully-booted system (FdInherit, token table, VFS view all wired by
 procmgr's normal spawn path). The boot script interpreter must run
 **inside** procmgr, before any user shell exists.
+
+### Evolution: rc.boot → system.toml
+
+The rc.boot shell-script approach was replaced with `etc/system.toml` —
+a declarative TOML config (like Linux's `/etc/fstab` + systemd units).
+Two sections, two readers:
+
+- `[[mount]]` — VFS reads from initrd at boot (like fstab). `required=true`
+  blocks VFS until the service registers; `required=false` uses
+  fire-and-forget (mounts lazily when the service registers via registry
+  grant or `VFS_MOUNT_LABEL`).
+- `[[service]]` — procmgr reads from VFS at boot (like systemd units).
+  Each entry has an `image` field; procmgr calls `autostart_container()`.
+
+Driver bringup stays in `etc/drivermgr.toml` (TOML, read by drivermgr).
+Shell builtins (`mount`, `start`, `probe`, `wait`) remain for interactive
+use — manual driver probing, manual service start, manual mounts from
+the shell prompt.

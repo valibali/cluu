@@ -1799,16 +1799,10 @@ fn create_initrd(profile: &str) -> Result<()> {
         println!("  Copied etc/drivermgr.toml");
     }
 
-    let session_rc_initrd_src = project_root().join("etc/session-rc.toml");
-    if session_rc_initrd_src.exists() {
-        fs::copy(&session_rc_initrd_src, initrd_dir.join("etc/session-rc.toml"))?;
-        println!("  Copied etc/session-rc.toml");
-    }
-
-    let rc_boot_src = project_root().join("etc/rc.boot");
-    if rc_boot_src.exists() {
-        fs::copy(&rc_boot_src, initrd_dir.join("etc/rc.boot"))?;
-        println!("  Copied etc/rc.boot");
+    let system_toml_initrd_src = project_root().join("etc/system.toml");
+    if system_toml_initrd_src.exists() {
+        fs::copy(&system_toml_initrd_src, initrd_dir.join("etc/system.toml"))?;
+        println!("  Copied etc/system.toml");
     }
 
     // Create etc/motd
@@ -2120,10 +2114,10 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     // Copy /etc/rc.boot + /etc/profile for shell-based boot
     let etc_dir = staging_dir.join("etc");
     fs::create_dir_all(&etc_dir)?;
-    let rc_boot_userdisk_src = project_root().join("etc/rc.boot");
-    if rc_boot_userdisk_src.exists() {
-        fs::copy(&rc_boot_userdisk_src, etc_dir.join("rc.boot"))?;
-        println!("  Added /etc/rc.boot");
+    let system_toml_userdisk_src = project_root().join("etc/system.toml");
+    if system_toml_userdisk_src.exists() {
+        fs::copy(&system_toml_userdisk_src, etc_dir.join("system.toml"))?;
+        println!("  Added /etc/system.toml");
     }
     let profile_src = project_root().join("etc/profile");
     if profile_src.exists() {

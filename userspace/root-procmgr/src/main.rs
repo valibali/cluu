@@ -1143,86 +1143,53 @@ impl ProcessManager {
         }
     }
 
-    fn run_rc_boot(&mut self) {
-        let _ = debug_print("procmgr: rc.boot — reading /etc/rc.boot");
-        let data = match self.read_file_from_vfs("/etc/rc.boot") {
+    fn run_system_toml(&mut self) {
+        let _ = debug_print("procmgr: reading /etc/system.toml");
+        let data = match self.read_file_from_vfs("/etc/system.toml") {
             Some(d) => d,
             None => {
-                let _ = debug_print("procmgr: /etc/rc.boot not found, skipping");
+                let _ = debug_print("procmgr: /etc/system.toml not found, skipping");
                 return;
             }
         };
         let text = match core::str::from_utf8(&data) {
             Ok(s) => s,
             Err(_) => {
-                let _ = debug_print("procmgr: /etc/rc.boot not valid UTF-8");
+                let _ = debug_print("procmgr: /etc/system.toml not valid UTF-8");
                 return;
             }
         };
-        let _ = debug_print(&format!("procmgr: rc.boot {} bytes", text.len()));
+        let doc = match libcluu::toml::parse(text) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: system.toml parse error: {}", e));
+                return;
+            }
+        };
 
-        for (lineno, line) in text.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.is_empty() {
-                continue;
-            }
-            match parts[0] {
-                "start" => {
-                    if parts.len() < 2 {
-                        let _ = debug_print(&format!("procmgr: rc.boot:{}: start: missing image name", lineno + 1));
-                        continue;
-                    }
-                    let image = parts[1];
-                    let _ = debug_print(&format!("procmgr: rc.boot: start {}", image));
-                    let dummy = libcluu::toml::TomlTable {
-                        name: String::new(),
-                        is_array: false,
-                        entries: Vec::new(),
-                    };
-                    if let Err(e) = self.autostart_container(image, &dummy) {
-                        let _ = debug_print(&format!("procmgr: rc.boot: start {} failed: {:?}", image, e));
-                    }
-                }
-                "wait" => {
-                    if parts.len() < 2 {
-                        continue;
-                    }
-                    let service = parts[1];
-                    let output = if parts.len() >= 3 { parts[2] } else { "main" };
-                    let _ = debug_print(&format!("procmgr: rc.boot: wait {}:{}", service, output));
-                    for _ in 0..200 {
-                        if libcluu::registry::subscribe_output(service, output).is_ok() {
-                            break;
-                        }
-                        let _ = libcluu::yield_cpu();
-                    }
-                }
-                "probe" => {
-                    if parts.len() < 2 {
-                        continue;
-                    }
-                    let _ = debug_print(&format!("procmgr: rc.boot: probe {} (no-op, drivermgr auto-probes at startup)", parts[1]));
-                }
-                "mount" => {
-                    if parts.len() < 3 {
-                        continue;
-                    }
-                    let _ = debug_print(&format!("procmgr: rc.boot: mount {} {} (deferred to service self-registration)", parts[1], parts[2]));
-                }
-                _ => {
-                    let _ = debug_print(&format!("procmgr: rc.boot:{}: unknown command '{}'", lineno + 1, parts[0]));
-                }
+        let services = doc.array_tables("service");
+        let _ = debug_print(&format!("procmgr: system.toml {} service(s)", services.len()));
+
+        let dummy = libcluu::toml::TomlTable {
+            name: String::new(),
+            is_array: false,
+            entries: Vec::new(),
+        };
+        for svc in &services {
+            let image = match svc.get_str("image") {
+                Some(n) => n,
+                None => continue,
+            };
+            let _ = debug_print(&format!("procmgr: system.toml: start {}", image));
+            if let Err(e) = self.autostart_container(image, &dummy) {
+                let _ = debug_print(&format!("procmgr: system.toml: start {} failed: {:?}", image, e));
             }
         }
-        let _ = debug_print("procmgr: rc.boot complete");
+        let _ = debug_print("procmgr: system.toml service start complete");
     }
 
     fn run_autostart(&mut self) {
-        self.run_rc_boot();
+        self.run_system_toml();
     }
 
     fn run_autostart_serial(&mut self, services: &[&libcluu::toml::TomlTable]) {

@@ -511,9 +511,7 @@ fn setup_mounts(
     mounts.mount_initrd("/dev/initrd", initrd);
     debug_print("vfs: initrd mounted")?;
 
-    let blkdev_endpoint = registry::subscribe_output("blkdev", "main")?;
-    mounts.mount_remote("/", blkdev_endpoint, "blkdev");
-    debug_print("vfs: mounted / (blkdev)")?;
+    apply_system_mounts(&mut mounts, initrd)?;
 
     mounts.mount_async("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
@@ -533,6 +531,48 @@ fn setup_mounts(
     debug_print("vfs: mounted /dev (devfs)")?;
 
     Ok(mounts)
+}
+
+fn apply_system_mounts(mounts: &mut MountTable, initrd: &[u8]) -> Result<()> {
+    let config = match libcluu::tar::find_member(initrd, "etc/system.toml") {
+        Some(d) => d,
+        None => {
+            let _ = debug_print("vfs: etc/system.toml not in initrd, falling back to blkdev");
+            let ep = registry::subscribe_output("blkdev", "main")?;
+            mounts.mount_remote("/", ep, "blkdev");
+            return Ok(());
+        }
+    };
+    let text = match core::str::from_utf8(config) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let doc = match libcluu::toml::parse(text) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    for entry in doc.array_tables("mount") {
+        let path = entry.get_str("path").unwrap_or("");
+        let service = entry.get_str("service").unwrap_or("");
+        let required = entry.get_str("required").map(|s| s.trim() == "true").unwrap_or(false);
+        if path.is_empty() || service.is_empty() {
+            continue;
+        }
+        if required {
+            let ep = registry::subscribe_output(service, "main")?;
+            let p: &'static str = alloc::boxed::Box::leak(path.to_string().into_boxed_str());
+            let s: &'static str = alloc::boxed::Box::leak(service.to_string().into_boxed_str());
+            mounts.mount_remote(p, ep, s);
+            let _ = debug_print(&format!("vfs: mounted {} ({}) from system.toml", path, service));
+        } else {
+            let _ = registry::request_subscription(service, "main");
+            let _ = debug_print(&format!(
+                "vfs: system.toml mount {} ({}) — pending (optional)",
+                path, service
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn map_initrd_slice(initrd_size: usize) -> &'static [u8] {

@@ -1,0 +1,30 @@
+# system.toml — declarative boot configuration (TOML)
+#
+# Two sections, two readers:
+#   [[mount]]   — VFS reads from initrd at boot (like /etc/fstab)
+#   [[service]] — procmgr reads from VFS at boot (like systemd units)
+#
+# Mount entries with required=true block VFS until the service registers.
+# required=false uses fire-and-forget (mounts lazily when service registers).
+
+[[mount]]
+path = "/"
+service = "blkdev"
+required = true
+
+[[mount]]
+path = "/host"
+service = "hostfs"
+required = false
+
+[[service]]
+image = "console"
+
+[[service]]
+image = "vtmgr"
+
+[[service]]
+image = "inputd"
+
+[[service]]
+image = "compositor"
