@@ -22,7 +22,7 @@ use cluu_virtio_core::{DmaPool, DmaRegion, IrqSource};
 use libcluu::boot::{
     process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE,
 };
-use libcluu::ipc::{extract_reply_id, AUDIO_CLOSE, AUDIO_OPEN_SESSION, AUDIO_SUBMIT_PCM, AUDIO_TID_CLEANUP};
+use libcluu::ipc::{extract_reply_id, AUDIO_CLOSE, AUDIO_OPEN_SESSION, AUDIO_SUBMIT_PCM, AUDIO_TID_CLEANUP, PARAM_DEVICE_PATH};
 use libcluu::registry;
 use libcluu::syscall::ipc_recv_any_with_sender;
 use libcluu::types::Message;
@@ -78,7 +78,22 @@ fn run() -> Result<()> {
     let ipc_token = info.tokens[TOKEN_IPC];
 
     // ── PCI discovery ────────────────────────────────────────────────────
-    let pci_device = match pci::find_virtio_device(pci_token, &[0x1059], &[0x1059]) {
+    if info.params[PARAM_DEVICE_PATH] != 0 {
+        let packed = info.params[PARAM_DEVICE_PATH];
+        let bus = ((packed >> 16) & 0xFF) as u8;
+        let device = ((packed >> 8) & 0xFF) as u8;
+        let function = (packed & 0xFF) as u8;
+        debug_print(&format!(
+            "virtio-snd: init from params BDF={:02x}:{:02x}.{}",
+            bus, device, function
+        ))?;
+    }
+    let pci_device = match pci::find_virtio_device_with_params(
+        pci_token,
+        &[0x1059],
+        &[0x1059],
+        &info.params,
+    ) {
         Ok(d) => d,
         Err(e) => {
             debug_print(&format!("virtio-snd: find_virtio_device failed: {:?}", e))?;
@@ -88,14 +103,7 @@ fn run() -> Result<()> {
 
     pci::enable_device(pci_token, &pci_device)?;
 
-    let intr_line_word = libcluu::syscall::pci_config_read(
-        pci_token,
-        pci_device.bus,
-        pci_device.device,
-        pci_device.function,
-        0x3c,
-    )?;
-    let irq_number = (intr_line_word & 0xFF) as usize;
+    let irq_number = pci::get_irq_line(pci_token, &pci_device, &info.params)?;
     debug_print(&format!(
         "VIRTIO_SND_PCI slot={} irq={}",
         pci_device.device, irq_number

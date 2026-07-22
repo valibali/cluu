@@ -1,0 +1,9 @@
+# drivermgr configuration
+#
+# spawn_mode controls how drivermgr handles matched devices:
+#   "observe" — log matches, do not spawn (D2 behavior; default safe mode)
+#   "spawn"   — spawn matched drivers via procmgr (D3 behavior)
+#   "hybrid"  — spawn if [driver] section exists, else fall back to init SERVICE_LIST
+
+[drivermgr]
+spawn_mode = "spawn"

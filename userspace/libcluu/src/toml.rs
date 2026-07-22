@@ -239,33 +239,48 @@ fn parse_string_array(s: &str, lineno: usize) -> Result<TomlValue, ParseError> {
         if rest_trimmed.is_empty() {
             break;
         }
-        if !rest_trimmed.starts_with('"') {
-            return Err(ParseError { line: lineno, msg: "array elements must be quoted strings" });
-        }
-        let val = parse_quoted_string(rest_trimmed, lineno)?;
-        items.push(val);
-        // Skip past the closing quote and optional comma
-        let after_quote = &rest_trimmed[1..]; // skip opening quote
-        let mut skip = 0;
-        let mut in_escape = false;
-        for ch in after_quote.chars() {
-            skip += ch.len_utf8();
-            if in_escape {
-                in_escape = false;
-                continue;
+        if rest_trimmed.starts_with('"') {
+            let val = parse_quoted_string(rest_trimmed, lineno)?;
+            items.push(val);
+            // Skip past the closing quote and optional comma
+            let after_quote = &rest_trimmed[1..]; // skip opening quote
+            let mut skip = 0;
+            let mut in_escape = false;
+            for ch in after_quote.chars() {
+                skip += ch.len_utf8();
+                if in_escape {
+                    in_escape = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    in_escape = true;
+                    continue;
+                }
+                if ch == '"' {
+                    break;
+                }
             }
-            if ch == '\\' {
-                in_escape = true;
-                continue;
+            let remainder = &after_quote[skip..];
+            rest = remainder.trim_start();
+            if rest.starts_with(',') {
+                rest = rest[1..].trim_start();
             }
-            if ch == '"' {
-                break;
+        } else {
+            // Bare value (integer, hex, boolean) — treat as unquoted string
+            // up to the next comma or closing bracket. Consistent with the
+            // bare-value handling for scalar key=value pairs above.
+            let end = rest_trimmed
+                .find(|c: char| c == ',' || c == ']')
+                .unwrap_or(rest_trimmed.len());
+            let val = rest_trimmed[..end].trim();
+            if !val.is_empty() {
+                items.push(String::from(val));
             }
-        }
-        let remainder = &after_quote[skip..];
-        rest = remainder.trim_start();
-        if rest.starts_with(',') {
-            rest = rest[1..].trim_start();
+            let remainder = &rest_trimmed[end..];
+            rest = remainder.trim_start();
+            if rest.starts_with(',') {
+                rest = rest[1..].trim_start();
+            }
         }
     }
 

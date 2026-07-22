@@ -360,7 +360,21 @@ fn is_already_cp437_mapped_box(cp: u32) -> bool {
     )
 }
 
-/// Resolve a Unicode codepoint to an 8×16 alpha bitmap via the Unicode
+/// Hand-coded 1-bit overrides for dashed box glyphs — fontdue's
+/// rasterization is fuzzy at 8×16. Geometry matches `thinned_box_glyph`.
+fn dashed_box_glyph(cp: u32) -> Option<[u8; GLYPH_H]> {
+    const V: u8 = 0b00001000;
+    match cp {
+        0x254C => Some([ // ╌ double-dash horizontal, row 7
+            0, 0, 0, 0, 0, 0, 0, 0b01100110, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]),
+        0x2506 => Some([ // ┆ triple-dash vertical, col 4
+            0, V, V, V, V, 0, V, V, V, V, 0, V, V, V, V, 0,
+        ]),
+        _ => None,
+    }
+}
+
 /// extension banks (Box Drawing, Block Elements, Braille). Returns `None`
 /// for codepoints not covered by the extension banks — callers fall back
 /// to `glyph_alpha_for_cp437` via their local `unicode_to_cp437`.
@@ -370,6 +384,9 @@ pub fn glyph_alpha_for_codepoint(
     italic: bool,
 ) -> Option<[u8; GLYPH_ALPHA_SIZE]> {
     if (0x2500..=0x257F).contains(&cp) {
+        if let Some(g) = dashed_box_glyph(cp) {
+            return Some(bits_to_alpha(&g));
+        }
         if is_already_cp437_mapped_box(cp) {
             return None;
         }

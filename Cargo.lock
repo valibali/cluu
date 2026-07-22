@@ -443,6 +443,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-drivermgr"
+version = "0.1.0"
+dependencies = [
+ "cluu-acpi",
+ "cluu-driver-framework",
+ "libcluu",
+ "spin",
+]
+
+[[package]]
+name = "cluu-drivermon"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+ "spin",
+]
+
+[[package]]
 name = "cluu-du"
 version = "0.1.0"
 dependencies = [

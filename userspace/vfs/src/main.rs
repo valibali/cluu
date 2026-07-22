@@ -11,6 +11,7 @@ extern crate alloc;
 #[allow(unused_imports)]
 use libcluu::runtime as _;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -28,12 +29,13 @@ use libcluu::fs::protocol::{
 use libcluu::ipc::{
     self, extract_reply_id, parse_message, reply_with_payload, SharedRing, SharedRingHeader,
     PTS_REGISTER_LABEL, PTS_UNREGISTER_LABEL, VFS_DERIVE_CHILD_FD_LABEL,
-    VFS_DERIVE_CHILD_FD_BATCH_LABEL,
+    VFS_DERIVE_CHILD_FD_BATCH_LABEL, VFS_MOUNT_LABEL,
 };
 use libcluu::types::Message;
 use libcluu::*;
 
 mod bulk_pool;
+mod devices_procfs;
 mod fd_table;
 pub mod memfs;
 mod mount;
@@ -506,15 +508,9 @@ fn setup_mounts(
     debug_print("vfs: setup_mounts start")?;
     let mut mounts = MountTable::new();
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Mount points configuration
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Initrd: system files from boot archive
     mounts.mount_initrd("/dev/initrd", initrd);
     debug_print("vfs: initrd mounted")?;
 
-    // Ext2 filesystem: forwarded to virtio-blk service (mounted as root).
     let blkdev_endpoint = registry::subscribe_output("blkdev", "main")?;
     mounts.mount_remote("/", blkdev_endpoint, "blkdev");
     debug_print("vfs: mounted / (blkdev)")?;
@@ -522,32 +518,19 @@ fn setup_mounts(
     mounts.mount_async("/proc", alloc::boxed::Box::new(procfs::ProcfsBackend::new(procmgr_endpoint)));
     debug_print("vfs: mounted /proc (procfs)")?;
 
-    // Device files: /dev/null, /dev/zero, /dev/urandom, /dev/tty*, /dev/fb0
+    let drivermgr_endpoint = registry::subscribe_output("drivermgr", "main")?;
+    mounts.mount_async(
+        "/proc/devices",
+        alloc::boxed::Box::new(devices_procfs::DevicesProcfsBackend::new(drivermgr_endpoint)),
+    );
+    debug_print("vfs: mounted /proc/devices (devices_procfs)")?;
+
     let mut dev_backend = mount::DeviceBackend::new();
     if let Some(fb_info) = fb_info {
         dev_backend.set_fb(fb_info);
     }
     mounts.mount_sync("/dev", alloc::boxed::Box::new(dev_backend));
     debug_print("vfs: mounted /dev (devfs)")?;
-
-    let hostfs_endpoint = match registry::subscribe_output("hostfs", "main") {
-        Ok(ep) => ep,
-        Err(e) => {
-            debug_print(&format!("vfs: hostfs not available ({:?}), /host disabled", e))?;
-            0
-        }
-    };
-    if hostfs_endpoint != 0 {
-        mounts.mount_remote("/host", hostfs_endpoint, "hostfs");
-        debug_print("vfs: mounted /host (hostfs)")?;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Future mount points can be added here:
-    // - mounts.mount_virtual("/sys", "sysfs", sysfs::ENTRIES);
-    // - mounts.mount_remote("/net", netfs_endpoint, "netfs");
-    // - mounts.mount_initrd("/boot", boot_archive);
-    // ═══════════════════════════════════════════════════════════════════════
 
     Ok(mounts)
 }
@@ -1045,6 +1028,9 @@ impl VfsServer {
         }
         if msg.tag.label == VFS_DERIVE_CHILD_FD_BATCH_LABEL {
             return self.handle_derive_child_fd_batch(msg, payload);
+        }
+        if msg.tag.label == VFS_MOUNT_LABEL {
+            return self.handle_mount_request(msg, payload);
         }
         if msg.tag.label == libcluu::proto::pts::PTS_READ_DELIVER_LABEL {
             return self.handle_pts_read_deliver(msg, payload);
@@ -1544,7 +1530,11 @@ impl VfsServer {
     fn handle_registry_message(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) {
         if let Ok(Some(event)) = registry::handle_incoming_message(msg, payload) {
             if let registry::RegistryEvent::Grant { service_name, name, token } = event {
-                // Populate /dev/tty* endpoints when tty:N/main grants arrive.
+                if name == "main" && service_name == "hostfs" {
+                    self.mounts.mount_remote("/host", token, "hostfs");
+                    let _ = debug_print(&format!("vfs: mounted /host (hostfs) ep={}", token));
+                    return;
+                }
                 if name == "main" {
                     if let Some(idx) = service_name
                         .strip_prefix("tty:")
@@ -1751,15 +1741,32 @@ impl VfsServer {
 
     // ── PTS handlers ─────────────────────────────────────────────────────────
 
-    /// Handle PTS_REGISTER_LABEL: allocate a new `/dev/pts/<id>` slot.
-    ///
-    /// Wire format:
-    ///   words[0] = notify_endpoint (usize): VFS sends PTS_CLOSED_LABEL here
-    ///              when the last fd on the pts is closed.
-    ///
-    /// Reply (via reply_token embedded in the message):
-    ///   words[0] = errno  (0 = ok, non-zero = libcluu errno)
-    ///   words[1] = id     (u32, valid only when errno == 0)
+    fn handle_mount_request(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
+        let reply_token = extract_reply_id(msg);
+        let endpoint = msg.words[0];
+        let mut parts = payload.splitn(2, |&b| b == 0);
+        let path_bytes = parts.next().unwrap_or(&[]);
+        let name_bytes = parts.next().unwrap_or(&[]);
+        let path_str = core::str::from_utf8(path_bytes).unwrap_or("");
+        let name_str = core::str::from_utf8(name_bytes).unwrap_or("");
+        if path_str.is_empty() || name_str.is_empty() || endpoint == 0 {
+            if let Some(rt) = reply_token {
+                let r = Message::new(VFS_MOUNT_LABEL, [Error::InvalidArgument.to_errno() as usize, 0, 0, 0, 0, 0], 1);
+                let _ = ipc::reply(rt, &r, IpcFlags::empty());
+            }
+            return Ok(());
+        }
+        let prefix: &'static str = Box::leak(path_str.to_string().into_boxed_str());
+        let svc: &'static str = Box::leak(name_str.to_string().into_boxed_str());
+        self.mounts.mount_remote(prefix, endpoint, svc);
+        let _ = debug_print(&format!("vfs: mount request '{}' as {} ep={}", path_str, name_str, endpoint));
+        if let Some(rt) = reply_token {
+            let r = Message::new(VFS_MOUNT_LABEL, [0, 0, 0, 0, 0, 0], 1);
+            let _ = ipc::reply(rt, &r, IpcFlags::empty());
+        }
+        Ok(())
+    }
+
     fn handle_pts_register(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
         let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
         let mut reply_msg = Message::new(PTS_REGISTER_LABEL, [0; 6], 2);

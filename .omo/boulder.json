@@ -1,14 +1,18 @@
 {
   "schema_version": 2,
-  "active_work_id": "cluu-next-phase",
+  "active_work_id": "driver-framework",
   "works": {
-    "cluu-next-phase": {
-      "work_id": "cluu-next-phase",
-      "active_plan": ".omo/plans/cluu-next-phase.md",
-      "plan_name": "cluu-next-phase",
-      "session_ids": ["codex:cluu-next-phase"],
+    "driver-framework": {
+      "work_id": "driver-framework",
+      "active_plan": ".omo/plans/driver-framework.md",
+      "plan_name": "driver-framework",
+      "session_ids": ["opencode:ses_07b53f1fbffeFFHRO34IyyEysG"],
       "status": "active",
-      "worktree_path": null
+      "worktree_path": null,
+      "constraints": {
+        "no_parallel_qemu": true,
+        "testing_must_be_serial": true
+      }
     }
   }
 }

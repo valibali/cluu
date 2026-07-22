@@ -136,6 +136,7 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Devmgr => {
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
                 tokens[TOKEN_EXTRA_1] = ctx.boot.device_region_token;
+                tokens[TOKEN_EXTRA_2] = ctx.irq_handle_root_token;
             }
             ServiceKind::Console => {
                 // Console will create its own endpoint in Phase 3
@@ -180,6 +181,25 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_VFS_FB_HEIGHT] = ctx.boot.fb_height as u64;
                 params[PARAM_VFS_FB_PITCH] = ctx.boot.fb_pitch as u64;
             }
+            ServiceKind::DriverMgr => {
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+                // PCI_ACCESS token for D1.2 bus scan.  Scoped irq tokens for
+                // driver spawn are wired in D3 (TOKEN_EXTRA_2).
+                tokens[TOKEN_EXTRA_1] = ctx.pci_token;
+                // View-manager cap so drivermgr can register a VFS view to
+                // read /var/images/ manifests (D2.5).
+                tokens[TOKEN_VFS_VIEW_MGR] = ctx.boot.view_mgr_token;
+                // Initrd size so drivermgr can map the initrd directly from
+                // memory for two-phase boot (D3.6) — VFS is blocked until
+                // blkdev registers, so drivermgr cannot use VFS to read
+                // initrd manifests before userdisk is mounted.
+                params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
+            }
+            ServiceKind::DriverMon => {
+                // drivermon — skeleton: grantable listen endpoint only.
+                // Fault endpoint + notify endpoint wired in D3/D4.
+                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
+            }
             ServiceKind::Vtmgr => {
                 tokens[TOKEN_EXTRA_0] = create_listen_endpoint(ctx.boot.root_token)?;
             }
@@ -194,36 +214,11 @@ impl ServiceWiring for ServiceKind {
                 // IRQ token for IRQ 11 (virtio-blk on QEMU PIC).
                 tokens[TOKEN_EXTRA_2] = ctx.virtio_blk_irq_token;
             }
-            ServiceKind::Virtio9p => {
-                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                tokens[TOKEN_EXTRA_1] = child_token;
-                tokens[TOKEN_EXTRA_2] = ctx.virtio_9p_irq_token;
-            }
-            ServiceKind::VirtioNet => {
-                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                tokens[TOKEN_EXTRA_1] = child_token;
-                tokens[TOKEN_EXTRA_2] = ctx.virtio_net_irq_token;
-            }
-            ServiceKind::VirtioSnd => {
-                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                tokens[TOKEN_EXTRA_1] = child_token;
-                tokens[TOKEN_EXTRA_2] = ctx.virtio_snd_irq_token;
-            }
             ServiceKind::Netd => {
                 tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
             }
             ServiceKind::Tpmd => {
                 // Tpmd uses its elevated token for MMIO mapping (via TOKEN_SPACE rights)
-            }
-            ServiceKind::UsbInput => {
-                tokens[TOKEN_EXTRA_0] = create_grantable_listen_endpoint(ctx.boot.root_token)?;
-                tokens[TOKEN_EXTRA_1] = child_token;
-                let usb_irq_token = token_derive(
-                    ctx.boot.root_token,
-                    Rights::IRQ_HANDLE.bits() as usize,
-                    u64::MAX,
-                )?;
-                tokens[TOKEN_EXTRA_2] = usb_irq_token;
             }
         }
         Ok(())
@@ -245,19 +240,19 @@ impl ServiceWiring for ServiceKind {
             ServiceKind::Vfs => {
                 map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
             }
+            ServiceKind::DriverMgr => {
+                map_initrd(space_token, ctx.initrd, params[PARAM_INITRD_SIZE] as usize)
+            }
             ServiceKind::Registry
             | ServiceKind::Kbd
             | ServiceKind::Tty
             | ServiceKind::Vtmgr
             | ServiceKind::Inputd
+            | ServiceKind::DriverMon
             | ServiceKind::VirtioBlk
-            | ServiceKind::Virtio9p
-            | ServiceKind::VirtioNet
-            | ServiceKind::VirtioSnd
             | ServiceKind::Netd
             | ServiceKind::Devmgr
-            | ServiceKind::Tpmd
-            | ServiceKind::UsbInput => Ok(()),
+            | ServiceKind::Tpmd => Ok(()),
             ServiceKind::Timeserver => Ok(()),
         }
     }

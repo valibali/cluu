@@ -1,5 +1,8 @@
-FROM minimal
+FROM driver
 PROFILE ipc registry device
+DRIVER bind bus=acpi hid=PNP0303
+DRIVER tokens slot=10 rights=0x30000000
+DRIVER source initrd_path="sys/kbd.elf"
 PRELOAD
 ENDPOINT listen
 DEVICE irq

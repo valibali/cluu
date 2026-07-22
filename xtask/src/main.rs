@@ -1701,6 +1701,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         "devmgr",
         "root-procmgr",
         "vfs",
+        "drivermgr",
+        "drivermon",
         "virtio-blk",
         "virtio-net",
         "virtio-9p",
@@ -1708,6 +1710,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         "netd",
         "tpmd",
         "usb-input",
+        "kbd",
+        "mouse",
     ];
     let mut copied_sys_paths = Vec::new();
     for prog in &sys_programs {
@@ -1742,6 +1746,70 @@ fn create_initrd(profile: &str) -> Result<()> {
 
     // Note: shell and other userspace programs are loaded from ext2 containers,
     // not from the initrd.
+
+    // D3.6: Copy driver manifests and .elf extensions to initrd for two-phase
+    // boot. In spawn mode, drivermgr reads manifests directly from initrd
+    // (VFS is blocked until blkdev registers), so driver manifests must be
+    // in the initrd archive alongside the driver binaries.
+    let driver_programs = [
+        "virtio-blk",
+        "virtio-net",
+        "virtio-9p",
+        "virtio-snd",
+        "usb-input",
+        "kbd",
+        "mouse",
+    ];
+    for prog in &driver_programs {
+        let stripped = initrd_dir.join("sys").join(prog);
+        let dst_elf = initrd_dir.join("sys").join(format!("{}.elf", prog));
+        if stripped.exists() {
+            fs::copy(&stripped, &dst_elf).with_context(|| {
+                format!("Failed to copy {}.elf", prog)
+            })?;
+            println!("  Copied sys/{}.elf", prog);
+        }
+    }
+
+    let containers_dir = project_root().join("target/containers");
+    if containers_dir.exists() {
+        for prog in &driver_programs {
+            let manifest_src = containers_dir.join(prog).join("manifest.toml");
+            if !manifest_src.exists() {
+                continue;
+            }
+            let content = match fs::read_to_string(&manifest_src) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !content.contains("[driver]") {
+                continue;
+            }
+            let dst = initrd_dir.join("sys").join(format!("{}.manifest.toml", prog));
+            fs::copy(&manifest_src, &dst).with_context(|| {
+                format!("Failed to copy {}.manifest.toml", prog)
+            })?;
+            println!("  Copied sys/{}.manifest.toml", prog);
+        }
+    }
+
+    let drivermgr_toml_src = project_root().join("etc/drivermgr.toml");
+    if drivermgr_toml_src.exists() {
+        fs::copy(&drivermgr_toml_src, initrd_dir.join("etc/drivermgr.toml"))?;
+        println!("  Copied etc/drivermgr.toml");
+    }
+
+    let session_rc_initrd_src = project_root().join("etc/session-rc.toml");
+    if session_rc_initrd_src.exists() {
+        fs::copy(&session_rc_initrd_src, initrd_dir.join("etc/session-rc.toml"))?;
+        println!("  Copied etc/session-rc.toml");
+    }
+
+    let rc_boot_src = project_root().join("etc/rc.boot");
+    if rc_boot_src.exists() {
+        fs::copy(&rc_boot_src, initrd_dir.join("etc/rc.boot"))?;
+        println!("  Copied etc/rc.boot");
+    }
 
     // Create etc/motd
     fs::write(initrd_dir.join("etc/motd"), "Welcome to CLUU!\n")?;
@@ -1798,6 +1866,7 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IPC_CALL
                 | RIGHT_IRQ_HANDLE
                 | RIGHT_IRQ_ACK
+                | RIGHT_PCI_ACCESS
                 | RIGHT_GRANT
         }
         "sys/virtio-blk" => {
@@ -2048,13 +2117,18 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
         println!("  Populated /bin with symlinks");
     }
 
-    // Copy /etc/autostart.toml for procmgr service autostart
+    // Copy /etc/rc.boot + /etc/profile for shell-based boot
     let etc_dir = staging_dir.join("etc");
     fs::create_dir_all(&etc_dir)?;
-    let autostart_src = project_root().join("etc/autostart.toml");
-    if autostart_src.exists() {
-        fs::copy(&autostart_src, etc_dir.join("autostart.toml"))?;
-        println!("  Added /etc/autostart.toml");
+    let rc_boot_userdisk_src = project_root().join("etc/rc.boot");
+    if rc_boot_userdisk_src.exists() {
+        fs::copy(&rc_boot_userdisk_src, etc_dir.join("rc.boot"))?;
+        println!("  Added /etc/rc.boot");
+    }
+    let profile_src = project_root().join("etc/profile");
+    if profile_src.exists() {
+        fs::copy(&profile_src, etc_dir.join("profile"))?;
+        println!("  Added /etc/profile");
     }
     let users_src = project_root().join("etc/users.toml");
     if users_src.exists() {
@@ -2065,6 +2139,11 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     if envelopes_src.exists() {
         fs::copy(&envelopes_src, etc_dir.join("envelopes.toml"))?;
         println!("  Added /etc/envelopes.toml");
+    }
+    let drivermgr_src = project_root().join("etc/drivermgr.toml");
+    if drivermgr_src.exists() {
+        fs::copy(&drivermgr_src, etc_dir.join("drivermgr.toml"))?;
+        println!("  Added /etc/drivermgr.toml");
     }
     // UE20: ship system-wide and root's personal shellrc into the
     // userdisk so /bin/shell can source them on startup.
@@ -2866,6 +2945,8 @@ const INIT_CRATES: &[&str] = &[
     "devmgr",
     "root-procmgr",
     "vfs",
+    "drivermgr",
+    "drivermon",
     "virtio-blk",
     "virtio-net",
     "virtio-9p",
@@ -2873,6 +2954,8 @@ const INIT_CRATES: &[&str] = &[
     "netd",
     "tpmd",
     "usb-input",
+    "kbd",
+    "mouse",
 ];
 
 /// Build a single init primordial crate by name.

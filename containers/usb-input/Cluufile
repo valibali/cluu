@@ -1,0 +1,5 @@
+FROM driver
+PROFILE ipc vfs registry device
+DRIVER bind bus=pci class=0x0c0320
+BUILD "cargo build --release --manifest-path userspace/usb-input/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/release/usb-input.elf /sys/usb-input
+ENTRYPOINT /sys/usb-input

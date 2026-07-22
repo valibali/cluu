@@ -40,13 +40,11 @@ pub enum ServiceKind {
     Vfs,
     Vtmgr,
     Inputd,
+    DriverMgr,
+    DriverMon,
     VirtioBlk,
-    Virtio9p,
-    VirtioNet,
-    VirtioSnd,
     Netd,
     Tpmd,
-    UsbInput,
 }
 
 // Capability grant for procmgr (it needs to create, map, and manage children).
@@ -64,6 +62,7 @@ const PROCMGR_RIGHTS_BITS: u32 = Rights::READ.bits()
     | Rights::IPC_CALL.bits()
     | Rights::IRQ_HANDLE.bits()
     | Rights::IRQ_ACK.bits()
+    | Rights::PCI_ACCESS.bits()
     | Rights::GRANT.bits();
 
 const PROCMGR_RIGHTS: Rights = Rights::from_bits_truncate(PROCMGR_RIGHTS_BITS);
@@ -81,39 +80,6 @@ const VIRTIOBLK_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
 
 const VIRTIOBLK_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIOBLK_RIGHTS_BITS);
 
-const VIRTIO9P_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
-    | Rights::SPACE_MAP.bits()
-    | Rights::IPC_SEND.bits()
-    | Rights::IPC_RECV.bits()
-    | Rights::CREATE.bits()
-    | Rights::GRANT.bits()
-    | Rights::IRQ_HANDLE.bits()
-    | Rights::IRQ_ACK.bits();
-
-const VIRTIO9P_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIO9P_RIGHTS_BITS);
-
-const VIRTIONET_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
-    | Rights::SPACE_MAP.bits()
-    | Rights::IPC_SEND.bits()
-    | Rights::IPC_RECV.bits()
-    | Rights::CREATE.bits()
-    | Rights::GRANT.bits()
-    | Rights::IRQ_HANDLE.bits()
-    | Rights::IRQ_ACK.bits();
-
-const VIRTIONET_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIONET_RIGHTS_BITS);
-
-const VIRTIO_SND_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
-    | Rights::SPACE_MAP.bits()
-    | Rights::IPC_SEND.bits()
-    | Rights::IPC_RECV.bits()
-    | Rights::CREATE.bits()
-    | Rights::GRANT.bits()
-    | Rights::IRQ_HANDLE.bits()
-    | Rights::IRQ_ACK.bits();
-
-const VIRTIO_SND_RIGHTS: Rights = Rights::from_bits_truncate(VIRTIO_SND_RIGHTS_BITS);
-
 // tpmd needs MMIO mapping for TIS interface + IPC for future service
 const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
     | Rights::IPC_SEND.bits()
@@ -121,17 +87,6 @@ const TPMD_RIGHTS_BITS: u32 = Rights::SPACE_MAP.bits()
     | Rights::CREATE.bits();
 
 const TPMD_RIGHTS: Rights = Rights::from_bits_truncate(TPMD_RIGHTS_BITS);
-
-const USB_INPUT_RIGHTS_BITS: u32 = Rights::PCI_ACCESS.bits()
-    | Rights::SPACE_MAP.bits()
-    | Rights::IPC_SEND.bits()
-    | Rights::IPC_RECV.bits()
-    | Rights::CREATE.bits()
-    | Rights::GRANT.bits()
-    | Rights::IRQ_HANDLE.bits()
-    | Rights::IRQ_ACK.bits();
-
-const USB_INPUT_RIGHTS: Rights = Rights::from_bits_truncate(USB_INPUT_RIGHTS_BITS);
 
 /// Primordial services whose death causes init to panic.
 /// If any of these exit, the system is in an unrecoverable state.
@@ -141,9 +96,9 @@ pub const PRIMORDIAL_SERVICES: &[&str] = &[
     "devmgr",
     "root-procmgr",
     "vfs",
+    "drivermgr",
+    "drivermon",
     "virtio-blk",
-    "virtio-9p",
-    "virtio-snd",
 ];
 
 // Boot-critical services in launch order.
@@ -203,42 +158,32 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
     },
     // kbd, console, vtmgr, tty moved to /etc/autostart.toml (procmgr container autostart)
     ServiceSpec {
+        name: "drivermgr",
+        path: "sys/drivermgr",
+        priority: 190,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::DriverMgr,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
+        name: "drivermon",
+        path: "sys/drivermon",
+        priority: 189,
+        rights: None,
+        space_policy: SpacePolicy::Standard,
+        kind: ServiceKind::DriverMon,
+        instance_id: None,
+        profile: CapProfile::SERVICE,
+    },
+    ServiceSpec {
         name: "virtio-blk",
         path: "sys/virtio-blk",
         priority: 180,
         rights: Some(VIRTIOBLK_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::VirtioBlk,
-        instance_id: None,
-        profile: CapProfile::SERVICE,
-    },
-    ServiceSpec {
-        name: "virtio-9p",
-        path: "sys/virtio-9p",
-        priority: 179,
-        rights: Some(VIRTIO9P_RIGHTS),
-        space_policy: SpacePolicy::Standard,
-        kind: ServiceKind::Virtio9p,
-        instance_id: None,
-        profile: CapProfile::SERVICE,
-    },
-    ServiceSpec {
-        name: "virtio-net",
-        path: "sys/virtio-net",
-        priority: 178,
-        rights: Some(VIRTIONET_RIGHTS),
-        space_policy: SpacePolicy::Standard,
-        kind: ServiceKind::VirtioNet,
-        instance_id: None,
-        profile: CapProfile::SERVICE,
-    },
-    ServiceSpec {
-        name: "virtio-snd",
-        path: "sys/virtio-snd",
-        priority: 176,
-        rights: Some(VIRTIO_SND_RIGHTS),
-        space_policy: SpacePolicy::Standard,
-        kind: ServiceKind::VirtioSnd,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },
@@ -259,16 +204,6 @@ pub const SERVICE_LIST: &[ServiceSpec] = &[
         rights: Some(TPMD_RIGHTS),
         space_policy: SpacePolicy::Standard,
         kind: ServiceKind::Tpmd,
-        instance_id: None,
-        profile: CapProfile::SERVICE,
-    },
-    ServiceSpec {
-        name: "usb-input",
-        path: "sys/usb-input",
-        priority: 170,
-        rights: Some(USB_INPUT_RIGHTS),
-        space_policy: SpacePolicy::Standard,
-        kind: ServiceKind::UsbInput,
         instance_id: None,
         profile: CapProfile::SERVICE,
     },

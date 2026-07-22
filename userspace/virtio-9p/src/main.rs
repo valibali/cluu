@@ -22,9 +22,9 @@ use cluu_virtio_core::transport::{FeatureBits, ModernPciTransport, Transport};
 use cluu_virtio_core::virtqueue::{Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE};
-use libcluu::ipc::{extract_reply_id, reply, reply_with_payload};
+use libcluu::ipc::{extract_reply_id, reply, reply_with_payload, PARAM_DEVICE_PATH};
 use libcluu::registry;
-use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, pci_config_read, space_map_range};
+use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, space_map_range};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, space_grant, Error, Result, PAGE_SIZE};
 
@@ -493,7 +493,22 @@ fn run() -> Result<()> {
     let space_token = info.tokens[TOKEN_SPACE];
     let ipc_token = info.tokens[TOKEN_IPC];
 
-    let pci_device = match pci::find_virtio_device(pci_token, &[0x1049], &[0x1049]) {
+    if info.params[PARAM_DEVICE_PATH] != 0 {
+        let packed = info.params[PARAM_DEVICE_PATH];
+        let bus = ((packed >> 16) & 0xFF) as u8;
+        let device = ((packed >> 8) & 0xFF) as u8;
+        let function = (packed & 0xFF) as u8;
+        debug_print(&format!(
+            "virtio-9p: init from params BDF={:02x}:{:02x}.{}",
+            bus, device, function
+        ))?;
+    }
+    let pci_device = match pci::find_virtio_device_with_params(
+        pci_token,
+        &[0x1049],
+        &[0x1049],
+        &info.params,
+    ) {
         Ok(d) => {
             debug_print(&format!("virtio-9p: found PCI device {:?}", d))?;
             d
@@ -541,17 +556,10 @@ fn run() -> Result<()> {
     };
     debug_print(&format!("virtio-9p: mount_tag={:?}", mount_tag))?;
 
-    let intr_line_word = pci_config_read(
-        pci_token,
-        pci_device.bus,
-        pci_device.device,
-        pci_device.function,
-        0x3c,
-    )?;
-    let irq_number = (intr_line_word & 0xFF) as usize;
+    let irq_number = pci::get_irq_line(pci_token, &pci_device, &info.params)?;
     debug_print(&format!(
-        "virtio-9p: PCI Interrupt Line = {} (raw 0x{:08x})",
-        irq_number, intr_line_word
+        "virtio-9p: PCI Interrupt Line = {}",
+        irq_number
     ))?;
 
     let irq_token = info.tokens[TOKEN_EXTRA_2];
@@ -577,6 +585,8 @@ fn run() -> Result<()> {
     };
     registry::register_output("main", listen_endpoint)?;
     debug_print("virtio-9p: registered as hostfs:main")?;
+
+    let _ = registry::vfs_mount("/host", "hostfs", listen_endpoint);
 
     let registry_endpoint = registry::control_endpoint();
 

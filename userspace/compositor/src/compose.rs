@@ -103,13 +103,13 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
 }
 
 fn chrome_glyph(win: &Window, lx: u16, ly: u16, focused: bool) -> u64 {
-    // Single-line box drawing — unfocused windows.
-    const TL_S: u32 = 0x250C;
-    const TR_S: u32 = 0x2510;
-    const BL_S: u32 = 0x2514;
-    const BR_S: u32 = 0x2518;
-    const H_S:  u32 = 0x2500;
-    const V_S:  u32 = 0x2502;
+    // Light corners + dashed edges — unfocused windows.
+    const TL_S: u32 = 0x250C; // ┌
+    const TR_S: u32 = 0x2510; // ┐
+    const BL_S: u32 = 0x2514; // └
+    const BR_S: u32 = 0x2518; // ┘
+    const H_S:  u32 = 0x254C; // ╌
+    const V_S:  u32 = 0x2506; // ┆
 
     // Double-line box drawing — focused window.
     const TL_D: u32 = 0x2554;

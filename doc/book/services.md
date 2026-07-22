@@ -98,9 +98,49 @@ IPC.
 
 - **IPC**: `DEVMGR_REGISTER_LABEL`, `DEVMGR_REGISTER_CHAR_LABEL`,
   `DEVMGR_GRANT_REGION_LABEL`, `DEVMGR_GRANT_DEVICE_LABEL`,
-  `DEVMGR_REVOKE_LABEL`, `DEVMGR_LIST_FOR_ENVELOPE_LABEL`.
+  `DEVMGR_REVOKE_LABEL`, `DEVMGR_LIST_FOR_ENVELOPE_LABEL`,
+  `DEVMGR_MINT_IRQ_CAP_LABEL` (D3.1 — mints scoped IRQ tokens for
+  drivermgr).
 - **Modules**: `device` (DeviceClass, DeviceEntry), `dev_registry`
   (DevRegistry, VisibleDevice), `handlers`.
+- **Tokens**: `TOKEN_EXTRA_2` = `irq_handle_root_token` (derived from
+  root_token with IRQ_HANDLE|IRQ_ACK|GRANT, wired by init).
+
+### drivermgr — Driver Manager
+
+`userspace/drivermgr/src/main.rs`
+
+Enumerates PCI + ACPI devices, reads `[driver]` sections from container
+manifests, matches devices to bind rules, spawns matched drivers via
+procmgr. Publishes device tree via `/proc/devices`. Spawn behavior
+controlled by `/etc/drivermgr.toml` `spawn_mode` (observe/spawn/hybrid).
+See `doc/book/driver_framework.md` for the full architecture.
+
+- **IPC**: `DRIVERMGR_QUERY_DEVICES_LABEL`, `DRIVERMGR_QUERY_DEVICE_LABEL`
+  (VFS reads /proc/devices).
+- **Modules**: `pci_scan` (D1.2), `acpi_scan` (D1.3), `device_tree`
+  (DeviceNode, DeviceTree), `bind_rules` (BindRule, BindRuleTable, D2.5),
+  `spawn` (D3.2).
+- **Tokens**: `TOKEN_EXTRA_0` = endpoint, `TOKEN_EXTRA_1` = pci_access
+  token, `TOKEN_VFS_VIEW_MGR` = view-manager cap (for VFS view
+  registration to read /var/images/).
+- **Primordial**: yes (D2.7) — init panics if drivermgr dies.
+
+### drivermon — Driver Monitor
+
+`userspace/drivermon/src/main.rs`
+
+Supervises spawned drivers. Receives exit/fault notifications from
+procmgr and the kernel, applies restart policy (restart budget, fallback
+chain, boot-critical panic). Maintains `DriverRuntimeTable` keyed by PID.
+
+- **IPC**: `DRIVERMON_REGISTER_LABEL`, `DRIVERMON_RESPAWN_LABEL`,
+  `DRIVERMON_REBIND_LABEL` (drivermgr → drivermon supervision channel).
+- **Modules**: `handlers` (REGISTER/RESPAWN/REBIND), `runtime_table`
+  (RuntimeEntry, DriverRuntimeTable).
+- **Endpoints**: `main` (control), `notify` (exit-notify from procmgr,
+  D1.6).
+- **Primordial**: yes (D2.7) — init panics if drivermon dies.
 
 ### ramfs — RAM filesystem (STUB, not wired)
 

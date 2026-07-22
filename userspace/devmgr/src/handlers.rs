@@ -15,10 +15,14 @@ use crate::dev_registry::DevRegistry;
 use libcluu::ipc::{
     reply_to_sender, reply_to_sender_with_payload,
     DEVMGR_GRANT_DEVICE_LABEL, DEVMGR_GRANT_REGION_LABEL, DEVMGR_LIST_FOR_ENVELOPE_LABEL,
-    DEVMGR_REGISTER_CHAR_LABEL, DEVMGR_REGISTER_LABEL, DEVMGR_REVOKE_LABEL,
+    DEVMGR_MINT_IRQ_CAP_LABEL, DEVMGR_REGISTER_CHAR_LABEL, DEVMGR_REGISTER_LABEL,
+    DEVMGR_REVOKE_LABEL,
 };
 use libcluu::rights::Rights;
-use libcluu::syscall::{token_derive_scoped_block_region, token_derive_scoped_device_region, token_revoke};
+use libcluu::syscall::{
+    token_derive, token_derive_scoped_block_region, token_derive_scoped_device_region,
+    token_revoke,
+};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error};
 
@@ -175,6 +179,41 @@ pub fn handle_revoke(msg: &Message, fallback_ep: usize) {
         Err(e) => err_to_status(e),
     };
     let reply_msg = Message::new(DEVMGR_REVOKE_LABEL, [status, 0, 0, 0, 0, 0], 1);
+    let _ = reply_to_sender(msg, &reply_msg, fallback_ep, IpcFlags::empty());
+}
+
+/// Mint an IRQ_HANDLE | IRQ_ACK token for a specific IRQ line.
+///
+/// `irq_handle_root_token` is wired into devmgr's TOKEN_EXTRA_2 by init
+/// (D3.1); it carries IRQ_HANDLE | IRQ_ACK | GRANT so devmgr can sub-derive.
+///
+/// The kernel's `TokenDeriveScoped` does not support `ObjectRef::Irq` (only
+/// VfsViewManager / BlockRegion / DeviceRegion), so we use `token_derive`
+/// which inherits the parent's obj_ref. IRQ-line scoping is advisory:
+/// drivermgr tracks which irq_line it requested and passes it as a spawn
+/// param; the driver passes it to `irq_attach(token, ep, irq_line)`, which
+/// checks only the IRQ_HANDLE right, not the obj_ref.
+pub fn handle_mint_irq_cap(
+    msg: &Message,
+    fallback_ep: usize,
+    irq_handle_root_token: usize,
+) {
+    let irq_line = msg.words[1] as u8;
+
+    let (status, token_handle) = {
+        let rights = (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits() as usize;
+        match token_derive(irq_handle_root_token, rights, u64::MAX) {
+            Ok(handle) => (REPLY_OK, handle),
+            Err(e) => (err_to_status(e), 0usize),
+        }
+    };
+
+    let _ = debug_print("devmgr: minted irq cap");
+    let reply_msg = Message::new(
+        DEVMGR_MINT_IRQ_CAP_LABEL,
+        [status, token_handle, irq_line as usize, 0, 0, 0],
+        1,
+    );
     let _ = reply_to_sender(msg, &reply_msg, fallback_ep, IpcFlags::empty());
 }
 

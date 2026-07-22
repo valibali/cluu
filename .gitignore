@@ -108,3 +108,9 @@ __pycache__/
 *.pyo
 python/.venv/
 python/*.egg-info/
+
+# QEMU serial log artifact
+output.logclear
+
+# Session run-continuation files (transient agent state)
+.omo/run-continuation/

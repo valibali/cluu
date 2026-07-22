@@ -1,0 +1,5 @@
+FROM driver
+PROFILE ipc vfs registry device
+DRIVER bind bus=pci vendor=0x1af4 devices=[0x1059]
+BUILD "cargo build --release --manifest-path userspace/virtio-snd/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/release/virtio-snd.elf /sys/virtio-snd
+ENTRYPOINT /sys/virtio-snd

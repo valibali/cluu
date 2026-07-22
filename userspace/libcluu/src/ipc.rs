@@ -77,6 +77,44 @@ pub const CONSOLE_SCROLL_VT_LABEL: u32 = 25;
 /// Payload = path\0 + param overrides (each: u16 index LE + u64 value LE = 10 bytes).
 pub const PROCMGR_SPAWN_SERVICE_LABEL: u32 = 20;
 
+// ──────────────────────────────────────────────────────────────────────
+// Driver spawn param slot indices (D3.2).
+//
+// These are indices into ProcessInfo.params[] used by drivermgr to pass
+// device-specific data to a spawned driver via PROCMGR_SPAWN_SERVICE_LABEL
+// param overrides. Slots 19-29 are in the "reserved for future use" range
+// (slots 0-18 are already assigned — see boot.rs). The procmgr spawn
+// handler rejects reserved metadata slots 10-15 but allows 19+.
+//
+// PARAM_DEVICE_PATH: for PCI devices, packs BDF as (bus<<16|dev<<8|func);
+//   drivers reconstruct the canonical /pci/XX:YY.Z path from it in D3.5.
+//   ACPI device spawn is D6.
+// PARAM_PCI_BDF: same packed BDF as PARAM_DEVICE_PATH (for PCI devices).
+// PARAM_PCI_BAR0..5: the 6 PCI base address register values.
+// PARAM_IRQ_LINE: the IRQ line assigned to the device.
+// PARAM_DMA_BASE / PARAM_DMA_PAGES: DMA region (D3.5 allocates; D3.2
+//   passes 0 as placeholder when rule.dma is true).
+// ──────────────────────────────────────────────────────────────────────
+pub const PARAM_DEVICE_PATH: usize = 19;
+pub const PARAM_PCI_BDF: usize = 20;
+pub const PARAM_PCI_BAR0: usize = 21;
+pub const PARAM_PCI_BAR1: usize = 22;
+pub const PARAM_PCI_BAR2: usize = 23;
+pub const PARAM_PCI_BAR3: usize = 24;
+pub const PARAM_PCI_BAR4: usize = 25;
+pub const PARAM_PCI_BAR5: usize = 26;
+pub const PARAM_IRQ_LINE: usize = 27;
+pub const PARAM_DMA_BASE: usize = 28;
+pub const PARAM_DMA_PAGES: usize = 29;
+
+/// Token request entry: slot index + rights bitmask.
+/// Sent in the spawn payload after param overrides so procmgr can
+/// derive capability tokens from its authority and place them in
+/// the spawned driver's ProcessInfo token array.
+///
+/// Wire format: 2 bytes slot (LE u16) + 4 bytes rights (LE u32) = 6 bytes.
+/// procmgr derives from self.token (boot root) with the requested rights.
+
 /// Set the per-client VFS view (mount list). Request from procmgr to VFS.
 ///
 /// Message words:
@@ -168,6 +206,34 @@ pub const PROCMGR_LIST_PIDS_LABEL: u32 = 0x4A;
 /// Handler replies directly via `ipc_send(reply_ep, ...)`: words[0]=errno,
 /// words[5]=caller_cookie, payload=postcard(ProcInfo) on hit.
 pub const PROCMGR_PROC_INFO_LABEL: u32 = 0x4B;
+
+/// drivermgr → procmgr: register a notify endpoint for exit notifications.
+/// words[0] = pid
+/// words[1] = notify_endpoint
+/// Reply: words[0] = 0 on success, errno on failure
+///
+/// Used by drivermgr after PROCMGR_SPAWN_SERVICE_LABEL to direct
+/// PROC_EXIT_LABEL notifications for the spawned driver to drivermon's
+/// notify endpoint. procmgr looks up the exit_cookie via pid_to_cookie
+/// and inserts (cookie, notify_endpoint) into the exit_notify map.
+pub const PROCMGR_REGISTER_EXIT_NOTIFY_LABEL: u32 = 0x52;
+
+/// drivermgr → procmgr: set the fault handler endpoint for a spawned
+/// driver thread. words[0] = pid, words[1] = fault_endpoint_token.
+/// Reply: words[0] = 0 on success, errno on failure.
+///
+/// procmgr looks up the thread_token via pid_to_cookie → exit_table
+/// (cookie → thread_token) and calls `thread_set_fault_endpoint`.
+/// Used by drivermgr after PROCMGR_SPAWN_SERVICE_LABEL so driver
+/// faults are delivered to drivermon's fault endpoint instead of
+/// killing the thread outright.
+pub const PROCMGR_SET_FAULT_EP_LABEL: u32 = 0x53;
+
+/// shell/rc.boot → procmgr: spawn a container by image name (like autostart).
+/// words[0] = payload_len (set by send_msg_with_payload)
+/// Payload: image_name (UTF-8, no NUL) — e.g. "console", "compositor"
+/// Reply: words[0] = 0 on success, errno on failure. words[1] = pid.
+pub const PROCMGR_START_IMAGE_LABEL: u32 = 0x54;
 
 /// Allocate a new pipe. Reply: words[0]=status, words[1]=write_token,
 /// words[2]=read_token, words[3]=pipe_id.
@@ -346,6 +412,12 @@ pub const VFS_DERIVE_CHILD_FD_LABEL: u32 = 0x77;
 //                [u64 status, u64 derived_token, u64 child_cid, u64 child_rfd]
 pub const VFS_DERIVE_CHILD_FD_BATCH_LABEL: u32 = 0x78;
 
+/// VFS_MOUNT_LABEL — service → VFS: mount my endpoint at a path.
+/// words[0] = endpoint_token (the service's listen endpoint).
+/// payload = "mount_path\0service_name\0"
+/// Reply: words[0] = 0 on success, errno on failure.
+pub const VFS_MOUNT_LABEL: u32 = 0x79;
+
 // virtio-blk raw-block session IPC labels (Phase 6 of virtio-blk modern redesign).
 // `BLK_OPEN_SESSION` and `BLK_CLOSE_SESSION` go to the driver's listen endpoint.
 // `BLK_SUBMIT` is fire-and-forget into the driver. `BLK_COMPLETE` and
@@ -388,9 +460,97 @@ pub const AUDIO_TID_CLEANUP: u32 = 0x604;
 pub const DEVMGR_REGISTER_LABEL: u32 = 0x500;
 pub const DEVMGR_GRANT_REGION_LABEL: u32 = 0x501;
 pub const DEVMGR_REVOKE_LABEL: u32 = 0x502;
+/// drivermgr → devmgr: mint a scoped IRQ_HANDLE token for a specific IRQ line.
+/// words[1] = irq_line (u8). Reply: words[0]=status, words[1]=token_handle.
+pub const DEVMGR_MINT_IRQ_CAP_LABEL: u32 = 0x503;
 pub const DEVMGR_REGISTER_CHAR_LABEL: u32 = 0x510;
 pub const DEVMGR_GRANT_DEVICE_LABEL: u32 = 0x511;
 pub const DEVMGR_LIST_FOR_ENVELOPE_LABEL: u32 = 0x512;
+
+// drivermgr IPC labels — VFS /proc/devices backend queries drivermgr for the
+// device tree.  QUERY_DEVICES returns the full tree as text (one line per
+// device); QUERY_DEVICE takes a canonical path (e.g. "/pci/00:04.0") as the
+// IPC payload and returns the per-device detail text.  Both reply via
+// `reply_to_sender_with_payload`.  Numbers chosen in the 0x520 range to
+// leave room for further devmgr labels in 0x503..0x50F.
+pub const DRIVERMGR_QUERY_DEVICES_LABEL: u32 = 0x520;
+pub const DRIVERMGR_QUERY_DEVICE_LABEL: u32 = 0x521;
+
+/// drivermon → drivermgr: request respawn of a driver for a device.
+/// words[0] = payload_len (set by send_msg_with_payload)
+/// words[1] = driver_image_len (0 = use current image from bind rule)
+/// Payload: "device_path\0driver_image" (driver_image optional if len=0)
+///
+/// Fire-and-forget: drivermon sends this on exit-notify when restart
+/// policy allows a restart. drivermgr looks up the BindRule by
+/// device_path, respawns via spawn_driver, and the new REGISTER IPC
+/// arrives at drivermon with the new PID.
+pub const DRIVERMGR_RESPAWN_DEVICE_LABEL: u32 = 0x523;
+
+/// drivermon → drivermgr: notify device state change.
+/// words[0] = payload_len (set by send_msg_with_payload)
+/// words[1] = state (0=Bound, 1=Restarting, 2=Failed)
+/// Payload: device_path (UTF-8, no NUL)
+///
+/// Fire-and-forget: drivermon sends this when a supervised driver
+/// transitions state. drivermgr updates the DeviceNode.state in the
+/// device tree so `/proc/devices` reflects the current lifecycle.
+pub const DRIVERMGR_DEVICE_STATE_LABEL: u32 = 0x524;
+
+/// shell/rc.boot → drivermgr: request bus re-scan + driver spawn.
+/// words[0] = payload_len (set by send_msg_with_payload)
+/// Payload: bus name (UTF-8, no NUL) — "pci" or "acpi"
+///
+/// Synchronous reply: words[0] = 0 on success, errno on failure.
+pub const DRIVERMGR_PROBE_LABEL: u32 = 0x525;
+
+/// Kernel → fault handler: fault IPC message label.
+///
+/// Sent by the kernel to a thread's fault endpoint when the thread
+/// faults (page fault, GP, invalid opcode, div-by-zero). Wire format:
+///   words[0] = fault_type (0=PageFault, 1=GP, 2=InvalidOpcode, 3=DivByZero)
+///   words[1] = fault_addr
+///   words[2] = error_code
+///   words[3] = rip
+///   words[4] = thread_id (tid)
+///   words[5] = reply_id (0 if thread already dead, non-zero if waiting)
+///
+/// Reply convention (via `ipc_reply` with reply_id): label == 0 →
+/// RESUME the thread (restore saved context); label != 0 → KILL the
+/// thread. If reply_id is 0, no reply is needed — the thread is
+/// already dead.
+pub const FAULT_LABEL: u32 = 0xFA017;
+
+// drivermon IPC labels — drivermgr → drivermon supervision channel.
+//
+// REGISTER  — drivermgr → drivermon after spawning a driver: adds a
+//             RuntimeEntry to the supervised runtime table.
+// RESPAWN   — drivermgr → drivermon after re-spawning a crashed driver:
+//             increments restart_count for the device's entry.
+// REBIND    — drivermgr → drivermon when a fallback driver replaces the
+//             primary: replaces driver_image, returns the old PID.
+//
+// Wire format (all three): payload-only message. `words[0]` is the
+// payload length (set by `parse_message`); message-specific data lives
+// in `words[1..]` and the payload is a NUL-separated string list.
+//
+// REGISTER words: [payload_len, pid, policy, has_fallback]
+//   payload:      "device_path\0driver_image[\0fallback]"
+//   reply words:  [status, 0, 0, 0, 0, 0]  (status 0 = OK)
+// RESPAWN words:  [payload_len]
+//   payload:      "device_path"
+//   reply words:  [status, restart_count, 0, 0, 0, 0]
+//   status 0 = OK, 1 = NotFound
+// REBIND words:   [payload_len]
+//   payload:      "device_path\0new_driver_image"
+//   reply words:  [status, old_pid, 0, 0, 0, 0]
+//   status 0 = OK, 1 = NotFound (old_pid 0 when not found)
+//
+// Numbers chosen in the 0x530 range — above drivermgr query labels
+// (0x520..0x521) and below audio labels (0x600+).
+pub const DRIVERMON_REGISTER_LABEL: u32 = 0x530;
+pub const DRIVERMON_RESPAWN_LABEL: u32 = 0x531;
+pub const DRIVERMON_REBIND_LABEL: u32 = 0x532;
 
 // tpmd IPC labels (per-service label space)
 pub const TPMD_STARTUP_LABEL: u32    = 1;

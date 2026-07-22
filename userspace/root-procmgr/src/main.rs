@@ -671,9 +671,10 @@ impl ProcessManager {
                         self.on_child_reaped(owner_tid);
                     }
                     if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
-                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 3);
                         notify_msg.words[0] = cookie;
                         notify_msg.words[1] = 128 + SIGKILL;
+                        notify_msg.words[2] = child_pid;
                         let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
                     }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {
@@ -1142,43 +1143,86 @@ impl ProcessManager {
         }
     }
 
-    fn run_autostart(&mut self) {
-        let data = match self.read_file_from_vfs("/etc/autostart.toml") {
+    fn run_rc_boot(&mut self) {
+        let _ = debug_print("procmgr: rc.boot — reading /etc/rc.boot");
+        let data = match self.read_file_from_vfs("/etc/rc.boot") {
             Some(d) => d,
             None => {
-                let _ = debug_print("procmgr: autostart.toml not found, skipping");
+                let _ = debug_print("procmgr: /etc/rc.boot not found, skipping");
                 return;
             }
         };
-
         let text = match core::str::from_utf8(&data) {
             Ok(s) => s,
             Err(_) => {
-                let _ = debug_print("procmgr: autostart.toml is not valid UTF-8");
+                let _ = debug_print("procmgr: /etc/rc.boot not valid UTF-8");
                 return;
             }
         };
-        let doc = match libcluu::toml::parse(text) {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = debug_print(&format!("procmgr: autostart.toml parse error: {}", e));
-                return;
+        let _ = debug_print(&format!("procmgr: rc.boot {} bytes", text.len()));
+
+        for (lineno, line) in text.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
             }
-        };
-
-        let services = doc.array_tables("service");
-        let _ = debug_print(&format!("procmgr: autostart {} service(s)", services.len()));
-
-        match self.pipelined_autostart(&services[..]) {
-            Ok(()) => {}
-            Err(e) => {
-                let _ = debug_print(&format!(
-                    "procmgr: pipelined autostart failed {:?}, falling back to serial", e
-                ));
-                self.run_autostart_serial(&services[..]);
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+            match parts[0] {
+                "start" => {
+                    if parts.len() < 2 {
+                        let _ = debug_print(&format!("procmgr: rc.boot:{}: start: missing image name", lineno + 1));
+                        continue;
+                    }
+                    let image = parts[1];
+                    let _ = debug_print(&format!("procmgr: rc.boot: start {}", image));
+                    let dummy = libcluu::toml::TomlTable {
+                        name: String::new(),
+                        is_array: false,
+                        entries: Vec::new(),
+                    };
+                    if let Err(e) = self.autostart_container(image, &dummy) {
+                        let _ = debug_print(&format!("procmgr: rc.boot: start {} failed: {:?}", image, e));
+                    }
+                }
+                "wait" => {
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let service = parts[1];
+                    let output = if parts.len() >= 3 { parts[2] } else { "main" };
+                    let _ = debug_print(&format!("procmgr: rc.boot: wait {}:{}", service, output));
+                    for _ in 0..200 {
+                        if libcluu::registry::subscribe_output(service, output).is_ok() {
+                            break;
+                        }
+                        let _ = libcluu::yield_cpu();
+                    }
+                }
+                "probe" => {
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let _ = debug_print(&format!("procmgr: rc.boot: probe {} (no-op, drivermgr auto-probes at startup)", parts[1]));
+                }
+                "mount" => {
+                    if parts.len() < 3 {
+                        continue;
+                    }
+                    let _ = debug_print(&format!("procmgr: rc.boot: mount {} {} (deferred to service self-registration)", parts[1], parts[2]));
+                }
+                _ => {
+                    let _ = debug_print(&format!("procmgr: rc.boot:{}: unknown command '{}'", lineno + 1, parts[0]));
+                }
             }
         }
-        let _ = debug_print("procmgr: autostart complete");
+        let _ = debug_print("procmgr: rc.boot complete");
+    }
+
+    fn run_autostart(&mut self) {
+        self.run_rc_boot();
     }
 
     fn run_autostart_serial(&mut self, services: &[&libcluu::toml::TomlTable]) {
@@ -2144,9 +2188,10 @@ impl ProcessManager {
         }
         // Notify parent of exit (they see the exit, restart is internal)
         if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
-            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 3);
             notify_msg.words[0] = cookie;
             notify_msg.words[1] = exit_code as usize;
+            notify_msg.words[2] = pid;
             let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
         }
 
@@ -2381,9 +2426,10 @@ impl ProcessManager {
         }
 
         if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
-            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+            let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 3);
             notify_msg.words[0] = cookie;
             notify_msg.words[1] = exit_code as usize;
+            notify_msg.words[2] = dead_pid as usize;
             let _ = send(notify_endpoint, &notify_msg, IpcFlags::empty());
         }
 
@@ -2541,9 +2587,10 @@ impl ProcessManager {
 
                 // Notify parent (e.g. shell) about the fault exit.
                 if let Some(notify_endpoint) = self.exit_notify.remove(&cookie) {
-                    let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                    let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 3);
                     notify_msg.words[0] = cookie;
                     notify_msg.words[1] = fault_exit_code as usize;
+                    notify_msg.words[2] = pid;
                     let _ = send(notify_endpoint, &notify_msg, IpcFlags::empty());
                 }
 
@@ -2612,6 +2659,15 @@ impl ProcessManager {
         }
         if msg.tag.label == PROCMGR_SPAWN_SERVICE_LABEL {
             return self.handle_service_spawn(msg, payload);
+        }
+        if msg.tag.label == libcluu::ipc::PROCMGR_START_IMAGE_LABEL {
+            return self.handle_start_image(msg, payload, sender_tid);
+        }
+        if msg.tag.label == libcluu::ipc::PROCMGR_REGISTER_EXIT_NOTIFY_LABEL {
+            return self.handle_register_exit_notify(msg, sender_tid);
+        }
+        if msg.tag.label == libcluu::ipc::PROCMGR_SET_FAULT_EP_LABEL {
+            return self.handle_set_fault_ep(msg, sender_tid);
         }
         if msg.tag.label == PROCMGR_CONTAINER_RUN_LABEL {
             return self.handle_container_run(msg, payload, sender_tid);
@@ -4093,6 +4149,48 @@ impl ProcessManager {
         Ok(())
     }
 
+    fn handle_start_image(&mut self, msg: &Message, payload: &[u8], _sender_tid: usize) -> Result<()> {
+        let reply_token = libcluu::ipc::extract_reply_id(msg);
+        let image_name = match core::str::from_utf8(payload) {
+            Ok(s) => s.trim_end_matches('\0'),
+            Err(_) => {
+                self.reply_start_image(reply_token, libcluu::Error::InvalidArgument.to_errno() as usize, 0);
+                return Ok(());
+            }
+        };
+        if image_name.is_empty() {
+            self.reply_start_image(reply_token, libcluu::Error::InvalidArgument.to_errno() as usize, 0);
+            return Ok(());
+        }
+        let _ = debug_print(&format!("procmgr: start_image '{}'", image_name));
+        let dummy_table = libcluu::toml::TomlTable {
+            name: String::new(),
+            is_array: false,
+            entries: Vec::new(),
+        };
+        match self.autostart_container(image_name, &dummy_table) {
+            Ok(()) => {
+                let pid = self.container_instances.values()
+                    .filter(|c| c.name == image_name)
+                    .map(|c| c.pid)
+                    .last();
+                self.reply_start_image(reply_token, 0, pid.unwrap_or(0));
+            }
+            Err(e) => {
+                let _ = debug_print(&format!("procmgr: start_image '{}' failed: {:?}", image_name, e));
+                self.reply_start_image(reply_token, libcluu::Error::Unknown.to_errno() as usize, 0);
+            }
+        }
+        Ok(())
+    }
+
+    fn reply_start_image(&self, reply_token: Option<usize>, status: usize, pid: usize) {
+        if let Some(rt) = reply_token {
+            let r = Message::new(libcluu::ipc::PROCMGR_START_IMAGE_LABEL, [status, pid, 0, 0, 0, 0], 1);
+            let _ = libcluu::ipc::reply(rt, &r, IpcFlags::empty());
+        }
+    }
+
     /// Handle PROCMGR_SPAWN_SERVICE_LABEL: generic system service spawn.
     ///
     /// The caller specifies path, priority, token mode, and param overrides.
@@ -4105,7 +4203,8 @@ impl ProcessManager {
     /// - Token mode must be a valid enum value (0-2).
     /// - The spawn endpoint itself is capability-gated (only holders can call).
     fn handle_service_spawn(&mut self, msg: &Message, payload: &[u8]) -> Result<()> {
-        // words[0] = payload length (used by parse_message), metadata in words[1..3]
+        // words[0] = payload length (used by parse_message), metadata in words[1..4]
+        // words[5] is reserved by kernel for reply_id injection (REPLY_ID_WORD=5).
         let priority = msg.words[1];
         let token_extra_mode = msg.words[2]; // 0=none, 1=listen, 2=grantable
         let param_count = msg.words[3];
@@ -4212,6 +4311,43 @@ impl ProcessManager {
             params[idx] = val;
         }
 
+        // Parse token requests from payload (after params).
+        // Each request: 2 bytes slot (LE u16) + 4 bytes rights (LE u32) = 6 bytes.
+        // Count is derived from remaining payload length (words[5] is kernel reply_id).
+        let token_data_start = path_nul_end + param_count * 10;
+        let token_data = &payload[token_data_start..];
+        let token_request_count = token_data.len() / 6;
+        if token_request_count > 8 {
+            let _ = debug_print(&format!(
+                "procmgr: service spawn rejected: too many token requests ({})",
+                token_request_count
+            ));
+            return Ok(());
+        }
+        let mut token_requests: Vec<(usize, u32)> = Vec::new();
+        for i in 0..token_request_count {
+            let offset = i * 6;
+            if offset + 6 > token_data.len() {
+                let _ = debug_print("procmgr: service spawn: token data truncated");
+                break;
+            }
+            let slot = u16::from_le_bytes([token_data[offset], token_data[offset + 1]]) as usize;
+            let rights = u32::from_le_bytes([
+                token_data[offset + 2],
+                token_data[offset + 3],
+                token_data[offset + 4],
+                token_data[offset + 5],
+            ]);
+            if slot >= 17 || slot < 9 {
+                let _ = debug_print(&format!(
+                    "procmgr: service spawn rejected: token slot {} out of range (9-16)",
+                    slot
+                ));
+                return Ok(());
+            }
+            token_requests.push((slot, rights));
+        }
+
         // NOTE: PARAM_CAP_PROFILE (slot 5) intentionally NOT written here.
         // Cap profile is enforced server-side via pid_to_profile, and slot 5
         // is shared with PARAM_CONSOLE_INSTANCE for console services.
@@ -4267,6 +4403,14 @@ impl ProcessManager {
             _ => {} // No TOKEN_EXTRA_0
         }
 
+        for (slot, rights_bits) in &token_requests {
+            if *slot == TOKEN_EXTRA_0 {
+                continue;
+            }
+            let derived = token_derive(self.token, *rights_bits as usize, u64::MAX)?;
+            tokens[*slot] = derived;
+        }
+
         // Map ProcessInfo (system service: no exit tracking, no argv).
         let info = ProcessInfo {
             exit_token: 0,
@@ -4303,14 +4447,174 @@ impl ProcessManager {
             THREAD_CREATE_START_SUSPENDED,
         )?;
 
-        // Register VFS view for the service based on its profile.
-        // System services (pid=0) don't get private storage — container_id=0.
-        // parent_container_id=0, is_identity_switch=false: procmgr is spawner;
-        // no parent to check against.
+        let child_tid = match thread_get_id(thread_token) {
+            Ok(tid) => tid,
+            Err(err) => {
+                let _ = thread_destroy(thread_token);
+                let _ = debug_print(&format!(
+                    "procmgr: service spawn thread_get_id failed err={:?}",
+                    err
+                ));
+                return Err(err);
+            }
+        };
+
+        let pid = self.next_pid();
+        let exit_cookie = self.next_exit_cookie();
+        self.exit_table.insert(exit_cookie, thread_token);
+        self.pid_to_cookie.insert(pid, exit_cookie);
+        self.cookie_to_pid.insert(exit_cookie, pid);
+        self.pid_to_tid.insert(pid, child_tid);
+        self.tid_to_pid.insert(child_tid, pid);
+        self.pid_to_profile.insert(pid, requested_profile);
+        if let Some(tok) = extract_reply_id(msg) {
+            let reply_msg = Message::new(
+                PROCMGR_SPAWN_SERVICE_LABEL,
+                [0, pid, exit_cookie, 0, 0, 0],
+                3,
+            );
+            let _ = reply(tok, &reply_msg, IpcFlags::empty());
+        }
+
         let view_mounts = default_view_for_profile(requested_profile);
         self.install_view_and_run(thread_token, &view_mounts, requested_profile, 0, 0, false, 0, 96);
 
-        let _ = debug_print(&format!("procmgr: service '{}' spawned", path));
+        let _ = debug_print(&format!(
+            "procmgr: service '{}' spawned pid={} cookie={}",
+            path, pid, exit_cookie
+        ));
+        Ok(())
+    }
+
+    /// Handle PROCMGR_REGISTER_EXIT_NOTIFY_LABEL: bind a notify endpoint
+    /// to a spawned PID so the caller receives PROC_EXIT_LABEL when the
+    /// process exits. Used by drivermgr to direct driver exit
+    /// notifications to drivermon's notify channel.
+    fn handle_register_exit_notify(
+        &mut self,
+        msg: &Message,
+        sender_tid: usize,
+    ) -> Result<()> {
+        let pid = msg.words[0];
+        let raw_notify_endpoint = msg.words[1];
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(
+            libcluu::ipc::PROCMGR_REGISTER_EXIT_NOTIFY_LABEL,
+            [0; 6],
+            1,
+        );
+
+        let cookie = match self.pid_to_cookie.get(&pid).copied() {
+            Some(c) => c,
+            None => {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                let _ = debug_print(&format!(
+                    "procmgr: register_exit_notify pid={} not found (sender_tid={})",
+                    pid, sender_tid
+                ));
+                return Ok(());
+            }
+        };
+
+        let derived = if raw_notify_endpoint == 0 {
+            0
+        } else {
+            raw_notify_endpoint
+        };
+
+        if derived != 0 {
+            self.exit_notify.insert(cookie, derived);
+        }
+        reply_msg.words[0] = 0;
+        if let Some(tok) = reply_token {
+            let _ = reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        let _ = debug_print(&format!(
+            "procmgr: registered exit_notify pid={} cookie={}",
+            pid, cookie
+        ));
+        Ok(())
+    }
+
+    /// Handle PROCMGR_SET_FAULT_EP_LABEL: set the fault handler endpoint
+    /// for a spawned driver thread. drivermgr calls this after
+    /// PROCMGR_SPAWN_SERVICE_LABEL so driver faults are delivered to
+    /// drivermon's fault endpoint instead of killing the thread.
+    /// words[0] = pid, words[1] = fault_endpoint_token. Reply:
+    /// words[0] = 0 on success, errno on failure.
+    fn handle_set_fault_ep(
+        &mut self,
+        msg: &Message,
+        sender_tid: usize,
+    ) -> Result<()> {
+        let pid = msg.words[0];
+        let raw_fault_endpoint = msg.words[1];
+        let reply_token = extract_reply_id(msg);
+        let mut reply_msg = Message::new(
+            libcluu::ipc::PROCMGR_SET_FAULT_EP_LABEL,
+            [0; 6],
+            1,
+        );
+
+        let cookie = match self.pid_to_cookie.get(&pid).copied() {
+            Some(c) => c,
+            None => {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                let _ = debug_print(&format!(
+                    "procmgr: set_fault_ep pid={} not found (sender_tid={})",
+                    pid, sender_tid
+                ));
+                return Ok(());
+            }
+        };
+
+        let thread_token = match self.exit_table.get(&cookie).copied() {
+            Some(t) => t,
+            None => {
+                reply_msg.words[0] = Error::NotFound.to_errno() as usize;
+                if let Some(tok) = reply_token {
+                    let _ = reply(tok, &reply_msg, IpcFlags::empty());
+                }
+                let _ = debug_print(&format!(
+                    "procmgr: set_fault_ep pid={} cookie={} — no thread_token in exit_table",
+                    pid, cookie
+                ));
+                return Ok(());
+            }
+        };
+
+        let derived = if raw_fault_endpoint == 0 {
+            0
+        } else {
+            raw_fault_endpoint
+        };
+
+        if let Err(err) = thread_set_fault_endpoint(thread_token, derived) {
+            reply_msg.words[0] = err.to_errno() as usize;
+            if let Some(tok) = reply_token {
+                let _ = reply(tok, &reply_msg, IpcFlags::empty());
+            }
+            let _ = debug_print(&format!(
+                "procmgr: set_fault_ep thread_set_fault_endpoint failed pid={} err={:?}",
+                pid, err
+            ));
+            return Ok(());
+        }
+
+        reply_msg.words[0] = 0;
+        if let Some(tok) = reply_token {
+            let _ = reply(tok, &reply_msg, IpcFlags::empty());
+        }
+        let _ = debug_print(&format!(
+            "procmgr: set_fault_ep pid={} cookie={} thread_token={}",
+            pid, cookie, thread_token
+        ));
         Ok(())
     }
 
@@ -6573,9 +6877,10 @@ impl ProcessManager {
                     }
                     // Notify parent so waitpid() unblocks (exit code = 128+signal per POSIX)
                     if let Some(notify_ep) = self.exit_notify.remove(&cookie) {
-                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 2);
+                        let mut notify_msg = Message::new(PROCMGR_EXIT_LABEL, [0; 6], 3);
                         notify_msg.words[0] = cookie;
                         notify_msg.words[1] = 128 + signal;
+                        notify_msg.words[2] = target_pid;
                         let _ = send(notify_ep, &notify_msg, IpcFlags::empty());
                     }
                     if let Some(st) = self.cookie_to_space.remove(&cookie) {

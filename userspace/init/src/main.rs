@@ -20,8 +20,11 @@ mod services;
 mod wiring;
 
 use alloc::format;
+use libcluu::tar::find_member;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, recv, yield_cpu, Result};
+
+use crate::services::ServiceKind;
 
 #[no_mangle]
 /// Kernel entrypoint for the init process.
@@ -48,10 +51,16 @@ fn run() -> Result<()> {
         return Err(libcluu::Error::InvalidOperation);
     }
     debug_print("init: boot manifest parsed")?;
+
+    // Read spawn_mode from initrd to decide whether init should skip driver
+    // services. In spawn mode, drivermgr spawns drivers (including virtio-blk)
+    // from initrd before userdisk is mounted; init must not also spawn them.
+    let skip_drivers = read_skip_drivers_flag(initrd);
+
     let ctx = context::InitContext::new(boot, initrd)?;
 
     // Track primordial services by exit cookie for identification on death.
-    let mut cookie_to_name: [(usize, &str); 8] = [(0, ""); 8];
+    let mut cookie_to_name: [(usize, &str); 16] = [(0, ""); 16];
     let mut num_primordials = 0usize;
 
     // Collect SHA-256 hashes of each service binary for measured boot.
@@ -63,6 +72,13 @@ fn run() -> Result<()> {
     // notified when they die.  Non-primordial services (e.g. tpmd) get
     // cookie 0 and may exit silently.
     for (index, service) in services::SERVICE_LIST.iter().enumerate() {
+        if skip_drivers && is_driver_kind(service.kind) {
+            let _ = debug_print(&format!(
+                "init: skipping {} (spawn mode — drivermgr will spawn)",
+                service.name
+            ));
+            continue;
+        }
         let is_primordial = services::PRIMORDIAL_SERVICES.contains(&service.name);
         let exit_cookie = if is_primordial { index + 1 } else { 0 };
         let hash = wiring::launch_service(&ctx, service, index, Some(&manifest), exit_cookie)?;
@@ -121,6 +137,15 @@ fn run() -> Result<()> {
                             "init: FATAL — primordial '{}' exited (code {}), system halt",
                             name, exit_code
                         ));
+                    }
+                }
+                // Halt regardless — if ACPI/reset failed, spin forever
+                loop { let _ = yield_cpu(); }
+            }
+            Err(_) => {
+                let _ = yield_cpu();
+            }
+        }
     }
 }
 
@@ -143,12 +168,28 @@ fn acpi_poweroff(ctx: &context::InitContext) {
     let _ = debug_print("init: FADT-derived S5 failed, falling back to QEMU 0x604");
     let _ = libcluu::syscall::port_out16(ctx.pci_token, 0x604, 0x2000);
 }
-                // Halt regardless — if ACPI/reset failed, spin forever
-                loop { let _ = yield_cpu(); }
-            }
-            Err(_) => {
-                let _ = yield_cpu();
-            }
+
+fn is_driver_kind(kind: ServiceKind) -> bool {
+    matches!(kind, ServiceKind::VirtioBlk)
+}
+
+fn read_skip_drivers_flag(initrd: &[u8]) -> bool {
+    let config_data = match find_member(initrd, "etc/drivermgr.toml") {
+        Some(data) => data,
+        None => return false,
+    };
+    let text = match core::str::from_utf8(config_data) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let doc = match libcluu::toml::parse(text) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if let Some(t) = doc.table("drivermgr") {
+        if let Some(s) = t.get_str("spawn_mode") {
+            return s == "spawn";
         }
     }
+    false
 }

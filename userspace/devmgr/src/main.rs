@@ -27,11 +27,11 @@ mod device;
 mod dev_registry;
 mod handlers;
 
-use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1};
+use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2};
 use libcluu::ipc::{
     parse_message, DEVMGR_GRANT_DEVICE_LABEL, DEVMGR_GRANT_REGION_LABEL,
-    DEVMGR_LIST_FOR_ENVELOPE_LABEL, DEVMGR_REGISTER_CHAR_LABEL, DEVMGR_REGISTER_LABEL,
-    DEVMGR_REVOKE_LABEL,
+    DEVMGR_LIST_FOR_ENVELOPE_LABEL, DEVMGR_MINT_IRQ_CAP_LABEL, DEVMGR_REGISTER_CHAR_LABEL,
+    DEVMGR_REGISTER_LABEL, DEVMGR_REVOKE_LABEL,
 };
 use libcluu::registry;
 use libcluu::syscall::ipc_recv_any_with_sender;
@@ -52,6 +52,7 @@ fn run() -> Result<()> {
     let endpoint = info.tokens[TOKEN_EXTRA_0];
     let boot_root_block_token = info.tokens[TOKEN_EXTRA_1];
     let boot_root_device_token = info.tokens[TOKEN_EXTRA_1];
+    let irq_handle_root_token = info.tokens[TOKEN_EXTRA_2];
 
     registry::init("devmgr")?;
     registry::register_output("main", endpoint)?;
@@ -103,6 +104,9 @@ fn run() -> Result<()> {
                     }
                     DEVMGR_REVOKE_LABEL => {
                         handlers::handle_revoke(msg, endpoint);
+                    }
+                    DEVMGR_MINT_IRQ_CAP_LABEL => {
+                        handlers::handle_mint_irq_cap(msg, endpoint, irq_handle_root_token);
                     }
                     DEVMGR_LIST_FOR_ENVELOPE_LABEL => {
                         handlers::handle_list_for_envelope(

@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+use libcluu::ipc::{PARAM_DEVICE_PATH, PARAM_IRQ_LINE};
 use libcluu::pci;
 use libcluu::syscall::{pci_config_read, pci_config_write};
 use libcluu::{Error, Result};
@@ -107,6 +108,78 @@ pub fn find_virtio_device(
 
     let _ = libcluu::debug_print("virtio-core/pci: no matching virtio device found");
     Err(Error::NotFound)
+}
+
+/// Param-driven variant of `find_virtio_device`.
+///
+/// If `params[PARAM_DEVICE_PATH] != 0`, the driver was spawned by drivermgr
+/// with the device's packed BDF (bus<<16 | dev<<8 | func). We skip the PCI
+/// bus scan and validate the named device's vendor/device IDs directly.
+/// Otherwise, we delegate to `find_virtio_device` (unchanged self-probe).
+pub fn find_virtio_device_with_params(
+    pci_token: usize,
+    accepted_device_ids: &[u16],
+    modern_device_ids: &[u16],
+    params: &[u64; 32],
+) -> Result<PciDevice> {
+    let packed = params[PARAM_DEVICE_PATH];
+    if packed == 0 {
+        return find_virtio_device(pci_token, accepted_device_ids, modern_device_ids);
+    }
+
+    let bus = ((packed >> 16) & 0xFF) as u8;
+    let device = ((packed >> 8) & 0xFF) as u8;
+    let function = (packed & 0xFF) as u8;
+
+    let _ = libcluu::debug_print(&alloc::format!(
+        "virtio-core/pci: init from params BDF={:02x}:{:02x}.{}",
+        bus,
+        device,
+        function
+    ));
+
+    let (vendor_id, device_id) = pci::read_ids(pci_token, bus, device, function)?;
+    if vendor_id != VIRTIO_VENDOR_ID || !accepted_device_ids.contains(&device_id) {
+        let _ = libcluu::debug_print(&alloc::format!(
+            "virtio-core/pci: param device {:02x}:{:02x}.{} not a matching virtio device ({:04x}:{:04x})",
+            bus,
+            device,
+            function,
+            vendor_id,
+            device_id
+        ));
+        return Err(Error::NotFound);
+    }
+
+    let is_modern = modern_device_ids.contains(&device_id);
+    init_device(
+        pci_token, bus, device, function, vendor_id, device_id, is_modern,
+    )
+}
+
+/// Resolve the legacy PCI interrupt line (offset 0x3C low byte) for `dev`.
+///
+/// In param-driven mode (`params[PARAM_DEVICE_PATH] != 0`), drivermgr has
+/// already assigned the IRQ and passes it via `params[PARAM_IRQ_LINE]` —
+/// we return that directly. Otherwise we fall back to reading PCI config
+/// space offset 0x3C (the existing self-probe path).
+pub fn get_irq_line(
+    pci_token: usize,
+    dev: &PciDevice,
+    params: &[u64; 32],
+) -> Result<usize> {
+    if params[PARAM_DEVICE_PATH] != 0 {
+        return Ok(params[PARAM_IRQ_LINE] as usize);
+    }
+
+    let intr_line_word = pci_config_read(
+        pci_token,
+        dev.bus,
+        dev.device,
+        dev.function,
+        0x3c,
+    )?;
+    Ok((intr_line_word & 0xFF) as usize)
 }
 
 fn init_device(

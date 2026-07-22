@@ -1,0 +1,8 @@
+# /etc/profile — per-session user mounts, sourced by shell at login.
+#
+# Runs at every login. Order: /etc/profile → /etc/shellrc → ~/.shellrc.
+# Use for per-session VFS mounts (e.g. mount /host).
+
+# /host mount: virtio-9p registers as hostfs:main, calls vfs_mount itself.
+# If you want to mount a different service, uncomment and adapt:
+# mount /host hostfs

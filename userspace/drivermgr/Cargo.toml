@@ -1,0 +1,17 @@
+[package]
+name = "cluu-drivermgr"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU driver manager — enumerates devices, binds drivers, spawns driver processes"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-acpi = { path = "../acpi" }
+cluu-driver-framework = { path = "../driver-framework" }
+spin = { workspace = true }
+
+[[bin]]
+name = "drivermgr"
+path = "src/main.rs"

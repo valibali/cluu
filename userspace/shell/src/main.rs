@@ -84,28 +84,28 @@ pub extern "C" fn main() -> i32 {
 fn run() -> Result<()> {
     let info = process_info();
     registry::init("shell")?;
-    // No register_default_outputs: shell:{stdin,stdout,stderr,stdlog} are
-    // never consumed, and registering them globally collides between
-    // concurrent shell sessions (second cluuterm's shell would fail to start).
 
-    // Procmgr seeds fd 0/1/2 via FdInherit at every spawn. Shell unconditionally
-    // reads stdin via POSIX read(0). If the assertion ever trips, procmgr
-    // failed to wire FdInherit and the child should exit rather than spin.
-    let fd0_is_vfs_backed = libcluu::fd_table::FD_TABLE
-        .lock()
-        .get(0)
-        .map(|e| e.remote_fd.is_some())
-        .unwrap_or(false);
-    if !fd0_is_vfs_backed {
-        let _ = debug_print("shell: FATAL fd 0 not VFS-backed; parent FdInherit missing");
-        return Err(libcluu::Error::InvalidState);
+    #[cfg(feature = "lang-parser")]
+    let script_path = script_path_from_argv();
+    #[cfg(not(feature = "lang-parser"))]
+    let script_path: Option<String> = None;
+
+    if script_path.is_none() {
+        let fd0_is_vfs_backed = libcluu::fd_table::FD_TABLE
+            .lock()
+            .get(0)
+            .map(|e| e.remote_fd.is_some())
+            .unwrap_or(false);
+        if !fd0_is_vfs_backed {
+            let _ = debug_print("shell: FATAL fd 0 not VFS-backed; parent FdInherit missing");
+            return Err(libcluu::Error::InvalidState);
+        }
+        let _ = debug_print("shell: stdin path = vfs-backed");
     }
-    let _ = debug_print("shell: stdin path = vfs-backed");
 
     let _stdin = info.tokens[TOKEN_STDIN];
     let _stderr = info.tokens[TOKEN_STDERR];
     let stdlog = info.tokens[TOKEN_STDLOG];
-    // stdout is already connected to the correct tty:N by procmgr.
     let stdout = info.tokens[TOKEN_STDOUT];
     // Best-effort pre-subscribe to procmgr:spawn to avoid first-command timeout.
     let procmgr_spawn = {
@@ -126,6 +126,33 @@ fn run() -> Result<()> {
     let registry: &'static BuiltinRegistry =
         Box::leak(Box::new(BuiltinFactory::new().build()));
 
+    #[cfg(feature = "lang-parser")]
+    {
+        if let Some(ref script_path) = script_path {
+            let _ = debug_print(&format!("shell: script mode '{}'", script_path));
+            match registry::subscribe_output("vfs", "main") {
+                Ok(vfs_ep) => match libcluu::fs::client::VfsClient::new_from_registry(vfs_ep) {
+                    Ok(vfs) => {
+                        let _ = shellrc::source_file(
+                            script_path,
+                            stdout,
+                            &mut command_context,
+                            registry,
+                            &vfs,
+                        );
+                    }
+                    Err(_) => {
+                        let _ = debug_print("shell: script mode — VfsClient setup failed");
+                    }
+                },
+                Err(_) => {
+                    let _ = debug_print("shell: script mode — vfs unavailable");
+                }
+            }
+            return Ok(());
+        }
+    }
+
     // UE18+UE19: source /etc/shellrc and $HOME/.shellrc before the
     // prompt fires. The registry is built once (above) and shared with
     // the per-line REPL and the completion thread. Sourcing is
@@ -137,6 +164,16 @@ fn run() -> Result<()> {
         match registry::subscribe_output("vfs", "main") {
             Ok(vfs_ep) => match libcluu::fs::client::VfsClient::new_from_registry(vfs_ep) {
                 Ok(vfs) => {
+                    io::report_err(
+                        shellrc::source_file(
+                            "/etc/profile",
+                            stdout,
+                            &mut command_context,
+                            registry,
+                            &vfs,
+                        ),
+                        "shellrc: /etc/profile",
+                    );
                     io::report_err(
                         shellrc::source_file(
                             "/etc/shellrc",
@@ -466,18 +503,17 @@ fn print_prompt(_endpoint: usize) -> Result<()> {
 }
 
 #[cfg(feature = "lang-parser")]
-fn startup_command_from_process_info() -> Option<String> {
+fn read_argv() -> Vec<&'static str> {
     let info = process_info();
     let argc = info.params[PARAM_ARGC] as usize;
     let argv_offset = info.params[PARAM_ARGV_OFFSET] as usize;
-    if argc <= 1 || argv_offset == 0 {
-        return None;
+    if argc == 0 || argv_offset == 0 {
+        return Vec::new();
     }
-
     let info_page_base = libcluu::boot::PROCESS_INFO_ADDR & !0xfff;
     let page = unsafe { core::slice::from_raw_parts(info_page_base as *const u8, 4096) };
     if argv_offset >= page.len() {
-        return None;
+        return Vec::new();
     }
     let mut cursor = argv_offset;
     let mut argv = Vec::new();
@@ -498,6 +534,22 @@ fn startup_command_from_process_info() -> Option<String> {
             cursor += 1;
         }
     }
+    argv
+}
+
+#[cfg(feature = "lang-parser")]
+fn script_path_from_argv() -> Option<String> {
+    let argv = read_argv();
+    let arg = argv.get(1)?;
+    if arg.starts_with('-') {
+        return None;
+    }
+    Some(String::from(*arg))
+}
+
+#[cfg(feature = "lang-parser")]
+fn startup_command_from_process_info() -> Option<String> {
+    let argv = read_argv();
     if argv.len() <= 1 {
         return None;
     }

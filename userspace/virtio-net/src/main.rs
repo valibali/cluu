@@ -24,7 +24,7 @@ use libcluu::boot::{
 };
 use libcluu::ipc::{
     reply_to_sender, reply_to_sender_with_payload, send_msg_with_payload, DEVMGR_REGISTER_LABEL,
-    NET_GET_MAC, NET_PKT_RECV, NET_PKT_SEND, NET_REGISTER_RECV,
+    NET_GET_MAC, NET_PKT_RECV, NET_PKT_SEND, NET_REGISTER_RECV, PARAM_DEVICE_PATH,
 };
 use libcluu::registry;
 use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender};
@@ -95,10 +95,21 @@ fn run() -> Result<()> {
     ))?;
 
     // (a) Probe PCI for virtio-net: 0x1000 (transitional) / 0x1041 (modern).
-    let pci_device = match cluu_virtio_core::pci::find_virtio_device(
+    if info.params[PARAM_DEVICE_PATH] != 0 {
+        let packed = info.params[PARAM_DEVICE_PATH];
+        let bus = ((packed >> 16) & 0xFF) as u8;
+        let device = ((packed >> 8) & 0xFF) as u8;
+        let function = (packed & 0xFF) as u8;
+        debug_print(&format!(
+            "virtio-net: init from params BDF={:02x}:{:02x}.{}",
+            bus, device, function
+        ))?;
+    }
+    let pci_device = match cluu_virtio_core::pci::find_virtio_device_with_params(
         pci_token,
         &[0x1000, 0x1041],
         &[0x1041],
+        &info.params,
     ) {
         Ok(d) => {
             debug_print(&format!("virtio-net: found PCI device {:?}", d))?;
@@ -192,17 +203,10 @@ fn run() -> Result<()> {
     driver.transport.notify(0);
 
     // (d) Read PCI Interrupt Line and attach IRQ handler.
-    let intr_line_word = libcluu::syscall::pci_config_read(
-        pci_token,
-        pci_device.bus,
-        pci_device.device,
-        pci_device.function,
-        0x3c,
-    )?;
-    let irq_number = (intr_line_word & 0xFF) as usize;
+    let irq_number = cluu_virtio_core::pci::get_irq_line(pci_token, &pci_device, &info.params)?;
     debug_print(&format!(
-        "virtio-net: PCI Interrupt Line = {} (raw 0x{:08x})",
-        irq_number, intr_line_word
+        "virtio-net: PCI Interrupt Line = {}",
+        irq_number
     ))?;
 
     let irq_token = info.tokens[TOKEN_EXTRA_2];

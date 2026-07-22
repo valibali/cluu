@@ -60,7 +60,9 @@ impl Fadt {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         let header = SdtHeader::from_bytes(data)?;
         if header.signature != SdtSignature::FADT { return None; }
-        if data.len() < 244 { return None; }
+        // ACPI 1.0 FADTs are ~128 bytes; only require fields through `flags`
+        // (offset 104-107). 112 gives margin for iapc_boot_arch + reserved.
+        if data.len() < 112 { return None; }
         Some(Self {
             header,
             sci_command: u32::from_le_bytes([data[36], data[37], data[38], data[39]]),
@@ -98,20 +100,26 @@ impl Fadt {
             reserved: data[103],
             flags: u32::from_le_bytes([data[104], data[105], data[106], data[107]]),
             reset_reg: {
-                let mut r = [0u8; 12]; r.copy_from_slice(&data[108..120]); r
+                let mut r = [0u8; 12]; if data.len() >= 120 { r.copy_from_slice(&data[108..120]); } r
             },
-            reset_value: data[120],
-            arm_boot_arch: u16::from_le_bytes([data[121], data[122]]),
-            fadt_minor_version: data[123],
-            x_firmware_ctrl: u64::from_le_bytes([data[124], data[125], data[126], data[127], data[128], data[129], data[130], data[131]]),
-            x_dsdt: u64::from_le_bytes([data[132], data[133], data[134], data[135], data[136], data[137], data[138], data[139]]),
-            x_pm1a_evt_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[140..152]); r },
-            x_pm1b_evt_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[152..164]); r },
-            x_pm1a_cnt_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[164..176]); r },
-            x_pm1b_cnt_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[176..188]); r },
-            x_pm2_cnt_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[188..200]); r },
-            x_pm_tmr_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[200..212]); r },
-            x_gpe0_blk: { let mut r = [0u8; 12]; r.copy_from_slice(&data[212..224]); r },
+            reset_value: if data.len() >= 121 { data[120] } else { 0 },
+            arm_boot_arch: if data.len() >= 123 {
+                u16::from_le_bytes([data[121], data[122]])
+            } else { 0 },
+            fadt_minor_version: if data.len() >= 124 { data[123] } else { 0 },
+            x_firmware_ctrl: if data.len() >= 132 {
+                u64::from_le_bytes([data[124], data[125], data[126], data[127], data[128], data[129], data[130], data[131]])
+            } else { 0 },
+            x_dsdt: if data.len() >= 140 {
+                u64::from_le_bytes([data[132], data[133], data[134], data[135], data[136], data[137], data[138], data[139]])
+            } else { 0 },
+            x_pm1a_evt_blk: { let mut r = [0u8; 12]; if data.len() >= 152 { r.copy_from_slice(&data[140..152]); } r },
+            x_pm1b_evt_blk: { let mut r = [0u8; 12]; if data.len() >= 164 { r.copy_from_slice(&data[152..164]); } r },
+            x_pm1a_cnt_blk: { let mut r = [0u8; 12]; if data.len() >= 176 { r.copy_from_slice(&data[164..176]); } r },
+            x_pm1b_cnt_blk: { let mut r = [0u8; 12]; if data.len() >= 188 { r.copy_from_slice(&data[176..188]); } r },
+            x_pm2_cnt_blk: { let mut r = [0u8; 12]; if data.len() >= 200 { r.copy_from_slice(&data[188..200]); } r },
+            x_pm_tmr_blk: { let mut r = [0u8; 12]; if data.len() >= 212 { r.copy_from_slice(&data[200..212]); } r },
+            x_gpe0_blk: { let mut r = [0u8; 12]; if data.len() >= 224 { r.copy_from_slice(&data[212..224]); } r },
             x_gpe1_blk: { let mut r = [0u8; 12]; if data.len() >= 236 { r.copy_from_slice(&data[224..236]); } r },
             sleep_control_reg: { let mut r = [0u8; 12]; if data.len() >= 248 { r.copy_from_slice(&data[236..248]); } r },
             sleep_status_reg: { let mut r = [0u8; 12]; if data.len() >= 260 { r.copy_from_slice(&data[248..260]); } r },
@@ -121,7 +129,16 @@ impl Fadt {
         })
     }
 
+    /// DSDT physical address.  QEMU's FADT rev 1 stores the FACS pointer
+    /// at offset 36 (FIRMWARE_CONTROL) and the DSDT pointer at offset 40.
+    /// The existing struct names these `sci_command` and `smi_command_port`
+    /// respectively — both misnomers from the ACPI 2.0 FADT layout.
+    /// For FADT rev >= 3 (ACPI 2.0+), x_dsdt at offset 136 takes precedence.
     pub fn dsdt_phys(&self) -> u64 {
-        if self.x_dsdt != 0 { self.x_dsdt } else { self.header.length as u64 }
+        if self.x_dsdt != 0 {
+            self.x_dsdt
+        } else {
+            self.smi_command_port as u64
+        }
     }
 }

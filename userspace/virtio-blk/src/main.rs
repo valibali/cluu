@@ -28,7 +28,7 @@ use libcluu::boot::{
 use libcluu::fs::{BlockDevice, Filesystem};
 use libcluu::ipc::{
     call, extract_reply_id, reply, reply_with_payload, BLK_CLOSE_SESSION, BLK_OPEN_SESSION,
-    BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP, DEVMGR_REGISTER_LABEL,
+    BLK_SUBMIT, BLK_SUBMIT_NACK, BLK_TID_CLEANUP, DEVMGR_REGISTER_LABEL, PARAM_DEVICE_PATH,
 };
 use libcluu::registry;
 use libcluu::syscall::{endpoint_create, ipc_recv_any_with_sender, ipc_send, space_map_range};
@@ -118,10 +118,21 @@ fn run() -> Result<()> {
 
     // virtio-blk = vendor 0x1AF4, devices 0x1001 (transitional) + 0x1042 (modern).
     // We only accept the modern variant for the new stack.
-    let pci_device = match cluu_virtio_core::pci::find_virtio_device(
+    if info.params[PARAM_DEVICE_PATH] != 0 {
+        let packed = info.params[PARAM_DEVICE_PATH];
+        let bus = ((packed >> 16) & 0xFF) as u8;
+        let device = ((packed >> 8) & 0xFF) as u8;
+        let function = (packed & 0xFF) as u8;
+        debug_print(&format!(
+            "virtio-blk: init from params BDF={:02x}:{:02x}.{}",
+            bus, device, function
+        ))?;
+    }
+    let pci_device = match cluu_virtio_core::pci::find_virtio_device_with_params(
         pci_token,
         &[0x1001, 0x1042],
         &[0x1042],
+        &info.params,
     ) {
         Ok(d) => {
             debug_print(&format!("virtio-blk: found PCI device {:?}", d))?;
@@ -192,17 +203,10 @@ fn run() -> Result<()> {
 
     // Read the PCI Interrupt Line register (offset 0x3C low byte) to
     // discover which legacy IRQ the device uses on this QEMU topology.
-    let intr_line_word = libcluu::syscall::pci_config_read(
-        pci_token,
-        pci_device.bus,
-        pci_device.device,
-        pci_device.function,
-        0x3c,
-    )?;
-    let irq_number = (intr_line_word & 0xFF) as usize;
+    let irq_number = cluu_virtio_core::pci::get_irq_line(pci_token, &pci_device, &info.params)?;
     debug_print(&format!(
-        "virtio-blk: PCI Interrupt Line = {} (raw 0x{:08x})",
-        irq_number, intr_line_word
+        "virtio-blk: PCI Interrupt Line = {}",
+        irq_number
     ))?;
 
     let irq_token = info.tokens[TOKEN_EXTRA_2];

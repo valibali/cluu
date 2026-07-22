@@ -22,6 +22,7 @@ pub struct InitContext<'a> {
     pub virtio_net_irq_token: usize,
     pub virtio_snd_irq_token: usize,
     pub pci_token: usize,
+    pub irq_handle_root_token: usize,
 }
 
 impl<'a> InitContext<'a> {
@@ -94,6 +95,15 @@ impl<'a> InitContext<'a> {
             u64::MAX,
         )?;
 
+        // IRQ handle root token for devmgr (D3.1).  Carries GRANT so devmgr
+        // can sub-derive per-driver IRQ_HANDLE | IRQ_ACK tokens via
+        // MINT_IRQ_CAP.  Wired to devmgr's TOKEN_EXTRA_2.
+        let irq_handle_root_token = token_derive(
+            boot.root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK | Rights::GRANT).bits() as usize,
+            u64::MAX,
+        )?;
+
         Ok(Self {
             boot,
             initrd,
@@ -108,6 +118,7 @@ impl<'a> InitContext<'a> {
             virtio_net_irq_token,
             virtio_snd_irq_token,
             pci_token,
+            irq_handle_root_token,
         })
     }
 }

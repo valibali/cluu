@@ -347,6 +347,23 @@ pub fn request_subscription(service_name: &str, endpoint_name: &str) -> Result<(
     Ok(())
 }
 
+pub fn vfs_mount(mount_path: &str, service_name: &str, endpoint: usize) -> Result<()> {
+    let vfs_ep = subscribe_output("vfs", "main")?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(mount_path.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(service_name.as_bytes());
+    payload.push(0);
+    let msg = crate::types::Message::new(
+        crate::ipc::VFS_MOUNT_LABEL,
+        [endpoint, 0, 0, 0, 0, 0],
+        1,
+    );
+    let mut reply = crate::types::Message::new(0, [0; 6], 0);
+    crate::ipc::call_with_payload(vfs_ep, &msg, &payload, &mut reply)?;
+    Ok(())
+}
+
 /// Drain any pending grant traffic without blocking.
 pub fn handle_grant_requests() -> Result<()> {
     let control_endpoint = control_endpoint();

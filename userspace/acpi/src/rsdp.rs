@@ -71,6 +71,14 @@ impl Rsdp {
 }
 
 pub fn find_rsdp(space_token: usize) -> Result<Rsdp> {
+    let (rsdp, _phys) = find_rsdp_with_phys(space_token)?;
+    Ok(rsdp)
+}
+
+/// Like `find_rsdp` but also returns the physical address where the RSDP was
+/// found.  Callers that log the RSDP location (drivermgr D1.3) need the
+/// address; the bare `find_rsdp` discards it.
+pub fn find_rsdp_with_phys(space_token: usize) -> Result<(Rsdp, u64)> {
     let _ = libcluu::debug_print("acpi: scanning for RSDP...");
     let regions: &[(u64, u64)] = &[
         (EBDA_MIN, EBDA_MAX),
@@ -95,11 +103,12 @@ pub fn find_rsdp(space_token: usize) -> Result<Rsdp> {
                             full[copy_len..].copy_from_slice(&page2[..36-copy_len]);
                         }
                         if let Some(rsdp) = Rsdp::from_bytes(&full) {
+                            let phys = page_addr + off as u64;
                             let _ = libcluu::debug_print(&format!(
                                 "acpi: RSDP found at {:x} revision {}",
-                                page_addr + off as u64, rsdp.revision
+                                phys, rsdp.revision
                             ));
-                            return Ok(rsdp);
+                            return Ok((rsdp, phys));
                         }
                     }
                     off += RSDP_ALIGN;

@@ -1,0 +1,16 @@
+[package]
+name = "cluu-drivermon"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU driver monitor — supervises driver processes, handles restart and fallback"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu_wire = { path = "../cluu_wire" }
+spin = { workspace = true }
+
+[[bin]]
+name = "drivermon"
+path = "src/main.rs"

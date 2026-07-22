@@ -1,5 +1,8 @@
-FROM minimal
+FROM driver
 PROFILE ipc registry device
+DRIVER bind bus=acpi hid=PNP0F13
+DRIVER tokens slot=10 rights=0x30000000
+DRIVER source initrd_path="sys/mouse.elf"
 PRELOAD
 ENDPOINT listen
 DEVICE irq
