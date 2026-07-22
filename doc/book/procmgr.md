@@ -13,8 +13,9 @@ the system-wide IPC dispatch loop. SYSTEM cap-set, the broadest authority.
 
 ### What it does
 
-- **Boot autostart**: spawns kbd, console, vtmgr, tty, and other autostart
-  services from `autostart.toml`.
+- **Boot service start**: reads `[[service]]` entries from `etc/system.toml`
+  and starts console, vtmgr, inputd, compositor. Driver bringup is handled
+  by drivermgr (separate `etc/drivermgr.toml`).
 - **Session management**: `SESSION_CREATE` (spawns session-procmgr +
   session-vfs per login), `SESSION_DESTROY` (cascade teardown via cap
   revocation), `SESSION_HANDOFF` (VT handoff).
@@ -390,14 +391,18 @@ functional sense. They just are not spawned from a Cluufile.
 Once the primordials are running and ext2 is mounted, all subsequent
 services are real image containers with Cluufiles. Init sends
 `BOOT_PHASE2_LABEL` to procmgr after all primordials are up. Procmgr reads
-`/etc/autostart.toml` from ext2 and starts Tier 2 services:
+`/etc/system.toml` from ext2 and starts the `[[service]]` entries:
 
 ```text
-procmgr → container run kbd
-procmgr → container run console (instance=0)
-procmgr → container run vtmgr
-procmgr → container run vt (instance=0)
+procmgr → autostart_container console
+procmgr → autostart_container vtmgr
+procmgr → autostart_container inputd
+procmgr → autostart_container compositor
 ```
+
+Driver bringup (kbd, mouse, virtio-blk, usb-input, virtio-9p, virtio-snd)
+is handled by drivermgr, which reads `etc/drivermgr.toml` and spawns
+matched drivers from the initrd. See `doc/book/driver_framework.md`.
 
 On-demand VT creation (Ctrl+Alt+Fn) goes through the same path: vtmgr sends
 `container run vt` with the appropriate `tty_instance` param.

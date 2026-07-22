@@ -139,7 +139,7 @@ Restart budget: N restarts per M seconds. Tracked per-device with
 drivermgr walks the DSDT for PNP Device() objects, extracts _HID and _CRS
 (I/O ports, IRQ). ACPI devices appear in the device tree as
 `/acpi/<HID>` (e.g. `/acpi/PNP0303`). kbd and mouse bind via ACPI PNP IDs
-instead of autostart.toml.
+instead of `etc/system.toml` `[[service]]` (which is for non-driver services).
 
 The DSDT parser handles: NameOp, DeviceOp, ResourceTemplate, IRQNoFlags,
 IO, FixedIO. It does NOT execute arbitrary AML methods.

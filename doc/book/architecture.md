@@ -342,8 +342,11 @@ See [Virtual Filesystem](../vfs/index.html) for the view-derivation model.
 4. **`init`** (PID 1): reads boot snapshot + boot manifest from initrd, launches
    `SERVICE_LIST` (registry, timeserver, devmgr, root-procmgr, vfs, virtio-blk,
    tpmd), extends TPM PCRs for measured boot, then monitors primordial exits.
-5. **Root-procmgr**: boots autostart services (kbd, console, vtmgr, tty),
-   presents login prompt.
+5. **Root-procmgr**: reads `etc/system.toml` `[[service]]` entries and starts
+   system services (console, vtmgr, inputd, compositor). drivermgr (started
+   by init) scans PCI + ACPI buses and spawns matched drivers (kbd, mouse,
+   virtio-blk, usb-input, virtio-9p, virtio-snd) from initrd. Presents login
+   prompt.
 6. **Login**: user authenticates → root-procmgr spawns `session-procmgr` +
    `session-vfs` for the session → spawns shell/cluuterm.
 

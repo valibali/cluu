@@ -24,11 +24,18 @@ backends:
 | Mount | Backend | Type |
 |-------|---------|------|
 | `/` | ext2 (via virtio-blk) | Async (IPC to ext2 service) |
+| `/host` | 9p (via virtio-9p) | Async (IPC to virtio-9p service) |
 | `/dev/initrd` | initrd (TAR) | Sync (in-process) |
 | `/proc` | procfs | Async (IPC to procmgr) |
+| `/proc/devices` | devices_procfs | Async (IPC to drivermgr) |
 | `/dev` | devfs | Sync (in-process) |
 | `/dev/pts` | PTS registry | Async (IPC to cluuterm) |
 | `/dev/input` | devreg | Sync (in-process) |
+
+System mounts (`/` and `/host`) are declared in `etc/system.toml` `[[mount]]`
+entries, read by VFS from the initrd at boot (like `/etc/fstab`). Internal
+backends (`/proc`, `/proc/devices`, `/dev`, `/dev/pts`, `/dev/input`) are
+created in code by `setup_mounts()`.
 
 ### Sync vs Async backends
 

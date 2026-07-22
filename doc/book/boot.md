@@ -89,16 +89,52 @@ After launch, init:
 Primordial death is unrecoverable → halt always. Non-primordial services get
 cookie 0 and may exit silently.
 
-## 5. Root-procmgr — boot autostart (`userspace/root-procmgr/src/main.rs`)
+## 5. Root-procmgr — boot service start (`userspace/root-procmgr/src/main.rs`)
 
-Root-procmgr boots the autostart services from `autostart.toml`:
+Root-procmgr reads `etc/system.toml` from the VFS and starts the
+`[[service]]` entries (console, vtmgr, inputd, compositor). This is the
+declarative boot config — like systemd unit files or Linux `/etc/inittab`.
 
-- `kbd` — keyboard driver
-- `console` — framebuffer console
-- `vtmgr` — VT manager
-- `tty` — text-VT terminal service (per VT, spawned on demand)
+Driver bringup is handled separately by drivermgr (reads
+`etc/drivermgr.toml`, scans PCI + ACPI buses, spawns matched drivers
+from initrd). See `doc/book/driver_framework.md` for details.
 
 Then presents the login prompt.
+
+### Boot configuration files
+
+CLUU uses two declarative TOML config files for boot, inspired by Linux's
+`/etc/fstab` + systemd units + `/etc/modprobe.d/`:
+
+| File | Reader | Purpose |
+|------|--------|---------|
+| `etc/system.toml` | VFS (initrd) + procmgr (VFS) | `[[mount]]` entries (like fstab) + `[[service]]` entries (like systemd units) |
+| `etc/drivermgr.toml` | drivermgr | `spawn_mode` (observe/spawn), driver bind policy |
+
+`etc/system.toml` `[[mount]]` section:
+- `required=true` — VFS blocks at boot until the service registers
+- `required=false` — fire-and-forget; mounts lazily when service registers
+
+`etc/system.toml` `[[service]]` section:
+- Each entry has an `image` field (e.g. `console`, `compositor`)
+- procmgr calls `autostart_container(image)` for each
+
+Driver Cluufiles (in `containers/<name>/Cluufile`) declare:
+- `DRIVER bind` — PCI vendor/device/class or ACPI HID match
+- `DRIVER source initrd_path` — ELF path in initrd (required for drivermgr spawn)
+- `DRIVER tokens` — capability token slots (PCI access, IRQ handle)
+- `DRIVER lifecycle critical=true` — boot-critical (init panics if it dies)
+
+### Interactive boot commands
+
+Shell builtins exist for manual use post-login:
+
+| Command | IPC | Purpose |
+|---------|-----|---------|
+| `mount <path> <service>` | VFS_MOUNT_LABEL | Mount a service endpoint at a VFS path |
+| `start <image>` | PROCMGR_START_IMAGE_LABEL | Spawn a container by image name |
+| `probe <bus>` | DRIVERMGR_PROBE_LABEL | Trigger bus re-scan + driver spawn |
+| `wait <service>` | registry subscribe | Block until a service registers |
 
 ## 6. Login flow
 
@@ -132,9 +168,9 @@ Typical boot on KVM:
 1.0s   MM init, heap, crypto/token
 2.0s   APIC timer, bootstrap::init, ThreadManager::start
 3.0s   init launches boot services
-5.0s   VFS mounts /, /dev, /proc
-7.0s   kbd, console, vtmgr, tty started
-9.4s   kbd attaches (PS/2)
+5.0s   VFS mounts /, /dev, /proc (from system.toml [[mount]])
+7.0s   drivermgr scans PCI+ACPI, spawns kbd/mouse/virtio-blk/usb-input
+9.0s   procmgr reads system.toml [[service]], starts console/vtmgr/inputd/compositor
 9.8s   login window appears
 12.0s  (harness credential sendkey prefix sleep ends here)
 ```
