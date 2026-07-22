@@ -396,6 +396,11 @@ fn run_vfs() -> Result<()> {
         }
     }
 
+    // Fire-and-forget subscribe for optional /host mount (hostfs).
+    // Done after setup_mounts so blocking subscribes don't consume the grant.
+    let _ = registry::request_subscription("hostfs", "main");
+    let _ = debug_print("vfs: /host (hostfs) — pending (optional)");
+
     let token_self = info.tokens[TOKEN_SELF];
     let mut runtime = Runtime::new(token_self)?;
     let reply_ep = runtime.reply_endpoint();
@@ -537,7 +542,7 @@ fn apply_system_mounts(mounts: &mut MountTable, initrd: &[u8]) -> Result<()> {
     let config = match libcluu::tar::find_member(initrd, "etc/system.toml") {
         Some(d) => d,
         None => {
-            let _ = debug_print("vfs: etc/system.toml not in initrd, falling back to blkdev");
+            let _ = debug_print("vfs: etc/system.toml not in initrd, using defaults");
             let ep = registry::subscribe_output("blkdev", "main")?;
             mounts.mount_remote("/", ep, "blkdev");
             return Ok(());
