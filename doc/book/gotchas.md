@@ -1208,3 +1208,86 @@ the control endpoint and discards non-matching ones. Never mix
 fire-and-forget `request_subscription` with blocking `subscribe_output`
 on the same control endpoint — the blocking caller will eat the
 fire-and-forget grant.
+
+## cluu-compositor-cursor-clobbered-by-animated-win
+
+### The code
+
+Compositor main loop (`userspace/compositor/src/main.rs`):
+
+```rust
+compose::recompute_dirty(&mut comp);   // reads SHM → writes cell_grid
+compose::render_status_row(&mut comp);
+
+if comp.cursor_needs_render {          // ← only re-applies cursor when flag set
+    comp.render_cursor();
+    comp.cursor_needs_render = false;
+}
+```
+
+`recompute_dirty` walks every dirty cell and overwrites `cell_grid[idx]`
+with the composed result (client SHM content for interior cells).
+`cursor_needs_render` is set **only** in `handle_mouse_event`
+(`window_mgr.rs`).
+
+### Why this was hard to spot
+
+Over a static window (terminal, shell, edit), the cell under the mouse
+pointer is not damaged every frame, so the cursor block written by
+`render_cursor` survives in `cell_grid` until the next mouse move. The
+bug is invisible there.
+
+cluuamp is an animated visualizer that continuously `WIN_DAMAGE`s every
+cell it draws — including the one under the pointer. Every compositor
+iteration:
+
+1. `recompute_dirty` overwrites `cell_grid[cursor_cell]` with cluuamp's
+   wave content.
+2. `render_cursor` runs only if `cursor_needs_render` is set — and with
+   the mouse stationary, no mouse event arrived that iteration, so the
+   flag is false.
+3. The cursor glyph is gone for that frame.
+
+With mouse jitter within the same cell, the flag toggles on/off across
+iterations → wave content and cursor block alternate rapidly → visible
+flicker / "wrong draw artifact." With the mouse fully stationary, the
+cursor simply disappears over cluuamp.
+
+The symptom looked like a cursor-blink bug (cluuterm's 500 ms text-cursor
+blink is a separate mechanism in `tty_backend.rs`), but the actual cause
+was the compositor's software mouse cursor being clobbered by an
+animated client's damage stream.
+
+### Fix
+
+Call `render_cursor()` unconditionally after `recompute_dirty`:
+
+```rust
+compose::recompute_dirty(&mut comp);
+compose::render_status_row(&mut comp);
+comp.render_cursor();
+comp.cursor_needs_render = false;
+```
+
+Idempotent and cheap: `render_cursor` is a single `u64` write to
+`cell_grid[cursor_cell]`. When the cell already holds the cursor block,
+`prev_cell_grid == cell_grid` at the next `tick_frame` and no extra
+frame is scheduled. The `cursor_needs_render` flag is still useful as an
+optimization hint for callers that *know* they didn't move the cursor,
+but it must not be the only thing keeping the cursor alive across
+arbitrary client damage.
+
+### Key insight
+
+In a dirty-cell compositor, any overlay the compositor itself paints on
+top of client content (mouse cursor, status bar, focus chrome) must be
+re-applied **after** every pass that pulls client content into the cell
+grid — not gated on a flag set only by the overlay's own input handler.
+Clients can damage the overlay's cells at any time; gating re-apply on
+"the overlay moved" works only when no client ever redraws underneath
+the overlay.
+
+Same bug class as [[cluu-compositor-focus-chrome-stale]] and
+[[cluu-modal-damage-clamps-border-out]]: a state-dependent overlay and
+a damage-driven re-render disagree about who owns a cell, and the
+damage path wins silently.

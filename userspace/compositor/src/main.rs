@@ -439,10 +439,18 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
         compose::recompute_dirty(&mut comp);
         compose::render_status_row(&mut comp);
 
-        if comp.cursor_needs_render {
-            comp.render_cursor();
-            comp.cursor_needs_render = false;
-        }
+        // Always re-apply the mouse cursor after recompute_dirty.  Animated
+        // clients (e.g. cluuamp) continuously WIN_DAMAGE the cell under the
+        // pointer, and recompute_dirty overwrites cell_grid[cursor] with the
+        // client's SHM content — clobbering the cursor glyph whenever no
+        // mouse event arrived that iteration.  Re-applying unconditionally
+        // is a single u64 write and idempotent: if cell_grid[cursor] already
+        // holds the cursor block, prev_cell_grid matches and no extra frame
+        // is scheduled.  Gating on cursor_needs_render alone caused the
+        // cursor to flicker/disappear over constantly-redrawing windows.
+        // See [[cluu-compositor-cursor-clobbered-by-animated-win]].
+        comp.render_cursor();
+        comp.cursor_needs_render = false;
         // Arm the frame deadline if the clock tick or status render dirtied
         // the cell grid.  (The message-receive arm above only covers
         // protocol-message-driven dirt; clock-tick dirt arrives here.)
