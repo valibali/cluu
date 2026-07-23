@@ -55,6 +55,17 @@
 //!   probe binaries.
 //! - [Interpreter Porting](interpreter_porting/index.html) — porting
 //!   MicroPython and other interpreters to CLUU.
+//! - [CLUUamp](cluuamp/index.html) — Winamp-classic TUI audio player:
+//!   two-thread architecture, FileDialog modal, ID3 metadata, audio
+//!   position/duration tracking, EQ, spectrum.
+//! - [Driver Framework](driver_framework/index.html) — userspace driver
+//!   model, capability-scoped device access, PCI enumeration.
+//! - [Threading](threading/index.html) — userspace threading primitives:
+//!   `Mutex`, `Shared`, `spawn`, `join`, `sleep_ms`.
+//! - [USB EHCI](usb_ehci/index.html) — EHCI host controller driver,
+//!   async schedule, transfer descriptors.
+//! - [Runtime TTF Plan](runtime_ttf_plan/index.html) — TrueType font
+//!   rendering pipeline plan.
 //! - [Gotchas](gotchas/index.html) — structural traps discovered during
 //!   implementation.
 
@@ -124,3 +135,21 @@ pub mod interpreter_porting {}
 
 #[doc = include_str!("../book/gotchas.md")]
 pub mod gotchas {}
+
+#[doc = include_str!("../book/cluuamp.md")]
+pub mod cluuamp {}
+
+#[doc = include_str!("../book/driver_framework.md")]
+pub mod driver_framework {}
+
+#[doc = include_str!("../book/driver_framework_brainstorm.md")]
+pub mod driver_framework_brainstorm {}
+
+#[doc = include_str!("../book/threading.md")]
+pub mod threading {}
+
+#[doc = include_str!("../book/usb_ehci.md")]
+pub mod usb_ehci {}
+
+#[doc = include_str!("../book/runtime_ttf_plan.md")]
+pub mod runtime_ttf_plan {}
