@@ -49,6 +49,7 @@ pub struct CluuampModel {
     pub scroll_accumulator: usize,
     pub playlist_scroll: usize,
     pub playlist_selected: usize,
+    pub last_track_index: usize,
     pub layout: Layout,
     pub transport_selected: usize,
     pub should_quit: bool,
@@ -58,6 +59,9 @@ pub struct CluuampModel {
     pub confirm_just_happened: bool,
     pub browser_just_closed: bool,
     pub force_redraw: bool,
+    pub dirty: bool,
+    pub scratch_title: String,
+    pub scratch_str: String,
 }
 
 impl CluuampModel {
@@ -81,6 +85,7 @@ impl CluuampModel {
             scroll_accumulator: 0,
             playlist_scroll: 0,
             playlist_selected: 0,
+            last_track_index: 0,
             layout: Layout::calculate(width, height, true, true),
             transport_selected: 1,
             should_quit: false,
@@ -90,8 +95,12 @@ impl CluuampModel {
             confirm_just_happened: false,
             browser_just_closed: false,
             force_redraw: false,
+            dirty: false,
+            scratch_title: String::new(),
+            scratch_str: String::new(),
         };
         model.sync_equalizer();
+        model.sync_fft_bars();
         model
     }
 
@@ -101,6 +110,7 @@ impl CluuampModel {
 
     pub fn on_resize(&mut self, width: usize, height: usize) {
         self.layout = Layout::calculate(width, height, self.show_eq, self.show_playlist);
+        self.sync_fft_bars();
     }
 
     fn recalc_layout(&mut self) {
@@ -110,11 +120,12 @@ impl CluuampModel {
             self.show_eq,
             self.show_playlist,
         );
-        // A show_eq/show_playlist toggle can shrink the visible region,
-        // leaving stale cells from the previous layout on screen (the diff
-        // renderer only overwrites cells the new frame actually draws).
-        // Force a full clear + redraw, same as the resize/browser-close paths.
+        self.sync_fft_bars();
         self.force_redraw = true;
+    }
+
+    fn sync_fft_bars(&mut self) {
+        self.fft.set_num_bars(2 * self.layout.fft_inner.width);
     }
 
     /// If focus sits on a window that was just hidden, move it home.
@@ -141,8 +152,8 @@ impl CluuampModel {
     }
 
     pub fn ui_tick(&mut self) {
-        let display = self.audio.display_title(self.audio.current_index());
-        let title_len = display.chars().count();
+        self.audio.write_display_title(self.audio.current_index(), &mut self.scratch_title);
+        let title_len = self.scratch_title.chars().count();
         let marquee_width = self.layout.marquee_width;
         if title_len > marquee_width {
             self.scroll_accumulator += 1;
@@ -154,12 +165,11 @@ impl CluuampModel {
             self.title_scroll_offset = 0;
             self.scroll_accumulator = 0;
         }
-        if self.audio.state() == PlaybackState::Stopped
-            && self.playlist_selected != self.audio.current_index()
-        {
+        self.clamp_playlist_scroll();
+        if self.audio.current_index() != self.last_track_index {
+            self.last_track_index = self.audio.current_index();
             self.playlist_selected = self.audio.current_index();
         }
-        self.clamp_playlist_scroll();
     }
 
     fn clamp_playlist_scroll(&mut self) {
@@ -197,8 +207,9 @@ impl CluuampModel {
     /// Used by the main loop to decide tick cadence when paused — a scrolling
     /// marquee needs ~13ms ticks to stay smooth even with audio stopped.
     pub fn title_is_scrolling(&self) -> bool {
-        let display = self.audio.display_title(self.audio.current_index());
-        display.chars().count() > self.layout.marquee_width
+        let mut buf = alloc::string::String::new();
+        self.audio.write_display_title(self.audio.current_index(), &mut buf);
+        buf.chars().count() > self.layout.marquee_width
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -210,7 +221,7 @@ impl CluuampModel {
             self.handle_browser_key(key);
             return;
         }
-        self.force_redraw = true;
+        self.dirty = true;
         match key {
             KeyEvent::Ctrl('c') | KeyEvent::Char('q') => {
                 self.should_quit = true;
@@ -479,12 +490,5 @@ impl CluuampModel {
             }
             _ => {}
         }
-    }
-
-    pub fn format_position(&self) -> alloc::string::String {
-        let pos = self.audio.position_ms();
-        let mins = pos / 60000;
-        let secs = (pos / 1000) % 60;
-        format!("{:02}:{:02}", mins, secs)
     }
 }

@@ -76,9 +76,7 @@ fn paint_content_scrolled(state: &Editor, data: &RenderData, v: &mut View) {
         }
         if state.settings.number {
             let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
-            for (ci, ch) in label.chars().enumerate() {
-                v.set(row, ci, Cell::new(ch));
-            }
+            v.write_str(row, 0, &label);
         }
         let start = line_idx[file_line];
         let end = if file_line + 1 < line_idx.len() {
@@ -143,13 +141,9 @@ fn paint_content_wrapped(state: &Editor, data: &RenderData, v: &mut View) {
             if state.settings.number {
                 if first_row {
                     let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
-                    for (ci, ch) in label.chars().enumerate() {
-                        v.set(row, ci, Cell::new(ch));
-                    }
+                    v.write_str(row, 0, &label);
                 } else {
-                    for g in 0..gutter {
-                        v.set(row, g, Cell::new(' '));
-                    }
+                    v.fill_rect(row, 0, gutter, 1, Cell::new(' '));
                 }
             }
             let take = content_w.min(line.len() - col);
@@ -176,9 +170,7 @@ fn paint_content_wrapped(state: &Editor, data: &RenderData, v: &mut View) {
         if line.is_empty() && row < max_rows {
             if state.settings.number {
                 let label = format!("{:>w$} ", file_line + 1, w = gutter - 1);
-                for (ci, ch) in label.chars().enumerate() {
-                    v.set(row, ci, Cell::new(ch));
-                }
+                v.write_str(row, 0, &label);
             }
             row += 1;
         }
@@ -216,16 +208,9 @@ fn paint_status(state: &Editor, data: &RenderData, v: &mut View) {
     let pad = (state.viewport.width as usize).saturating_sub(left.len() + right.len());
 
     let bg_cell = Cell::new(' ').bg(COLOR_WHITE).fg(COLOR_BLACK);
-    for c in 0..state.viewport.width as usize {
-        v.set(row, c, bg_cell);
-    }
-    for (ci, ch) in left.chars().enumerate() {
-        v.set(row, ci, Cell::new(ch).bg(COLOR_WHITE).fg(COLOR_BLACK));
-    }
-    for (ci, ch) in right.chars().enumerate() {
-        let pos = left.len() + pad + ci;
-        v.set(row, pos, Cell::new(ch).bg(COLOR_WHITE).fg(COLOR_BLACK));
-    }
+    v.fill_rect(row, 0, state.viewport.width as usize, 1, bg_cell);
+    v.write_styled(row, 0, &left, bg_cell);
+    v.write_styled(row, left.chars().count() + pad, &right, bg_cell);
 }
 
 fn paint_message(state: &Editor, v: &mut View) {
@@ -236,16 +221,10 @@ fn paint_message(state: &Editor, v: &mut View) {
             PromptKind::SearchFwd => "/",
             PromptKind::SearchBwd => "?",
         };
-        for (ci, ch) in prefix.chars().enumerate() {
-            v.set(row, ci, Cell::new(ch));
-        }
-        for (ci, ch) in p.buf.chars().enumerate() {
-            v.set(row, 1 + ci, Cell::new(ch));
-        }
+        v.write_str(row, 0, prefix);
+        v.write_str(row, 1, &p.buf);
     } else {
-        for (ci, ch) in state.message.chars().enumerate() {
-            v.set(row, ci, Cell::new(ch));
-        }
+        v.write_str(row, 0, &state.message);
     }
 }
 

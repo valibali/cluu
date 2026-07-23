@@ -83,9 +83,7 @@ impl Model for DemoModel {
 fn draw_title(v: &mut View) {
     let title = "libtui Feature Showcase";
     let centered = (WIDTH.saturating_sub(title.len())) / 2;
-    for (i, ch) in title.chars().enumerate() {
-        v.set(0, centered + i, Cell::new(ch).fg(COLOR_CYAN).attrs(ATTR_BOLD));
-    }
+    v.write_styled(0, centered, title, Cell::new(' ').fg(COLOR_CYAN).attrs(ATTR_BOLD));
     let line = "─".repeat(WIDTH);
     v.write_str(1, 0, &line);
 }

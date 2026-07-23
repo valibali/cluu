@@ -57,6 +57,8 @@ pub struct SavedTty {
     pub pts_fallback: bool,
 }
 
+static mut SAVED_TTY: Option<SavedTty> = None;
+
 fn try_legacy_enter_raw(tty_endpoint: usize) -> Result<usize> {
     let mut get_msg = Message::new(TTY_CTL_LABEL, [0; 6], 1);
     get_msg.words[0] = 0;
@@ -112,15 +114,17 @@ fn try_pts_enter_raw() -> Result<usize> {
 }
 
 pub fn enter_raw(tty_endpoint: usize) -> Result<SavedTty> {
-    match try_legacy_enter_raw(tty_endpoint) {
+    let saved = match try_legacy_enter_raw(tty_endpoint) {
         Ok(saved_lflag) => {
-            Ok(SavedTty { tty_endpoint, saved_lflag, pts_fallback: false })
+            SavedTty { tty_endpoint, saved_lflag, pts_fallback: false }
         }
         Err(_) => {
             let saved_lflag = try_pts_enter_raw()?;
-            Ok(SavedTty { tty_endpoint, saved_lflag, pts_fallback: true })
+            SavedTty { tty_endpoint, saved_lflag, pts_fallback: true }
         }
-    }
+    };
+    unsafe { SAVED_TTY = Some(saved); }
+    Ok(saved)
 }
 
 pub fn restore(saved: SavedTty) -> Result<()> {
@@ -148,6 +152,28 @@ pub fn restore(saved: SavedTty) -> Result<()> {
         Ok(())
     } else {
         set_lflag(saved.tty_endpoint, saved.saved_lflag)
+    }
+}
+
+/// Best-effort terminal restoration for the panic handler.
+///
+/// Restores cooked-mode lflag and writes SGR reset + cursor-show +
+/// alt-screen-exit escape sequences. Called automatically by the
+/// runtime panic handler when the `posix` feature is active — no
+/// client code needed. Allocation-free (uses `ipc::send_with_retry`).
+pub fn restore_on_panic() {
+    let saved = unsafe { SAVED_TTY };
+    if let Some(s) = saved {
+        let _ = restore(s);
+        let esc: &[&[u8]] = &[
+            b"\x1b[0m",
+            b"\x1b[?25h",
+            b"\x1b[?1049l",
+            b"\x1b[2J\x1b[H",
+        ];
+        for seq in esc {
+            let _ = crate::ipc::send_with_retry(s.tty_endpoint, crate::ipc::TTY_WRITE_LABEL, seq);
+        }
     }
 }
 

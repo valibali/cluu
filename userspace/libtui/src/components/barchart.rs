@@ -114,13 +114,8 @@ impl Drawable for BarChart {
             }
 
             let label_y = area.y + bar_height;
-            let label_chars: Vec<char> = entry.label.chars().collect();
-            for (j, ch) in label_chars.iter().enumerate() {
-                if j >= bar_width || bar_x + j >= area.x + area.width {
-                    break;
-                }
-                buf.set(label_y, bar_x + j, Cell::new(*ch).fg(self.label_fg));
-            }
+            let label_clip = bar_width.min((area.x + area.width).saturating_sub(bar_x));
+            buf.write_styled_n(label_y, bar_x, &entry.label, label_clip, Cell::new(' ').fg(self.label_fg));
         }
     }
 }

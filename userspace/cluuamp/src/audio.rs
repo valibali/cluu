@@ -14,13 +14,12 @@ use alloc::vec::Vec;
 
 use libcluu::audio_client::{hz_to_rate, AudioSessionClient, PcmHandle, PcmParams, PCM_FMT_S16};
 use libcluu::boot::{process_info, TOKEN_SPACE};
-use libcluu::fs::client::VfsClient;
+use libcluu::fs::client::{VfsClient, VfsFile};
 use libcluu::registry;
 use libcluu::syscall::{space_grant, space_map_range};
 use libcluu::{debug_print, Error, Result};
 
-use nanomp3::Decoder;
-
+use crate::mp3_ffi::{self, Decoder};
 use crate::equalizer::Equalizer;
 use crate::gain::{apply_period, Gain};
 use crate::id3::{self, TrackMeta};
@@ -31,10 +30,11 @@ const SCRATCH_PAGES: usize = 24;
 const RING_SLOTS: usize = 8;
 const READ_CHUNK: usize = 64 * 1024;
 const DECODE_BATCH: usize = 4;
+const STREAM_BUF_SIZE: usize = 256 * 1024;
+const STREAM_REFILL_WATERMARK: usize = 64 * 1024;
 
 const FFT_WINDOW: usize = 512;
 const SCOPE_WINDOW: usize = 576;
-const MAX_SAMPLES_PER_FRAME: usize = 2304;
 
 #[derive(Clone, Copy)]
 struct TapMetadata {
@@ -175,9 +175,12 @@ pub struct AudioEngine {
     track_metas: Vec<Option<TrackMeta>>,
     decoder: Decoder,
     audio: Option<AudioSessionClient>,
-    mp3_data: Vec<u8>,
-    decode_pos: usize,
-    pcm_f32: Box<[f32]>,
+    vfs_file: Option<VfsFile>,
+    stream_buf: Vec<u8>,
+    stream_consumed: usize,
+    stream_file_offset: usize,
+    file_size: usize,
+    pcm_frame: Box<[i16]>,
     pcm_s16: Vec<u8>,
     equalizer: Equalizer,
     eq_settings: [i8; 11],
@@ -200,6 +203,9 @@ pub struct AudioEngine {
     new_pcm_available: bool,
     file_loaded: bool,
     bitrate_kbps: u32,
+    needs_refill: bool,
+    needs_advance: bool,
+    completion_scratch: Vec<(libcluu::audio_client::PcmHandle, Result<()>)>,
 }
 
 const _: () = assert!(core::mem::size_of::<AudioEngine>() < 16 * 1024);
@@ -211,11 +217,18 @@ impl AudioEngine {
             playlist,
             current_index: 0,
             track_metas: metas,
-            decoder: Decoder::new(),
+            decoder: {
+                let mut d = Decoder::new();
+                d.init();
+                d
+            },
             audio: None,
-            mp3_data: Vec::new(),
-            decode_pos: 0,
-            pcm_f32: vec![0.0; MAX_SAMPLES_PER_FRAME].into_boxed_slice(),
+            vfs_file: None,
+            stream_buf: Vec::with_capacity(STREAM_BUF_SIZE),
+            stream_consumed: 0,
+            stream_file_offset: 0,
+            file_size: 0,
+            pcm_frame: vec![0i16; mp3_ffi::MAX_SAMPLES_PER_FRAME].into_boxed_slice(),
             pcm_s16: Vec::with_capacity(PERIOD_BYTES * 4),
             equalizer: Equalizer::new(),
             eq_settings: [0; 11],
@@ -238,6 +251,9 @@ impl AudioEngine {
             new_pcm_available: false,
             file_loaded: false,
             bitrate_kbps: 0,
+            needs_refill: false,
+            needs_advance: false,
+            completion_scratch: Vec::new(),
         }
     }
 
@@ -359,7 +375,7 @@ impl AudioEngine {
         } else {
             44100 * 2
         };
-        (self.mp3_data.len() as u64 * 8 * 1000) / bitrate_bps / bytes_per_ms * bytes_per_ms
+        (self.file_size as u64 * 8 * 1000) / bitrate_bps / bytes_per_ms * bytes_per_ms
     }
 
     pub fn current_title(&self) -> &str {
@@ -389,20 +405,28 @@ impl AudioEngine {
         }
     }
 
+    pub fn track_duration_ms(&self, idx: usize) -> u64 {
+        self.track_metas.get(idx).and_then(|m| m.as_ref()).map_or(0, |m| m.duration_ms)
+    }
+
     pub fn next_unparsed_meta(&self) -> Option<usize> {
         self.track_metas.iter().position(|m| m.is_none())
     }
 
-    pub fn display_title(&self, idx: usize) -> String {
+    pub fn write_display_title(&self, idx: usize, out: &mut String) {
+        out.clear();
         if let Some(meta) = self.track_meta(idx) {
             if !meta.title.is_empty() {
                 if !meta.artist.is_empty() {
-                    return format!("{} - {}", meta.artist, meta.title);
+                    use core::fmt::Write;
+                    let _ = write!(out, "{} - {}", meta.artist, meta.title);
+                    return;
                 }
-                return meta.title.clone();
+                out.push_str(&meta.title);
+                return;
             }
         }
-        self.filename(idx).to_string()
+        out.push_str(self.filename(idx));
     }
 
     pub fn filename(&self, idx: usize) -> &str {
@@ -443,7 +467,7 @@ impl AudioEngine {
 
     pub fn stop(&mut self) {
         self.state = PlaybackState::Stopped;
-        self.decode_pos = 0;
+        self.stream_consumed = 0;
         self.pcm_s16.clear();
         self.pcm_submitted = 0;
         self.decoder = Decoder::new();
@@ -487,9 +511,19 @@ impl AudioEngine {
     }
 
     fn close_audio(&mut self) {
+        if let Some(file) = self.vfs_file.take() {
+            let vfs_ep = registry::subscribe_output("vfs", "main").ok();
+            if let Some(ep) = vfs_ep {
+                let cid = registry::control_endpoint();
+                let vfs = VfsClient::new(ep, cid);
+                let _ = vfs.close(file);
+            }
+        }
         self.audio = None;
-        self.mp3_data.clear();
-        self.decode_pos = 0;
+        self.stream_buf.clear();
+        self.stream_consumed = 0;
+        self.stream_file_offset = 0;
+        self.file_size = 0;
         self.pcm_s16.clear();
         self.pcm_submitted = 0;
         self.pcm_played = 0;
@@ -517,24 +551,15 @@ impl AudioEngine {
         let vfs = VfsClient::new(vfs_ep, client_id);
         let file = vfs.open(path)?;
         let file_size = file.size;
+        self.vfs_file = Some(file);
+        self.file_size = file_size;
 
-        let mut mp3_data: Vec<u8> = Vec::with_capacity(file_size);
-        let mut offset = 0usize;
-        let vfs_scratch = SCRATCH_VA + RING_SLOTS * PERIOD_BYTES;
-        while offset < file_size {
-            let want = if file_size - offset > READ_CHUNK {
-                READ_CHUNK
-            } else {
-                file_size - offset
-            };
-            let grant = vfs.read_grant(file, offset, want, space_token, vfs_scratch)?;
-            let src = unsafe { core::slice::from_raw_parts(grant.base as *const u8, grant.len) };
-            mp3_data.extend_from_slice(src);
-            offset += grant.len;
-        }
-        vfs.close(file)?;
+        self.stream_buf.clear();
+        self.stream_consumed = 0;
+        self.stream_file_offset = 0;
+        self.refill_stream(&vfs, space_token)?;
 
-        let (rate, channels, bitrate) = self.probe_format(&mp3_data)?;
+        let (rate, channels, bitrate) = Self::probe_format(&self.stream_buf)?;
         self.sample_rate = rate;
         self.channels = channels;
         self.bitrate_kbps = bitrate;
@@ -561,12 +586,10 @@ impl AudioEngine {
         }
 
         self.audio = Some(audio);
-        self.mp3_data = mp3_data;
-        self.decode_pos = 0;
         self.decoder = Decoder::new();
         self.file_loaded = true;
 
-        let meta = id3::parse(&self.mp3_data);
+        let meta = id3::parse(&self.stream_buf);
         if !meta.is_empty() {
             self.track_metas[self.current_index] = Some(meta);
         }
@@ -575,9 +598,57 @@ impl AudioEngine {
         Ok(())
     }
 
-    fn probe_format(&mut self, data: &[u8]) -> Result<(u32, u8, u32)> {
-        let mut decoder = Decoder::new();
-        let mut pcm = [0f32; MAX_SAMPLES_PER_FRAME];
+    fn refill_stream(&mut self, vfs: &VfsClient, space_token: usize) -> Result<()> {
+        let vfs_scratch = SCRATCH_VA + RING_SLOTS * PERIOD_BYTES;
+        while self.stream_buf.len() < STREAM_BUF_SIZE && self.stream_file_offset < self.file_size {
+            let space = STREAM_BUF_SIZE - self.stream_buf.len();
+            let want = if self.file_size - self.stream_file_offset > READ_CHUNK {
+                READ_CHUNK
+            } else {
+                self.file_size - self.stream_file_offset
+            };
+            let want = want.min(space);
+            let file = self.vfs_file.ok_or(Error::InvalidState)?;
+            let grant = vfs.read_grant(file, self.stream_file_offset, want, space_token, vfs_scratch)?;
+            let src = unsafe { core::slice::from_raw_parts(grant.base as *const u8, grant.len) };
+            self.stream_buf.extend_from_slice(src);
+            self.stream_file_offset += grant.len;
+        }
+        Ok(())
+    }
+
+    fn stream_avail(&self) -> usize {
+        self.stream_buf.len().saturating_sub(self.stream_consumed)
+    }
+
+    fn stream_at_eof(&self) -> bool {
+        self.stream_file_offset >= self.file_size && self.stream_consumed >= self.stream_buf.len()
+    }
+
+    fn ensure_stream_data(&mut self) -> Result<()> {
+        if self.stream_avail() >= STREAM_REFILL_WATERMARK || self.stream_file_offset >= self.file_size {
+            return Ok(());
+        }
+        if self.stream_consumed > 0 {
+            self.stream_buf.drain(0..self.stream_consumed);
+            self.stream_consumed = 0;
+        }
+        let info = process_info();
+        let space_token = info.tokens[TOKEN_SPACE];
+        let vfs_ep = registry::subscribe_output("vfs", "main")?;
+        let client_id = registry::control_endpoint();
+        let vfs = VfsClient::new(vfs_ep, client_id);
+        self.refill_stream(&vfs, space_token)?;
+        Ok(())
+    }
+
+    fn probe_format(data: &[u8]) -> Result<(u32, u8, u32)> {
+        let mut decoder = {
+            let mut d = Decoder::new();
+            d.init();
+            d
+        };
+        let mut pcm = vec![0i16; mp3_ffi::MAX_SAMPLES_PER_FRAME];
         let mut pos = 0;
         for _ in 0..200 {
             if pos >= data.len() {
@@ -588,10 +659,24 @@ impl AudioEngine {
                 pos += consumed;
             }
             if let Some(fi) = info {
-                return Ok((fi.sample_rate, fi.channels.num(), fi.bitrate));
+                return Ok((fi.sample_rate, fi.channels_num(), fi.bitrate));
             }
         }
         Err(Error::InvalidState)
+    }
+
+    pub fn estimate_duration_ms(head: &[u8], file_size: usize) -> u64 {
+        if file_size == 0 {
+            return 0;
+        }
+        let bitrate_bps = match Self::probe_format(head) {
+            Ok((_rate, _ch, bitrate)) => bitrate as u64 * 1000,
+            Err(_) => return 0,
+        };
+        if bitrate_bps == 0 {
+            return 0;
+        }
+        file_size as u64 * 8 * 1000 / bitrate_bps
     }
 
     pub fn tick(&mut self) -> Result<()> {
@@ -604,10 +689,24 @@ impl AudioEngine {
 
         self.drain_completions();
 
+        if self.stream_avail() < STREAM_REFILL_WATERMARK && !self.stream_at_eof() {
+            self.needs_refill = true;
+        }
+
+        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_inflight < RING_SLOTS as u32 {
+            self.submit_period()?;
+        }
+
         let mut decoded = 0usize;
-        while self.ring_inflight < RING_SLOTS as u32 && decoded < DECODE_BATCH {
-            if self.decode_pos >= self.mp3_data.len() {
-                break;
+        while self.ring_inflight < RING_SLOTS as u32
+            && decoded < DECODE_BATCH
+            && self.pcm_s16.len() < PERIOD_BYTES
+        {
+            if self.stream_avail() == 0 {
+                if self.stream_at_eof() {
+                    break;
+                }
+                return Ok(());
             }
             self.decode_one_frame()?;
             decoded += 1;
@@ -617,7 +716,7 @@ impl AudioEngine {
             self.submit_period()?;
         }
 
-        let at_eof = self.decode_pos >= self.mp3_data.len();
+        let at_eof = self.stream_at_eof();
         if at_eof {
             self.decode_complete = true;
         }
@@ -625,7 +724,7 @@ impl AudioEngine {
             self.submit_period()?;
         }
         if at_eof && self.pcm_s16.is_empty() && self.ring_inflight == 0 {
-            self.advance_to_next()?;
+            self.needs_advance = true;
         }
 
         Ok(())
@@ -635,12 +734,25 @@ impl AudioEngine {
         self.state == PlaybackState::Playing && self.ring_inflight >= RING_SLOTS as u32
     }
 
+    pub fn service_pending(&mut self) -> Result<()> {
+        if self.needs_refill {
+            self.needs_refill = false;
+            self.ensure_stream_data()?;
+        }
+        if self.needs_advance {
+            self.needs_advance = false;
+            self.advance_to_next()?;
+        }
+        Ok(())
+    }
+
     fn drain_completions(&mut self) {
-        let completed = match self.audio.as_mut() {
-            Some(audio) => audio.drain_completions(),
+        let audio = match self.audio.as_mut() {
+            Some(a) => a,
             None => return,
         };
-        for (handle, result) in completed {
+        audio.drain_completions_into(&mut self.completion_scratch);
+        for (handle, result) in self.completion_scratch.drain(..) {
             self.ring_inflight = self.ring_inflight.saturating_sub(1);
             self.pcm_played += PERIOD_BYTES as u64;
             if let Some(slot) = metadata_slot_for_handle(&self.tap_metadata, handle) {
@@ -656,24 +768,22 @@ impl AudioEngine {
     }
 
     fn decode_one_frame(&mut self) -> Result<()> {
-        if self.decode_pos >= self.mp3_data.len() {
+        if self.stream_avail() == 0 {
             return Ok(());
         }
         let (consumed, info) = self
             .decoder
-            .decode(&self.mp3_data[self.decode_pos..], &mut self.pcm_f32);
+            .decode(&self.stream_buf[self.stream_consumed..], &mut self.pcm_frame);
         if consumed == 0 && info.is_none() {
-            self.decode_pos += 1;
+            self.stream_consumed += 1;
             return Ok(());
         }
-        self.decode_pos += consumed;
+        self.stream_consumed += consumed;
 
         if let Some(fi) = info {
-            let total_samples = fi.samples_produced * fi.channels.num() as usize;
+            let total_samples = fi.samples_produced * fi.channels_num() as usize;
             for i in 0..total_samples {
-                let clamped = self.pcm_f32[i].max(-1.0).min(1.0);
-                let s = (clamped * 32767.0) as i16;
-                self.pcm_s16.extend_from_slice(&s.to_le_bytes());
+                self.pcm_s16.extend_from_slice(&self.pcm_frame[i].to_le_bytes());
             }
             self.pcm_total_decoded += (total_samples * 2) as u64;
         }

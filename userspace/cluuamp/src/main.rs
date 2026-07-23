@@ -2,7 +2,6 @@
 #![no_main]
 
 extern crate alloc;
-extern crate nanomp3;
 
 use libcluu::runtime as _;
 
@@ -32,6 +31,8 @@ const RENDER_MS: usize = 33;
 const META_SCRATCH_VA: usize = 0x7100_0000;
 const META_SCRATCH_PAGES: usize = 1;
 const META_READ_LEN: usize = 4096;
+const META_AUDIO_READ_LEN: usize = 4096;
+const META_AUDIO_SCRATCH_PAGES: usize = 1;
 
 struct AppState {
     model: model::CluuampModel,
@@ -138,6 +139,11 @@ fn ui_loop(
     reader: &mut StdinReader,
     prev_buffer: &mut ScreenBuffer,
 ) -> Result<()> {
+    let mut view_buf = libtui::View::new(0, 0);
+    let mut curr_buffer = ScreenBuffer::new(0, 0);
+    let mut meta_buf: Vec<u8> = Vec::with_capacity(META_READ_LEN);
+    let mut diff_buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut frame_counter: u64 = 0;
     loop {
         let (w, h) = terminal::current_size();
 
@@ -169,6 +175,8 @@ fn ui_loop(
                 let _ = s.model.audio.play();
             }
 
+            let _ = s.model.audio.service_pending();
+
             s.model.ui_tick();
 
             let was_playing = s.model.audio.state() == cluu_cluuamp::audio::PlaybackState::Playing;
@@ -176,12 +184,14 @@ fn ui_loop(
             let needs_render = structural_change
                 || s.model.title_scroll_changed()
                 || was_playing
-                || s.model.browser.is_some();
+                || s.model.browser.is_some()
+                || s.model.dirty;
+            s.model.dirty = false;
 
             let view = if needs_render {
-                let v = view::render(&s.model);
+                view::render_into(&mut view_buf, &mut s.model);
                 s.model.mark_title_rendered();
-                Some(v)
+                Some(())
             } else {
                 None
             };
@@ -198,22 +208,31 @@ fn ui_loop(
             (view, should_quit, pending_dir, pending_dir_import, pending_meta)
         };
 
-        if let Some(v) = view {
-            let mut new_buffer = ScreenBuffer::new(v.width, v.height);
-            for (i, cell) in v.cells.iter().enumerate() {
-                let row = if v.width > 0 { i / v.width } else { 0 };
-                let col = if v.width > 0 { i % v.width } else { 0 };
-                new_buffer.set(row, col, *cell);
+        if view.is_some() {
+            curr_buffer.resize(view_buf.width, view_buf.height);
+            for (i, cell) in view_buf.cells.iter().enumerate() {
+                let row = if view_buf.width > 0 { i / view_buf.width } else { 0 };
+                let col = if view_buf.width > 0 { i % view_buf.width } else { 0 };
+                curr_buffer.set(row, col, *cell);
             }
-            let diff = new_buffer.diff_render(prev_buffer);
-            if !diff.is_empty() {
-                renderer.write(diff.as_bytes());
+            curr_buffer.diff_render_into(prev_buffer, &mut diff_buf);
+            if !diff_buf.is_empty() {
+                renderer.write(&diff_buf);
             }
-            *prev_buffer = new_buffer;
+            core::mem::swap(prev_buffer, &mut curr_buffer);
         }
 
         if should_quit {
             return Ok(());
+        }
+
+        frame_counter += 1;
+        if frame_counter % 300 == 0 {
+            let st = libcluu::allocator::stats();
+            debug_print(&format!(
+                "cluuamp: heap total={} used={} peak={} free={} largest_free={} leaked={}\n",
+                st.total, st.used, st.peak, st.free, st.largest_free, st.leaked_deallocs
+            ));
         }
 
         if reader.wait_for_data(RENDER_MS) {
@@ -253,7 +272,7 @@ fn ui_loop(
             mp3_paths.sort();
             let mut s = shared.lock();
             s.model.audio.extend_playlist(mp3_paths);
-            s.model.force_redraw = true;
+            s.model.dirty = true;
         }
 
         if let Some(idx) = pending_meta {
@@ -262,15 +281,19 @@ fn ui_loop(
                 s.model.audio.playlist().get(idx).cloned()
             };
             if let Some(path) = path {
-                if let Some(head) = read_file_head(&path, META_READ_LEN) {
-                    let meta = id3::parse(&head);
-                    let mut s = shared.lock();
-                    if !meta.is_empty() {
-                        s.model.audio.set_track_meta(idx, meta);
-                        s.model.force_redraw = true;
-                    } else {
-                        s.model.audio.set_track_meta(idx, id3::TrackMeta::default());
+                if let Some(file_size) = read_file_head_into(&path, META_READ_LEN, &mut meta_buf) {
+                    let mut meta = id3::parse(&meta_buf);
+                    let audio_offset = id3::id3v2_tag_size(&meta_buf);
+                    if audio_offset > 0 && audio_offset < file_size {
+                        if read_audio_head_into(&path, audio_offset, META_AUDIO_READ_LEN, &mut meta_buf).is_some() {
+                            meta.duration_ms = cluu_cluuamp::audio::AudioEngine::estimate_duration_ms(&meta_buf, file_size.saturating_sub(audio_offset));
+                        }
+                    } else if audio_offset == 0 {
+                        meta.duration_ms = cluu_cluuamp::audio::AudioEngine::estimate_duration_ms(&meta_buf, file_size);
                     }
+                    let mut s = shared.lock();
+                    s.model.audio.set_track_meta(idx, meta);
+                    s.model.dirty = true;
                 } else {
                     let mut s = shared.lock();
                     s.model.audio.set_track_meta(idx, id3::TrackMeta::default());
@@ -280,7 +303,8 @@ fn ui_loop(
     }
 }
 
-fn read_file_head(path: &str, len: usize) -> Option<Vec<u8>> {
+fn read_file_head_into(path: &str, len: usize, buf: &mut Vec<u8>) -> Option<usize> {
+    buf.clear();
     let info = process_info();
     let space_token = info.tokens[TOKEN_SPACE];
     let _ = space_map_range(space_token, META_SCRATCH_VA, 0, 0x03, META_SCRATCH_PAGES, 0);
@@ -292,9 +316,29 @@ fn read_file_head(path: &str, len: usize) -> Option<Vec<u8>> {
     let read_len = len.min(file.size);
     let grant = vfs.read_grant(file, 0, read_len, space_token, META_SCRATCH_VA).ok()?;
     let bytes = unsafe { core::slice::from_raw_parts(grant.base as *const u8, grant.len) };
-    let data = bytes.to_vec();
+    buf.extend_from_slice(bytes);
+    let file_size = file.size;
     let _ = vfs.close(file);
-    Some(data)
+    Some(file_size)
+}
+
+fn read_audio_head_into(path: &str, offset: usize, len: usize, buf: &mut Vec<u8>) -> Option<usize> {
+    buf.clear();
+    let info = process_info();
+    let space_token = info.tokens[TOKEN_SPACE];
+    let _ = space_map_range(space_token, META_SCRATCH_VA, 0, 0x03, META_AUDIO_SCRATCH_PAGES, 0);
+
+    let ep = registry::lookup_service("vfs:main")?;
+    let cid = registry::control_endpoint();
+    let vfs = VfsClient::new(ep, cid);
+    let file = vfs.open(path).ok()?;
+    let read_len = len.min(file.size.saturating_sub(offset));
+    let grant = vfs.read_grant(file, offset, read_len, space_token, META_SCRATCH_VA).ok()?;
+    let bytes = unsafe { core::slice::from_raw_parts(grant.base as *const u8, grant.len) };
+    buf.extend_from_slice(bytes);
+    let file_size = file.size;
+    let _ = vfs.close(file);
+    Some(file_size)
 }
 
 fn list_directory(path: &str) -> Vec<libtui::components::browser::DirEntry> {

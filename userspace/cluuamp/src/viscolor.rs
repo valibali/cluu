@@ -1,16 +1,14 @@
 //! Winamp classic viscolor palette mapped to xterm-256-color indices.
 //!
-//! 16 bar levels (0-15). Gradient: blue (low) -> orange (mid) -> red (high).
-//! Matches the Winamp default viscolor.txt red-orange-green palette but
-//! with blue replacing green for the low band.
+//! 16 bar levels (0-15). Gradient: green (low) -> orange (mid) -> red (high).
 
 pub const BAR_COLORS: [u8; 16] = [
-    17,  // 0  — dark blue
-    18,  // 1  — blue
-    20,  // 2  — medium blue
-    21,  // 3  — bright blue
-    27,  // 4  — dodger blue
-    33,  // 5  — light blue
+    22,  // 0  — dark green
+    28,  // 1  — green
+    29,  // 2  — medium green
+    30,  // 3  — bright green
+    34,  // 4  — light green
+    41,  // 5  — yellow-green
     130, // 6  — dark orange
     166, // 7  — orange
     172, // 8  — medium orange
@@ -63,9 +61,9 @@ mod tests {
     }
 
     #[test]
-    fn bottom_row_is_blue() {
+    fn bottom_row_is_green() {
         let bottom = bar_color(2);
-        assert!(bottom >= 17 && bottom <= 39, "bottom should be blue, got {}", bottom);
+        assert!(bottom >= 22 && bottom <= 48, "bottom should be green, got {}", bottom);
     }
 
     #[test]

@@ -580,7 +580,30 @@ impl ThreadManager {
             Some(id) => id,
             None => return,
         };
+        let faulting_cr3 = Self::with_thread(current, |t| t.page_table_root.as_u64()).unwrap_or(0);
         let _ = Self::mark_thread_dead(current);
+        if faulting_cr3 != 0 {
+            Self::kill_threads_in_space(faulting_cr3, current);
+        }
+    }
+
+    fn kill_threads_in_space(cr3: u64, exclude: ThreadId) {
+        let to_kill: alloc::vec::Vec<ThreadId> = {
+            let repo = THREAD_REPOSITORY.lock();
+            repo.iter()
+                .filter(|(tid, t)| {
+                    **tid != exclude
+                        && !t.is_dead()
+                        && t.page_table_root.as_u64() == cr3
+                })
+                .map(|(tid, _)| *tid)
+                .collect()
+        };
+        for tid in to_kill {
+            klibcluu::warn("PF: killing sibling thread in same address space tid=");
+            klibcluu::log_dec(klibcluu::LogLevel::Warn, "", tid.as_u64());
+            Self::mark_thread_dead(tid);
+        }
     }
 
     /// Mark a thread as dead and remove it from scheduler queues.
@@ -842,10 +865,14 @@ impl ThreadManager {
             let candidate = match Self::pick_next() {
                 Some(id) => id,
                 None => {
-                    klibcluu::error("schedule_next_from_fault: no runnable threads!");
+                    klibcluu::warn("schedule_next_from_fault: no runnable threads, idling");
                     loop {
                         x86_64::instructions::interrupts::enable();
                         x86_64::instructions::hlt();
+                        Self::drain_pending_wake();
+                        if let Some(id) = Self::pick_next() {
+                            break id;
+                        }
                     }
                 }
             };

@@ -203,10 +203,9 @@ fn run() -> libcluu::Result<()> {
 
         let mut view = View::new(cols, rows);
 
-        // Title bar: white on blue.
         view.fill_rect(0, 0, cols, 1, Cell::new(' ').fg(7).bg(4));
         let title = format!(" CLUU top   Processes: {}", records.len());
-        write_styled(&mut view, 0, 0, &title, 7, 4);
+        view.write_styled(0, 0, &title, Cell::new(' ').fg(7).bg(4));
 
         // htop-style CPU + memory gauges via libtui::Gauge.
         let cpu_color = gauge_fg(sys_cpu_pct);
@@ -219,45 +218,59 @@ fn run() -> libcluu::Result<()> {
             let remaining = cols.saturating_sub(overhead + 1);
             let bar_w = remaining / 2;
 
-            write_styled(&mut view, 1, 0, "CPU ", 7, 0);
+            view.write_styled(1, 0, "CPU ", Cell::new(' ').fg(7));
             view.set(1, 4, Cell::new('[').fg(cpu_color));
             Gauge::new(100).value(sys_cpu_pct as u64).fg(cpu_color).bg(cpu_color)
                 .draw(Rect::new(5, 1, bar_w, 1), &mut view);
             let after_cpu = 5 + bar_w;
             view.set(1, after_cpu, Cell::new(']').fg(cpu_color));
-            write_styled(&mut view, 1, after_cpu + 1, &format!(" {:<4}  ", cpu_pct_str), 0, 0);
+            let cpu_lbl = format!(" {:<4}  ", cpu_pct_str);
+            view.write_styled(1, after_cpu + 1, &cpu_lbl, Cell::new(' '));
 
             let mem_label_x = after_cpu + 7;
-            write_styled(&mut view, 1, mem_label_x, "Mem ", 7, 0);
+            view.write_styled(1, mem_label_x, "Mem ", Cell::new(' ').fg(7));
             view.set(1, mem_label_x + 4, Cell::new('[').fg(mem_color));
             Gauge::new(mem_total_kb.max(1)).value(mem_used_kb).fg(mem_color).bg(mem_color)
                 .draw(Rect::new(mem_label_x + 5, 1, bar_w, 1), &mut view);
             let after_mem = mem_label_x + 5 + bar_w;
             view.set(1, after_mem, Cell::new(']').fg(mem_color));
-            write_styled(&mut view, 1, after_mem + 1, &format!(" {}", mem_str), 0, 0);
+            let mem_lbl = format!(" {}", mem_str);
+            view.write_styled(1, after_mem + 1, &mem_lbl, Cell::new(' '));
         } else {
             let overhead = 5 + 2 + 4;
             let bar_w = cols.saturating_sub(overhead + 1);
 
-            write_styled(&mut view, 1, 0, "CPU ", 7, 0);
+            view.write_styled(1, 0, "CPU ", Cell::new(' ').fg(7));
             view.set(1, 4, Cell::new('[').fg(cpu_color));
             Gauge::new(100).value(sys_cpu_pct as u64).fg(cpu_color).bg(cpu_color)
                 .draw(Rect::new(5, 1, bar_w, 1), &mut view);
             let after_cpu = 5 + bar_w;
             view.set(1, after_cpu, Cell::new(']').fg(cpu_color));
-            write_styled(&mut view, 1, after_cpu + 1, &format!(" {:<4}", cpu_pct_str), 0, 0);
+            let cpu_lbl = format!(" {:<4}", cpu_pct_str);
+            view.write_styled(1, after_cpu + 1, &cpu_lbl, Cell::new(' '));
         }
 
-        let name_hdr = fit_chars("NAME", w_name);
-        let header = format!(
-            "{:>W_CID$} {:>W_PCID$} {} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}",
-            "CID", "PCID", name_hdr, "PID", "HEAP", "MEM", "CPU%", "ST",
-        );
-        write_styled(&mut view, 2, 0, &header, 7, 0);
+        let col_pcid = W_CID + 1;
+        let col_name = col_pcid + W_PCID + 1;
+        let col_pid = col_name + w_name + 1;
+        let col_heap = col_pid + W_PID + 1;
+        let col_mem = col_heap + W_HEAP + 1;
+        let col_cpu = col_mem + W_MEM + 1;
+        let col_st = col_cpu + W_CPU + 1;
+
+        let hdr_cell = Cell::new(' ').fg(7);
+        view.write_styled(2, 0, "CID", hdr_cell);
+        view.write_styled(2, col_pcid, "PCID", hdr_cell);
+        view.write_field(2, col_name, "NAME", w_name, hdr_cell);
+        view.write_styled(2, col_pid, "PID", hdr_cell);
+        view.write_styled(2, col_heap, "HEAP", hdr_cell);
+        view.write_styled(2, col_mem, "MEM", hdr_cell);
+        view.write_styled(2, col_cpu, "CPU%", hdr_cell);
+        view.write_styled(2, col_st, "ST", hdr_cell);
 
         let sep_len = row_width.min(cols);
         let sep: String = core::iter::repeat('-').take(sep_len).collect();
-        write_styled(&mut view, 3, 0, &sep, 0, 0);
+        view.write_styled(3, 0, &sep, Cell::new(' '));
 
         let fixed_rows = 6;
         let max_data_rows = rows.saturating_sub(fixed_rows);
@@ -279,31 +292,36 @@ fn run() -> libcluu::Result<()> {
                 0
             };
 
+            let data_cell = Cell::new(' ').fg(fg);
+
             let cid_str = format!("{:>1$}", rec.cid, W_CID);
-            let pcid_str = if rec.pcid == 0 {
-                format!("{:>1$}", '-', W_PCID)
+            view.write_styled(row, 0, &cid_str, data_cell);
+
+            if rec.pcid == 0 {
+                view.write_styled(row, col_pcid, &format!("{:>1$}", '-', W_PCID), data_cell);
             } else {
-                format!("{:>1$}", rec.pcid, W_PCID)
-            };
+                view.write_styled(row, col_pcid, &format!("{:>1$}", rec.pcid, W_PCID), data_cell);
+            }
 
             let full_name = format!("{}{}", tree_entry.connector, rec.name);
-            let name_str = fit_chars(&full_name, w_name);
+            view.write_field(row, col_name, &full_name, w_name, data_cell);
 
             let pid_str = format!("{:>1$}", rec.pid, W_PID);
+            view.write_styled(row, col_pid, &pid_str, data_cell);
 
             let heap_str = if rec.heap_pages == 0 {
                 String::from("---")
             } else {
                 format_mem_kb(rec.heap_pages as u64 * 4)
             };
-            let heap_col = format!("{:>1$}", heap_str, W_HEAP);
+            view.write_styled(row, col_heap, &format!("{:>1$}", heap_str, W_HEAP), data_cell);
 
             let mem_str = if rec.heap_pages == 0 && rec.other_pages == 0 {
                 String::from("---")
             } else {
                 format_mem_kb((rec.heap_pages as u64 + rec.other_pages as u64) * 4)
             };
-            let mem_col = format!("{:>1$}", mem_str, W_MEM);
+            view.write_styled(row, col_mem, &format!("{:>1$}", mem_str, W_MEM), data_cell);
 
             let cpu_str = if first_frame || prev_frame_tsc == 0 {
                 String::from("---")
@@ -315,25 +333,20 @@ fn run() -> libcluu::Result<()> {
                 let pct = (delta * 100 / elapsed_sched).min(100);
                 format!("{}%", pct)
             };
-            let cpu_col = format!("{:>1$}", cpu_str, W_CPU);
+            view.write_styled(row, col_cpu, &format!("{:>1$}", cpu_str, W_CPU), data_cell);
 
             let st_str = match rec.state.as_str() {
                 "R" => "RUN ",
                 "Z" => "DEAD",
                 _ => "UN  ",
             };
-
-            let line = format!(
-                "{} {} {} {} {} {} {} {}",
-                cid_str, pcid_str, name_str, pid_str, heap_col, mem_col, cpu_col, st_str
-            );
-            write_styled(&mut view, row, 0, &line, fg, 0);
+            view.write_styled(row, col_st, st_str, data_cell);
         }
 
         let data_end = 4 + ordered.iter().count().min(max_data_rows);
 
         let h9_line = format!(" H9: {}  H10: {}", h9, h10);
-        write_styled(&mut view, data_end, 0, &h9_line, 8, 0);
+        view.write_styled(data_end, 0, &h9_line, Cell::new(' ').fg(8));
 
         let footer_row = data_end + 1;
         let help = HelpLine::new()
@@ -586,34 +599,4 @@ fn gauge_fg(pct: u32) -> u8 {
     if pct < 50 { 2 }
     else if pct < 80 { 3 }
     else { 1 }
-}
-
-fn write_styled(view: &mut View, row: usize, col: usize, s: &str, fg: u8, bg: u8) {
-    let mut c = col;
-    for ch in s.chars() {
-        if c >= view.width || row >= view.height {
-            break;
-        }
-        view.set(row, c, Cell::new(ch).fg(fg).bg(bg));
-        c += 1;
-    }
-}
-
-/// Truncate or pad `s` to exactly `width` display characters (char-safe for
-/// multi-byte UTF-8 like the tree connectors └├│).
-fn fit_chars(s: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut count = 0usize;
-    for c in s.chars() {
-        if count >= width {
-            break;
-        }
-        out.push(c);
-        count += 1;
-    }
-    while count < width {
-        out.push(' ');
-        count += 1;
-    }
-    out
 }

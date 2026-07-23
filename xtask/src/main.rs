@@ -1513,6 +1513,7 @@ fn build_userspace(profile: &str) -> Result<()> {
             "build-std-features=compiler-builtins-mem",
         ]);
         cmd.env("TMPDIR", tmp_dir.as_os_str());
+        cmd.env("CC_x86_64_cluu_user", "clang");
 
         if profile == "release" {
             cmd.arg("--release");

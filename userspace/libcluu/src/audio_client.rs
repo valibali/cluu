@@ -146,8 +146,9 @@ impl AudioSessionClient {
         }
     }
 
-    pub fn drain_completions(&mut self) -> Vec<(PcmHandle, Result<()>)> {
-        let mut out = core::mem::take(&mut self.pending);
+    pub fn drain_completions_into(&mut self, out: &mut Vec<(PcmHandle, Result<()>)>) {
+        out.clear();
+        core::mem::swap(out, &mut self.pending);
         let tokens = [self.completion_endpoint];
         let mut buf = [0u8; 128];
         loop {
@@ -160,6 +161,11 @@ impl AudioSessionClient {
                 Err(_) => break,
             }
         }
+    }
+
+    pub fn drain_completions(&mut self) -> Vec<(PcmHandle, Result<()>)> {
+        let mut out = Vec::new();
+        self.drain_completions_into(&mut out);
         out
     }
 

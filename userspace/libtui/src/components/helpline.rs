@@ -62,27 +62,29 @@ impl Drawable for HelpLine {
         if area.width == 0 || area.height == 0 {
             return;
         }
+        let max_x = area.x + area.width;
         let mut x = area.x;
         for (i, entry) in self.entries.iter().enumerate() {
             if i > 0 {
-                for ch in self.sep.chars() {
-                    if x >= area.x + area.width { return; }
-                    buf.set(area.y, x, Cell::new(ch).fg(self.desc_fg));
-                    x += 1;
-                }
+                let rem = max_x.saturating_sub(x);
+                if rem == 0 { return; }
+                buf.write_styled_n(area.y, x, &self.sep, rem, Cell::new(' ').fg(self.desc_fg));
+                x += self.sep.chars().count().min(rem);
             }
-            for ch in entry.key.chars() {
-                if x >= area.x + area.width { return; }
-                buf.set(area.y, x, Cell::new(ch).fg(self.key_fg).attrs(ATTR_BOLD));
-                x += 1;
-            }
+            let rem = max_x.saturating_sub(x);
+            if rem == 0 { return; }
+            buf.write_styled_n(area.y, x, &entry.key, rem, Cell::new(' ').fg(self.key_fg).attrs(ATTR_BOLD));
+            x += entry.key.chars().count().min(rem);
+
+            let rem = max_x.saturating_sub(x);
+            if rem == 0 { return; }
             buf.set(area.y, x, Cell::new(' ').fg(self.desc_fg));
             x += 1;
-            for ch in entry.desc.chars() {
-                if x >= area.x + area.width { return; }
-                buf.set(area.y, x, Cell::new(ch).fg(self.desc_fg));
-                x += 1;
-            }
+
+            let rem = max_x.saturating_sub(x);
+            if rem == 0 { return; }
+            buf.write_styled_n(area.y, x, &entry.desc, rem, Cell::new(' ').fg(self.desc_fg));
+            x += entry.desc.chars().count().min(rem);
         }
     }
 }

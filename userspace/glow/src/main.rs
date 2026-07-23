@@ -185,13 +185,8 @@ impl Model for GlowModel {
             }
             let md = &self.lines[idx];
             let row = 1 + i;
-            for (col, ch) in md.text.chars().enumerate() {
-                if col >= 78 {
-                    break;
-                }
-                let cell = Cell::new(ch).fg(md.fg).attrs(md.attrs);
-                v.set(row, col, cell);
-            }
+            let cell = Cell::new(' ').fg(md.fg).attrs(md.attrs);
+            v.write_styled_n(row, 0, &md.text, 78, cell);
         }
         v
     }

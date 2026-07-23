@@ -17,25 +17,30 @@ use crate::audio::PlaybackState;
 use crate::model::{CluuampModel, FocusArea, VisMode};
 use crate::widgets;
 
-pub fn render(model: &CluuampModel) -> View {
-    let layout = &model.layout;
-    let mut view = View::new(layout.width, layout.height);
-    if !layout.fits() {
-        draw_too_small(&mut view, layout.width, layout.height);
-        return view;
+pub fn render_into(view: &mut View, model: &mut CluuampModel) {
+    let (w, h) = (model.layout.width, model.layout.height);
+    view.reset(w, h);
+    if !model.layout.fits() {
+        draw_too_small(view, w, h);
+        return;
     }
     if let Some(dialog) = &model.browser {
-        dialog.draw_modal(layout.width, layout.height, &mut view);
-        return view;
+        dialog.draw_modal(w, h, view);
+        return;
     }
-    draw_main_window(&mut view, model);
-    if layout.show_eq {
-        draw_eq_window(&mut view, model);
+    draw_main_window(view, model);
+    if model.layout.show_eq {
+        draw_eq_window(view, model);
     }
-    if layout.show_playlist {
-        draw_playlist_window(&mut view, model);
+    if model.layout.show_playlist {
+        draw_playlist_window(view, model);
     }
-    draw_footer(&mut view, model);
+    draw_footer(view, model);
+}
+
+pub fn render(model: &mut CluuampModel) -> View {
+    let mut view = View::new(model.layout.width, model.layout.height);
+    render_into(&mut view, model);
     view
 }
 
@@ -46,7 +51,7 @@ fn draw_too_small(view: &mut View, w: usize, h: usize) {
     view.write_styled(row, col, msg, Cell::new(' ').fg(196).attrs(ATTR_BOLD));
 }
 
-fn draw_main_window(view: &mut View, model: &CluuampModel) {
+fn draw_main_window(view: &mut View, model: &mut CluuampModel) {
     let layout = &model.layout;
     let w = layout.width;
 
@@ -141,15 +146,19 @@ fn draw_fft_content(view: &mut View, model: &CluuampModel) {
     view.write_styled(layout.three_col_area.y, title_start, title, Cell::new(' ').fg(COLOR_DEFAULT));
     match model.vis_mode {
         VisMode::Spectrum => {
-            for j in 0..inner.width {
-                let bar_idx = j * 75 / inner.width.max(1);
-                widgets::draw_spectrum_column(
-                    view,
-                    inner.y,
-                    inner.x + j,
-                    model.fft.bar_height(bar_idx),
-                );
+            let n = model.fft.num_bars();
+            let mut bar_heights = [0u8; 256];
+            for i in 0..n {
+                bar_heights[i] = model.fft.bar_height(i);
             }
+            widgets::draw_spectrum_braille(
+                view,
+                inner.y,
+                inner.x,
+                inner.width,
+                inner.height,
+                &bar_heights[..n],
+            );
         }
         VisMode::Oscilloscope => {
             let mut points = [0i8; 75];
@@ -161,12 +170,12 @@ fn draw_fft_content(view: &mut View, model: &CluuampModel) {
     }
 }
 
-fn draw_info_content(view: &mut View, model: &CluuampModel) {
+fn draw_info_content(view: &mut View, model: &mut CluuampModel) {
     let layout = &model.layout;
     let inner = layout.info_inner;
 
-    let display = model.audio.display_title(model.audio.current_index());
-    let mut marquee = Marquee::new(&display)
+    model.audio.write_display_title(model.audio.current_index(), &mut model.scratch_title);
+    let mut marquee = Marquee::new(&model.scratch_title)
         .fg(252)
         .max_width(inner.width);
     marquee.set_offset(model.title_scroll_offset);
@@ -177,18 +186,21 @@ fn draw_info_content(view: &mut View, model: &CluuampModel) {
 
     let kbps = model.audio.bitrate_kbps();
     let khz = model.audio.sample_rate() / 1000;
-    let kbps_str = if kbps == 0 {
-        String::from("---")
+    use core::fmt::Write;
+    model.scratch_str.clear();
+    if kbps == 0 {
+        model.scratch_str.push_str("---");
     } else {
-        format!("{:>3}", kbps)
-    };
-    let khz_str = if khz == 0 {
-        String::from("--")
+        let _ = write!(model.scratch_str, "{:>3}", kbps);
+    }
+    model.scratch_str.push_str(" kbps  ");
+    if khz == 0 {
+        model.scratch_str.push_str("--");
     } else {
-        format!("{:>2}", khz)
-    };
-    let info = format!("{} kbps  {} khz", kbps_str, khz_str);
-    view.write_styled(inner.y + 1, inner.x, &info, Cell::new(' ').fg(244));
+        let _ = write!(model.scratch_str, "{:>2}", khz);
+    }
+    model.scratch_str.push_str(" khz");
+    view.write_styled(inner.y + 1, inner.x, &model.scratch_str, Cell::new(' ').fg(244));
 
     let stereo = model.audio.channels() >= 2;
     let mono_fg = if stereo { 240 } else { 46 };
@@ -369,15 +381,18 @@ fn draw_eq_window(view: &mut View, model: &CluuampModel) {
     }
 }
 
-fn draw_playlist_window(view: &mut View, model: &CluuampModel) {
+fn draw_playlist_window(view: &mut View, model: &mut CluuampModel) {
     let layout = &model.layout;
     let w = layout.width;
     let pl = model.audio.playlist();
     let area = layout.playlist_area;
 
+    use core::fmt::Write;
+    model.scratch_str.clear();
+    let _ = write!(model.scratch_str, "PLAYLIST ({} tracks)", pl.len());
     LayoutBlock::new()
         .border(Border::single())
-        .title(&format!("PLAYLIST ({} tracks)", pl.len()))
+        .title(&model.scratch_str)
         .draw(area, view);
 
     let scroll = model.playlist_scroll;
@@ -407,9 +422,10 @@ fn draw_playlist_window(view: &mut View, model: &CluuampModel) {
                 view.set(row, col, Cell::new(' ').fg(226));
             }
         }
-        let num = format!("{:>2}", (track_idx + 1).min(99));
+        model.scratch_str.clear();
+        let _ = write!(model.scratch_str, "{:>2}", (track_idx + 1).min(99));
         let num_fg = if is_current || focused { fg } else { 238 };
-        view.write_styled(row, content.x + 1, &num, Cell::new(' ').fg(num_fg));
+        view.write_styled(row, content.x + 1, &model.scratch_str, Cell::new(' ').fg(num_fg));
         if content.x + 3 < content.right() {
             view.set(
                 row,
@@ -425,17 +441,20 @@ fn draw_playlist_window(view: &mut View, model: &CluuampModel) {
             );
         }
         let max_name = content_w.saturating_sub(17);
-        let name: String = model.audio.display_title(track_idx)
-            .chars()
-            .take(max_name)
-            .collect();
-        view.write_styled(row, content.x + 7, &name, Cell::new(' ').fg(fg));
-        if is_current {
-            let dur = model.audio.duration_ms();
-            let dstr = format!("{}:{:02}", dur / 60000, (dur / 1000) % 60);
+        model.audio.write_display_title(track_idx, &mut model.scratch_title);
+        view.write_styled_n(row, content.x + 7, &model.scratch_title, max_name, Cell::new(' ').fg(fg));
+        let dur = if is_current {
+            let live = model.audio.duration_ms();
+            if live > 0 { live } else { model.audio.track_duration_ms(track_idx) }
+        } else {
+            model.audio.track_duration_ms(track_idx)
+        };
+        if dur > 0 {
+            model.scratch_str.clear();
+            let _ = write!(model.scratch_str, "{}:{:02}", dur / 60000, (dur / 1000) % 60);
             let dcol = content.right().saturating_sub(7);
-            let dstr_fg = if focused { 226 } else { 244 };
-            view.write_styled(row, dcol, &dstr, Cell::new(' ').fg(dstr_fg));
+            let dstr_fg = if focused { 226 } else if is_current { 244 } else { 240 };
+            view.write_styled(row, dcol, &model.scratch_str, Cell::new(' ').fg(dstr_fg));
         }
     }
 
@@ -458,21 +477,18 @@ fn draw_playlist_window(view: &mut View, model: &CluuampModel) {
     }
     let pos = model.audio.position_ms();
     let dur = model.audio.duration_ms();
-    let times = format!(
-        "{}:{:02}/{}:{:02}",
-        pos / 60000,
-        (pos / 1000) % 60,
-        dur / 60000,
-        (dur / 1000) % 60
-    );
+    model.scratch_str.clear();
+    let _ = write!(model.scratch_str, "{}:{:02}/{}:{:02}",
+        pos / 60000, (pos / 1000) % 60,
+        dur / 60000, (dur / 1000) % 60);
     let list_label = "[LIST]";
     let list_col = w.saturating_sub(list_label.len() + 2);
-    let times_col = list_col.saturating_sub(times.len() + 1);
-    view.write_styled(row, times_col, &times, Cell::new(' ').fg(244));
+    let times_col = list_col.saturating_sub(model.scratch_str.len() + 1);
+    view.write_styled(row, times_col, &model.scratch_str, Cell::new(' ').fg(244));
     view.write_styled(row, list_col, list_label, Cell::new(' ').fg(240));
 }
 
-fn draw_footer(view: &mut View, model: &CluuampModel) {
+fn draw_footer(view: &mut View, model: &mut CluuampModel) {
     let layout = &model.layout;
     let row = layout.footer_area.y;
     let w = layout.width;
@@ -484,13 +500,9 @@ fn draw_footer(view: &mut View, model: &CluuampModel) {
         FocusArea::Eq => "EQ",
         FocusArea::Playlist => "Playlist",
     };
-    let help = format!(
-        " Tab:focus[{focus_label}] Space:play e/p:windows E:eq r:rem v:vis n/b:track o:open q:quit "
-    );
-    let help_chars: Vec<char> = help.chars().collect();
-    for i in 0..w.min(help_chars.len()) {
-        view.set(row, i, Cell::new(help_chars[i]).fg(238));
-    }
+    let help = " Tab:focus[Space:play e/p:windows E:eq r:rem v:vis n/b:track o:open q:quit ";
+    let help_len = help.len().min(w);
+    view.write_styled(row, 0, &help[..help_len], Cell::new(' ').fg(238));
 }
 
 #[cfg(test)]
@@ -521,8 +533,8 @@ use libtui::components::filedialog::FileDialog;
 
     #[test]
     fn focused_playlist_row_is_yellow_without_reverse() {
-        let model = focused_model(FocusArea::Playlist);
-        let view = render(&model);
+        let mut model = focused_model(FocusArea::Playlist);
+        let view = render(&mut model);
         let pl_content = model.layout.pl_content;
         assert!(pl_content.height > 0);
         let row = pl_content.y;
@@ -535,8 +547,8 @@ use libtui::components::filedialog::FileDialog;
 
     #[test]
     fn focused_eq_slider_and_label_are_yellow_without_reverse() {
-        let model = focused_model(FocusArea::Eq);
-        let view = render(&model);
+        let mut model = focused_model(FocusArea::Eq);
+        let view = render(&mut model);
         let eq_sliders = model.layout.eq_sliders;
         let eq_labels = model.layout.eq_labels;
         let band_x = model.layout.eq_band_x[0];
@@ -565,7 +577,8 @@ use libtui::components::filedialog::FileDialog;
             FocusArea::Eq,
             FocusArea::Playlist,
         ] {
-            assert_black_without_reverse(&render(&focused_model(focus)));
+            let mut m = focused_model(focus);
+            assert_black_without_reverse(&render(&mut m));
         }
     }
 
@@ -574,7 +587,7 @@ use libtui::components::filedialog::FileDialog;
         let mut model = focused_model(FocusArea::Playlist);
         let dialog = FileDialog::open_multi("/host", 5);
         model.browser = Some(dialog);
-        let view = render(&model);
+        let view = render(&mut model);
         assert_eq!(view.get(0, 0).unwrap().bg, 0);
         assert_eq!(view.get(0, 0).unwrap().ch, ' ');
     }

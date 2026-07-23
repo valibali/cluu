@@ -7,7 +7,8 @@ use microfft::complex::cfft_512;
 use microfft::Complex32;
 
 const FFT_SIZE: usize = 512;
-const NUM_BARS: usize = 75;
+const MAX_BARS: usize = 256;
+const DEFAULT_NUM_BARS: usize = 75;
 const MAX_LEVEL: u8 = 15;
 
 const DEFAULT_FALLOFF: i32 = 12;
@@ -20,9 +21,10 @@ pub struct SpectrumAnalyzer {
     window: [f32; FFT_SIZE],
     fft_buffer: [Complex32; FFT_SIZE],
     magnitudes: [f32; 256],
-    bar_values: [u8; NUM_BARS],
-    bar_state: [i32; NUM_BARS],
-    display_state: [i32; NUM_BARS],
+    bar_values: [u8; MAX_BARS],
+    bar_state: [i32; MAX_BARS],
+    display_state: [i32; MAX_BARS],
+    num_bars: usize,
     falloff: i32,
 }
 
@@ -37,9 +39,10 @@ impl SpectrumAnalyzer {
             window,
             fft_buffer: [Complex32::new(0.0, 0.0); FFT_SIZE],
             magnitudes: [0f32; 256],
-            bar_values: [0u8; NUM_BARS],
-            bar_state: [0i32; NUM_BARS],
-            display_state: [0i32; NUM_BARS],
+            bar_values: [0u8; MAX_BARS],
+            bar_state: [0i32; MAX_BARS],
+            display_state: [0i32; MAX_BARS],
+            num_bars: DEFAULT_NUM_BARS,
             falloff: DEFAULT_FALLOFF,
         }
     }
@@ -62,8 +65,9 @@ impl SpectrumAnalyzer {
     }
 
     fn compute_bands(&mut self) {
-        let bla = 255.0 / libm::powf(2.0, 75.0 / 12.0);
-        for x in 0..NUM_BARS {
+        let n = self.num_bars;
+        let bla = 255.0 / libm::powf(2.0, n as f32 / 12.0);
+        for x in 0..n {
             let bin_f = (libm::powf(2.0, x as f32 / 12.0) - 1.0) * bla + 1.0;
             let next = (libm::powf(2.0, (x + 1) as f32 / 12.0) - 1.0) * bla + 1.0;
             let val = self.hermite_sample(bin_f, next);
@@ -111,18 +115,9 @@ impl SpectrumAnalyzer {
     }
 
     pub fn tick(&mut self) {
-        for x in 0..NUM_BARS {
-            let raw = self.bar_values[x];
-            let t = x & !3;
-            let v = if t + 3 < NUM_BARS {
-                let a = self.bar_values[t] as u32;
-                let b = self.bar_values[t + 1] as u32;
-                let c = self.bar_values[t + 2] as u32;
-                let d = self.bar_values[t + 3] as u32;
-                ((a + b + c + d) / 4) as u8
-            } else {
-                raw
-            };
+        let n = self.num_bars;
+        for x in 0..n {
+            let v = self.bar_values[x];
             let v = (v >> 4).min(MAX_LEVEL);
             let v16 = (v as i32) << 4;
             if v16 < self.bar_state[x] {
@@ -135,14 +130,18 @@ impl SpectrumAnalyzer {
     }
 
     pub fn bar_height(&self, x: usize) -> u8 {
-        if x >= NUM_BARS {
+        if x >= self.num_bars {
             return 0;
         }
         (self.display_state[x] >> 4) as u8
     }
 
-    pub const fn num_bars() -> usize {
-        NUM_BARS
+    pub fn num_bars(&self) -> usize {
+        self.num_bars
+    }
+
+    pub fn set_num_bars(&mut self, n: usize) {
+        self.num_bars = n.min(MAX_BARS).max(1);
     }
 }
 
@@ -202,8 +201,32 @@ mod tests {
     }
 
     #[test]
-    fn num_bars_is_75() {
-        assert_eq!(SpectrumAnalyzer::num_bars(), 75);
+    fn num_bars_default_is_75() {
+        let sa = SpectrumAnalyzer::new();
+        assert_eq!(sa.num_bars(), 75);
+    }
+
+    #[test]
+    fn set_num_bars_changes_count() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.set_num_bars(40);
+        assert_eq!(sa.num_bars(), 40);
+        sa.set_num_bars(256);
+        assert_eq!(sa.num_bars(), 256);
+    }
+
+    #[test]
+    fn set_num_bars_clamps_to_max() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.set_num_bars(999);
+        assert_eq!(sa.num_bars(), 256);
+    }
+
+    #[test]
+    fn set_num_bars_clamps_to_min_1() {
+        let mut sa = SpectrumAnalyzer::new();
+        sa.set_num_bars(0);
+        assert_eq!(sa.num_bars(), 1);
     }
 
     #[test]
@@ -212,7 +235,7 @@ mod tests {
         let silence = [0.0f32; FFT_SIZE];
         sa.process_pcm(&silence);
         sa.tick();
-        for x in 0..NUM_BARS {
+        for x in 0..sa.num_bars() {
             assert_eq!(sa.bar_height(x), 0, "bar {} should be 0 for silence", x);
         }
     }
@@ -223,7 +246,7 @@ mod tests {
         let dc = [0.5f32; FFT_SIZE];
         sa.process_pcm(&dc);
         sa.tick();
-        for x in 0..NUM_BARS {
+        for x in 0..sa.num_bars() {
             assert_eq!(sa.bar_height(x), 0, "bar {} should be 0 for DC offset", x);
         }
     }
@@ -240,7 +263,7 @@ mod tests {
         }
         sa.process_pcm(&pcm);
         sa.tick();
-        let total: u16 = (0..NUM_BARS).map(|x| sa.bar_height(x) as u16).sum();
+        let total: u16 = (0..sa.num_bars()).map(|x| sa.bar_height(x) as u16).sum();
         assert!(total > 0, "at least some bars should be nonzero for a sine");
     }
 
@@ -302,7 +325,7 @@ mod tests {
 
         let low = (12..16).map(|x| sa.bar_height(x)).max().unwrap_or(0);
         let high = (56..60).map(|x| sa.bar_height(x)).max().unwrap_or(0);
-        let pegged = (0..NUM_BARS)
+        let pegged = (0..sa.num_bars())
             .filter(|&x| sa.bar_height(x) == MAX_LEVEL)
             .count();
         assert!(
@@ -363,7 +386,7 @@ mod tests {
         sa.process_pcm(&[0.0; FFT_SIZE]);
         sa.tick();
 
-        for x in 0..NUM_BARS {
+        for x in 0..sa.num_bars() {
             assert_eq!(sa.bar_values[x], 0);
             assert_eq!(sa.bar_state[x], (prior[x] - DEFAULT_FALLOFF).max(0));
         }
@@ -381,7 +404,7 @@ mod tests {
         let mut sa = SpectrumAnalyzer::new();
         let short = [0.5f32; 10];
         sa.process_pcm(&short);
-        for x in 0..NUM_BARS {
+        for x in 0..sa.num_bars() {
             assert_eq!(sa.bar_height(x), 0, "short input should not produce bars");
         }
     }

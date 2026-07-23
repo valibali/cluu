@@ -57,16 +57,11 @@ impl Drawable for Checkbox {
         }
 
         let bracket = if self.checked { "[✓] " } else { "[ ] " };
-        for (i, ch) in bracket.chars().enumerate() {
-            if i >= area.width { break; }
-            buf.set(area.y, area.x + i, Cell::new(ch).fg(self.check_fg).attrs(ATTR_BOLD));
-        }
+        let bracket_len = bracket.chars().count();
+        buf.write_styled_n(area.y, area.x, bracket, area.width, Cell::new(' ').fg(self.check_fg).attrs(ATTR_BOLD));
 
-        let label_start = bracket.chars().count();
-        for (i, ch) in self.label.chars().enumerate() {
-            if label_start + i >= area.width { break; }
-            buf.set(area.y, area.x + label_start + i, Cell::new(ch).fg(self.fg));
-        }
+        let label_max = area.width.saturating_sub(bracket_len);
+        buf.write_styled_n(area.y, area.x + bracket_len, &self.label, label_max, Cell::new(' ').fg(self.fg));
     }
 }
 

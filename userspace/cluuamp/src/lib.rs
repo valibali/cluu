@@ -22,6 +22,8 @@ pub mod viscolor;
 pub mod widgets;
 
 #[cfg(feature = "runtime")]
+pub mod mp3_ffi;
+#[cfg(feature = "runtime")]
 pub mod audio;
 #[cfg(feature = "runtime")]
 pub mod model;

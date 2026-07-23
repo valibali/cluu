@@ -312,11 +312,11 @@ dependencies = [
 name = "cluu-cluuamp"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cluu-libtui",
  "libcluu",
  "libm",
  "microfft",
- "nanomp3",
 ]
 
 [[package]]

@@ -70,24 +70,21 @@ impl Drawable for StatusBar {
             buf.fill_rect(area.y, area.x, area.width, area.height, Cell::new(' ').bg(self.bg));
         }
 
+        let mut cell = Cell::new(' ').attrs(attrs);
+        if self.fg != COLOR_DEFAULT { cell = cell.fg(self.fg); }
+        if self.bg != COLOR_DEFAULT { cell = cell.bg(self.bg); }
+
         let mut x = area.x;
         for (i, seg) in self.left.iter().enumerate() {
             if i > 0 {
                 if x < area.x + area.width {
-                    buf.set(area.y, x, Cell::new(' ').attrs(attrs).fg(self.fg).bg(self.bg));
+                    buf.set(area.y, x, cell);
                     x += 1;
                 }
             }
-            for ch in seg.chars() {
-                if x >= area.x + area.width {
-                    break;
-                }
-                let mut cell = Cell::new(ch).attrs(attrs);
-                if self.fg != COLOR_DEFAULT { cell = cell.fg(self.fg); }
-                if self.bg != COLOR_DEFAULT { cell = cell.bg(self.bg); }
-                buf.set(area.y, x, cell);
-                x += 1;
-            }
+            let rem = (area.x + area.width).saturating_sub(x);
+            buf.write_styled_n(area.y, x, seg, rem, cell);
+            x += seg.chars().count().min(rem);
         }
 
         let right_text: String = {
@@ -102,12 +99,7 @@ impl Drawable for StatusBar {
         if right_len > 0 && right_len < area.width {
             let right_x = area.x + area.width - right_len;
             if right_x >= x {
-                for (i, ch) in right_text.chars().enumerate() {
-                    let mut cell = Cell::new(ch).attrs(attrs);
-                    if self.fg != COLOR_DEFAULT { cell = cell.fg(self.fg); }
-                    if self.bg != COLOR_DEFAULT { cell = cell.bg(self.bg); }
-                    buf.set(area.y, right_x + i, cell);
-                }
+                buf.write_styled(area.y, right_x, &right_text, cell);
             }
         }
     }

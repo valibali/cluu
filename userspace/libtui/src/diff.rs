@@ -63,11 +63,15 @@ impl ScreenBuffer {
         }
     }
 
-    /// Resize the buffer. Mark all cells dirty.
+    /// Resize the buffer, reusing existing allocation when possible.
     pub fn resize(&mut self, width: usize, height: usize) {
         let len = width * height;
-        self.cells = alloc::vec![Cell::new(' '); len];
-        self.dirty = alloc::vec![true; len];
+        if self.cells.len() != len {
+            self.cells = alloc::vec![Cell::new(' '); len];
+            self.dirty = alloc::vec![true; len];
+        } else {
+            self.clear();
+        }
         self.width = width;
         self.height = height;
     }
@@ -108,6 +112,12 @@ impl ScreenBuffer {
     /// If the two buffers have different dimensions, all cells are emitted.
     pub fn diff_render(&self, prev: &ScreenBuffer) -> String {
         let mut out: Vec<u8> = Vec::new();
+        self.diff_render_into(prev, &mut out);
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    pub fn diff_render_into(&self, prev: &ScreenBuffer, out: &mut Vec<u8>) {
+        out.clear();
         let same_dims = self.width == prev.width && self.height == prev.height;
         let mut last_pos: Option<(usize, usize)> = None;
         let mut last_style: Option<(u8, u8, u8)> = None;
@@ -123,14 +133,11 @@ impl ScreenBuffer {
             let row = if self.width > 0 { i / self.width } else { 0 };
             let col = if self.width > 0 { i % self.width } else { 0 };
 
-            // Skip cursor move if adjacent to last emitted cell (same row, prev col).
             let adjacent = last_pos.map_or(false, |(r, c)| r == row && c + 1 == col);
             if !adjacent {
                 out.extend_from_slice(&cursor_move(row + 1, col + 1));
             }
 
-            // SGR when style differs from the last emitted style (terminal
-            // state), or when nothing has been emitted yet this frame.
             let style = (curr.fg, curr.bg, curr.attrs);
             if last_style != Some(style) {
                 let sgr = sgr_for(&curr);
@@ -139,11 +146,9 @@ impl ScreenBuffer {
                 last_style = Some(style);
             }
 
-            push_char(&mut out, curr.ch);
+            push_char(out, curr.ch);
             last_pos = Some((row, col));
         }
-
-        String::from_utf8(out).unwrap_or_default()
     }
 }
 

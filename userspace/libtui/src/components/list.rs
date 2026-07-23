@@ -114,6 +114,7 @@ impl<T: Clone> List<T> {
     {
         let (start, end) = self.visible_range();
         let max_col = col.saturating_add(width);
+        let clip = max_col.saturating_sub(col).min(view.width.saturating_sub(col));
         for i in start..end {
             let display_row = row + (i - start);
             if display_row >= view.height {
@@ -121,18 +122,12 @@ impl<T: Clone> List<T> {
             }
             let item_str = self.items[self.filtered[i]].to_string();
             let is_selected = i == self.selected;
-            let mut c = col;
-            for ch in item_str.chars() {
-                if c >= max_col || c >= view.width {
-                    break;
-                }
-                let mut cell = Cell::new(ch);
-                if is_selected {
-                    cell = cell.bg(COLOR_BLUE);
-                }
-                view.set(display_row, c, cell);
-                c += 1;
-            }
+            let cell = if is_selected {
+                Cell::new(' ').bg(COLOR_BLUE)
+            } else {
+                Cell::new(' ')
+            };
+            view.write_styled_n(display_row, col, &item_str, clip, cell);
         }
     }
 }

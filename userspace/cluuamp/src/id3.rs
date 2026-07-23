@@ -13,6 +13,7 @@ pub struct TrackMeta {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub duration_ms: u64,
 }
 
 impl TrackMeta {
@@ -30,6 +31,18 @@ pub fn parse(data: &[u8]) -> TrackMeta {
         return v2;
     }
     parse_v1(data)
+}
+
+/// Returns the total size of the ID3v2 tag at the start of `data`
+/// (header + body + optional footer), or 0 if no ID3v2 tag is present.
+pub fn id3v2_tag_size(data: &[u8]) -> usize {
+    if data.len() < 10 || &data[0..3] != b"ID3" {
+        return 0;
+    }
+    let flags = data[5];
+    let footer_present = (flags & 0x10) != 0;
+    let tag_size = synchsafe(&data[6..10]);
+    10 + tag_size + if footer_present { 10 } else { 0 }
 }
 
 // ─── ID3v2 ─────────────────────────────────────────────────────────────
@@ -203,6 +216,7 @@ fn parse_v1(data: &[u8]) -> TrackMeta {
         title: iso_8859_1_to_string(trim_trailing_nuls(&tail[3..33])),
         artist: iso_8859_1_to_string(trim_trailing_nuls(&tail[33..63])),
         album: iso_8859_1_to_string(trim_trailing_nuls(&tail[63..93])),
+        duration_ms: 0,
     }
 }
 

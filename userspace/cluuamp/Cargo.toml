@@ -17,11 +17,13 @@ path = "src/lib.rs"
 
 [features]
 default = []
-runtime = ["dep:libcluu", "dep:nanomp3", "libtui/runtime"]
+runtime = ["dep:libcluu", "libtui/runtime"]
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"], optional = true }
 libtui = { package = "cluu-libtui", path = "../libtui" }
-nanomp3 = { version = "0.1.1", optional = true }
 microfft = { version = "0.6", default-features = false, features = ["size-512"] }
 libm = "0.2"
+
+[build-dependencies]
+cc = "1.0"

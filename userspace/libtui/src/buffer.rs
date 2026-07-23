@@ -94,6 +94,21 @@ impl View {
         View { cells, width, height }
     }
 
+    /// Clear in-place, reusing existing allocation. Reallocates only if
+    /// dimensions changed.
+    pub fn reset(&mut self, width: usize, height: usize) {
+        let len = width * height;
+        if self.cells.len() != len {
+            self.cells = vec![Cell::new(' '); len];
+        } else {
+            for c in &mut self.cells {
+                *c = Cell::new(' ');
+            }
+        }
+        self.width = width;
+        self.height = height;
+    }
+
     /// Get the cell at (row, col). Returns None if out of bounds.
     pub fn get(&self, row: usize, col: usize) -> Option<&Cell> {
         if row < self.height && col < self.width {
@@ -138,6 +153,37 @@ impl View {
                 break;
             }
             self.set(row, c, cell.with_char(ch));
+            c += 1;
+        }
+    }
+
+    /// Write a styled string at (row, col), clipping to at most `max_chars`
+    /// characters AND view bounds. Use when writing inside a sub-area whose
+    /// width is narrower than the View.
+    pub fn write_styled_n(&mut self, row: usize, col: usize, s: &str, max_chars: usize, cell: Cell) {
+        let mut c = col;
+        for ch in s.chars() {
+            if c >= self.width || row >= self.height || c - col >= max_chars {
+                break;
+            }
+            self.set(row, c, cell.with_char(ch));
+            c += 1;
+        }
+    }
+
+    /// Write `s` truncated to `width` chars at (row, col), padding with
+    /// spaces (using `cell`'s style) if shorter. No allocation.
+    pub fn write_field(&mut self, row: usize, col: usize, s: &str, width: usize, cell: Cell) {
+        let mut c = col;
+        for ch in s.chars() {
+            if c >= self.width || row >= self.height || c - col >= width {
+                break;
+            }
+            self.set(row, c, cell.with_char(ch));
+            c += 1;
+        }
+        while c - col < width && c < self.width && row < self.height {
+            self.set(row, c, cell.with_char(' '));
             c += 1;
         }
     }
@@ -213,5 +259,36 @@ mod tests {
         assert_eq!(v.get(2, 3).map(|c| c.ch), Some('X'));
         assert_eq!(v.get(3, 1).map(|c| c.ch), Some(' '));
         assert_eq!(v.get(1, 4).map(|c| c.ch), Some(' '));
+    }
+
+    #[test]
+    fn view_write_styled_n_clips_to_max() {
+        let mut v = View::new(10, 1);
+        v.write_styled_n(0, 0, "hello", 3, Cell::new(' ').fg(COLOR_RED));
+        assert_eq!(v.get(0, 0).map(|c| c.ch), Some('h'));
+        assert_eq!(v.get(0, 1).map(|c| c.ch), Some('e'));
+        assert_eq!(v.get(0, 2).map(|c| c.ch), Some('l'));
+        assert_eq!(v.get(0, 3).map(|c| c.ch), Some(' '));
+    }
+
+    #[test]
+    fn view_write_field_truncates_and_pads() {
+        let mut v = View::new(10, 1);
+        v.write_field(0, 0, "hi", 5, Cell::new(' ').fg(COLOR_GREEN));
+        assert_eq!(v.get(0, 0).map(|c| c.ch), Some('h'));
+        assert_eq!(v.get(0, 1).map(|c| c.ch), Some('i'));
+        assert_eq!(v.get(0, 2).map(|c| c.ch), Some(' '));
+        assert_eq!(v.get(0, 3).map(|c| c.ch), Some(' '));
+        assert_eq!(v.get(0, 4).map(|c| c.ch), Some(' '));
+        assert_eq!(v.get(0, 2).map(|c| c.fg), Some(COLOR_GREEN));
+    }
+
+    #[test]
+    fn view_write_field_truncates_long() {
+        let mut v = View::new(3, 1);
+        v.write_field(0, 0, "hello", 3, Cell::new(' '));
+        assert_eq!(v.get(0, 0).map(|c| c.ch), Some('h'));
+        assert_eq!(v.get(0, 1).map(|c| c.ch), Some('e'));
+        assert_eq!(v.get(0, 2).map(|c| c.ch), Some('l'));
     }
 }

@@ -48,17 +48,18 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 
 #[derive(Copy, Clone, Debug)]
-pub struct AllocStats {
-    pub total: usize,
-    pub used: usize,
-    pub peak: usize,
-    pub free: usize,
-    /// Size of the largest contiguous free block (bytes).
-    ///
-    /// The fragmentation ratio is `largest_free / free`: 1.0 when the free
-    /// space is a single contiguous region, approaching 0 as the free list
-    /// fragments. Zero when the heap is empty or fully used.
-    pub largest_free: usize,
+    pub struct AllocStats {
+        pub total: usize,
+        pub used: usize,
+        pub peak: usize,
+        pub free: usize,
+        /// Size of the largest contiguous free block (bytes).
+        ///
+        /// The fragmentation ratio is `largest_free / free`: 1.0 when the free
+        /// space is a single contiguous region, approaching 0 as the free list
+        /// fragments. Zero when the heap is empty or fully used.
+        pub largest_free: usize,
+        pub leaked_deallocs: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -124,6 +125,7 @@ mod inner {
             peak: 0,
             free: 0,
             largest_free: 0,
+            leaked_deallocs: 0,
         }
     }
 }
@@ -148,28 +150,24 @@ mod inner {
     /// Minimum heap growth increment (256KB).
     const MIN_HEAP_GROW: usize = 256 * 1024;
 
-    /// Maximum single heap growth (16MB - prevents excessive single allocations).
-    const MAX_HEAP_GROW: usize = 16 * 1024 * 1024;
-
     /// Page size for heap allocation.
     const PAGE_SIZE: usize = 4096;
 
     /// Start of dynamic userspace heap region (must match kernel's USER_HEAP_START).
     const USER_HEAP_START: usize = 0x0080_0000;
 
-    /// Maximum heap address for the Rust allocator.
+    /// Top of the userspace heap VA region (absolute address).
     ///
-    /// 8 MiB was too small for procmgr: a single failed `map_elf` would force
-    /// the chunked-read fallback to allocate a contiguous `Vec<u8>` the size
-    /// of the binary (4-5 MiB for /bin/ls etc.), and after the first such
-    /// load the linked-list allocator's free regions were too fragmented for
-    /// a second 4 MiB Vec to land. The slow-path allocation is wasteful in
-    /// principle (the file is already in VFS's cache region), but until that
-    /// path is replaced with a streaming ELF loader, give Rust binaries
-    /// enough room to load the largest userspace ELF a couple of times.
-    /// 56 MiB heap fits well below newlib's `_sbrk` range top (0x4000_0000)
-    /// and the mmap region start (0x4100_0000).
-    const USER_HEAP_MAX: usize = 0x0400_0000;
+    /// The heap lives in `[USER_HEAP_START, USER_HEAP_MAX)`. `USER_HEAP_MAX`
+    /// is the architectural ceiling: it must stay below newlib's `_sbrk`
+    /// range top (`0x4000_0000`) and the mmap region start (`0x4100_0000`).
+    /// With `USER_HEAP_MAX = 0x4000_0000` the usable span is up to ~1 GiB
+    /// (reduced by the ASLR offset added to `USER_HEAP_START`), so a Rust
+    /// binary's heap is bounded only by physical RAM (PMM), not by an
+    /// artificial per-process cap. `heap_max` is set to this constant
+    /// verbatim (not start-relative) so the ASLR offset can never push the
+    /// heap into the mmap region.
+    const USER_HEAP_MAX: usize = 0x4000_0000;
 
     // M6 ASLR: per-process random offset added to USER_HEAP_START. Bounded
     // to 128 MB (page-aligned) so the heap stays well below the mmap region
@@ -290,7 +288,7 @@ mod inner {
 
         unsafe fn init(&mut self) {
             let heap_start = randomized_heap_start();
-            self.heap_max = heap_start + (USER_HEAP_MAX - USER_HEAP_START);
+            self.heap_max = USER_HEAP_MAX;
             self.dynamic_start = heap_start;
             self.used = 0;
             self.peak = 0;
@@ -328,6 +326,7 @@ mod inner {
                 peak: self.peak,
                 free,
                 largest_free,
+                leaked_deallocs: 0,
             }
         }
 
@@ -376,11 +375,12 @@ mod inner {
                 0
             };
             let double_size = current_size;
+            let headroom = (min_size / 4).max(MIN_HEAP_GROW);
 
             let grow_size = min_size
-                .max(double_size)
+                .max(headroom)
                 .max(MIN_HEAP_GROW)
-                .min(MAX_HEAP_GROW);
+                .min(double_size.max(min_size + headroom));
 
             let grow_pages = (grow_size + PAGE_SIZE - 1) / PAGE_SIZE;
             let actual_grow = grow_pages * PAGE_SIZE;
@@ -596,6 +596,70 @@ mod inner {
             unsafe {
                 self.add_free_region(header_ptr as usize, size);
             }
+            self.shrink_if_possible();
+        }
+
+        fn shrink_if_possible(&mut self) {
+            let heap_end = self.heap_end;
+            if heap_end <= self.dynamic_start + INITIAL_HEAP_SIZE {
+                return;
+            }
+
+            let mut top_start = 0usize;
+            let mut top_end = 0usize;
+            let mut prev_to_top: Option<*mut ListNode> = None;
+            let mut current: *mut ListNode = &mut self.head as *mut ListNode;
+            unsafe {
+                while let Some(ref next) = (*current).next {
+                    let next_ptr = *next as *const ListNode as *mut ListNode;
+                    if next.end_addr() >= top_end {
+                        top_end = next.end_addr();
+                        top_start = next.start_addr();
+                        prev_to_top = Some(current);
+                    }
+                    current = next_ptr;
+                }
+            }
+
+            if top_end != heap_end || top_end == 0 {
+                return;
+            }
+
+            let free_size = top_end.saturating_sub(top_start);
+            let free_pages = free_size / PAGE_SIZE;
+            if free_pages == 0 {
+                return;
+            }
+
+            let shrink_bytes = free_pages * PAGE_SIZE;
+            let new_heap_end = heap_end - shrink_bytes;
+            if new_heap_end < self.dynamic_start + INITIAL_HEAP_SIZE {
+                return;
+            }
+
+            let space_token = crate::boot::space_token();
+            if space_token == 0 {
+                return;
+            }
+
+            if crate::syscall::space_unmap(space_token, top_start, free_pages).is_err() {
+                return;
+            }
+
+            let leftover = top_end - shrink_bytes;
+            let prev = prev_to_top.unwrap_or(&mut self.head as *mut ListNode);
+            unsafe {
+                if leftover >= size_of::<ListNode>() && leftover > 0 {
+                    let top_node = (*prev).next.as_mut().unwrap();
+                    top_node.size = leftover;
+                } else {
+                    let top_node_ptr = (*prev).next.take().unwrap() as *mut ListNode;
+                    let successor = (*top_node_ptr).next.take();
+                    (*prev).next = successor;
+                }
+            }
+
+            self.heap_end = new_heap_end;
         }
     }
 
@@ -688,6 +752,7 @@ mod inner {
     struct DeferredFreeList {
         ptrs: [usize; DEFERRED_FREE_CAP],
         count: usize,
+        leaked: u64,
     }
 
     impl DeferredFreeList {
@@ -695,6 +760,7 @@ mod inner {
             Self {
                 ptrs: [0; DEFERRED_FREE_CAP],
                 count: 0,
+                leaked: 0,
             }
         }
     }
@@ -723,7 +789,9 @@ mod inner {
         }
 
         pub fn stats(&self) -> AllocStats {
-            self.inner.lock().stats()
+            let mut s = self.inner.lock().stats();
+            s.leaked_deallocs = self.deferred.lock().leaked;
+            s
         }
 
         /// Register an OOM handler. Called when allocation fails and the heap
@@ -758,7 +826,7 @@ mod inner {
         #[cfg(not(feature = "host-test"))]
         { GLOBAL_ALLOCATOR.stats() }
         #[cfg(feature = "host-test")]
-        { AllocStats { total: 0, used: 0, peak: 0, free: 0, largest_free: 0 } }
+        { AllocStats { total: 0, used: 0, peak: 0, free: 0, largest_free: 0, leaked_deallocs: 0 } }
     }
 
     /// Register a global OOM handler on the global allocator.
@@ -795,21 +863,9 @@ mod inner {
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-            if let Some(mut guard) = self.inner.try_lock() {
-                self.drain_deferred(&mut guard);
-                guard.dealloc(ptr);
-            } else {
-                // Re-entrant: can't acquire the main lock. Defer the free
-                // to the next successful alloc/dealloc instead of leaking.
-                let mut deferred = self.deferred.lock();
-                let idx = deferred.count;
-                if idx < DEFERRED_FREE_CAP {
-                    deferred.ptrs[idx] = ptr as usize;
-                    deferred.count += 1;
-                }
-                // If the deferred queue is full, we leak — same as the old
-                // behavior, but now with a 64-entry buffer instead of 0.
-            }
+            let mut guard = self.inner.lock();
+            self.drain_deferred(&mut guard);
+            guard.dealloc(ptr);
         }
     }
 

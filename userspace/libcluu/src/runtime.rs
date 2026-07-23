@@ -229,6 +229,9 @@ fn apply_redirections(redir_bytes: &[u8]) {
 ))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    #[cfg(feature = "posix")]
+    crate::posix::tty::restore_on_panic();
+
     let proc_info = crate::boot::process_info();
     let heap_stats = allocator::stats();
     let mut line = StackString::<512>::new();

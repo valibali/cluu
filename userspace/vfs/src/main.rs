@@ -652,6 +652,12 @@ struct ParkedRead {
     target_base: usize,
     /// Maximum bytes the shell requested.
     requested: usize,
+    /// Sender TID of the caller. Used to evict stale parked reads when the
+    /// same caller re-issues a read (timeout race: the caller's previous
+    /// `ipc_call_timeout` expired silently on the kernel side, but VFS was
+    /// never notified — the parked read lingers until data arrives and the
+    /// reply fails).
+    caller_tid: usize,
 }
 
 fn reply_parked(parked: &ParkedRead, reply_msg: &Message, payload: &[u8]) -> Result<()> {
@@ -2029,19 +2035,16 @@ impl VfsServer {
             &mut reply_msg,
         )?;
 
-        let _ = debug_print(&format!(
-            "vfs: pts_read_deliver pts_id={} granted {} bytes",
-            pts_id,
-            data.len()
-        ));
-
         match reply_parked(&parked, &reply_msg, &[]) {
-            Ok(()) => Ok(()),
-            Err(_) => {
+            Ok(()) => {
                 let _ = debug_print(&format!(
-                    "vfs: pts_read_deliver pts_id={} reply failed (caller timed out), trying next parked read\n",
-                    pts_id
+                    "vfs: pts_read_deliver pts_id={} granted {} bytes\n",
+                    pts_id,
+                    data.len()
                 ));
+                Ok(())
+            }
+            Err(_) => {
                 while let Some(next_parked) = self
                     .pending_pts_reads
                     .get_mut(&pts_id)
@@ -2055,6 +2058,11 @@ impl VfsServer {
                         &mut next_reply,
                     )?;
                     if reply_parked(&next_parked, &next_reply, &[]).is_ok() {
+                        let _ = debug_print(&format!(
+                            "vfs: pts_read_deliver pts_id={} granted {} bytes\n",
+                            pts_id,
+                            data.len()
+                        ));
                         return Ok(());
                     }
                 }
@@ -4400,6 +4408,7 @@ impl VfsServer {
                 } else {
                     (0, 0)
                 };
+                let caller_tid = caller_client.unwrap_or(0);
                 let parked = ParkedRead {
                     reply_token: _reply_token,
                     reply_ep,
@@ -4407,11 +4416,15 @@ impl VfsServer {
                     caller_space: target_space,
                     target_base,
                     requested,
+                    caller_tid,
                 };
                 let queue = self
                     .pending_pts_reads
                     .entry(pts_id)
                     .or_insert_with(VecDeque::new);
+                if caller_tid != 0 {
+                    queue.retain(|p| p.caller_tid != caller_tid);
+                }
                 pts_queue::park_read(queue, parked);
 
                 let drain_hint = Message::new(
