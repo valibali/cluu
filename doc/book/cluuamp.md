@@ -1,9 +1,10 @@
 # CLUUamp
 
 CLUUamp is the Winamp-classic-styled TUI audio player. MP3 decode via
-nanomp3, playback through the virtio-snd audio session, visualization from
-a PCM tap (512-point Hann FFT, Winamp semitone band mapping), 10-band RBJ
-peaking equalizer with SSE2 stereo lane cascade.
+vendored minimp3 (SSE2 SIMD, CC0 public domain), playback through the
+virtio-snd audio session, visualization from a PCM tap (512-point Hann
+FFT, Winamp semitone band mapping), 10-band RBJ peaking equalizer with
+SSE2 stereo lane cascade.
 
 ## Layout
 
@@ -55,7 +56,8 @@ Bands are centered via `(2*i+1)*width/(2*11)`.
 | `terminal.rs` | Terminal size negotiation (`ensure_terminal_size`) |
 | `audio.rs` | `AudioEngine`: two-thread decode/submit, EQ -> gain, completion-aligned tap, ID3 metadata |
 | `layout.rs` | Three-window cell map (MAIN / EQ / PLAYLIST / footer), `FocusArea` with `next()`/`prev()` |
-| `widgets.rs` | Block digits, eighth-block sliders/columns, transport glyphs |
+| `widgets.rs` | Braille spectrum, oscilloscope, eighth-block chars |
+| `mp3_ffi.rs` | FFI bindings to vendored minimp3 (SSE2 SIMD decoder) |
 | `model.rs` | MVU state + key dispatch; `sync_equalizer()` forwards to engine |
 | `view.rs` | Cell rendering + modal browser overlay |
 | `lib.rs` | Module wiring; `runtime` feature gates audio/model/view |
@@ -108,10 +110,9 @@ in its span.
 
 ### Color palette
 
-Blue → orange → red gradient (bottom to top), matching the three-color
-request. Bottom rows use xterm 256-color blue indices (17-33), middle
-rows orange (130-214), top rows red (196-52). The palette is defined in
-`viscolor.rs::BAR_COLORS`.
+Green → orange → red gradient (bottom to top). Bottom rows use xterm
+256-color green indices (22-41), middle rows orange (130-214), top rows
+red (196-52). The palette is defined in `viscolor.rs::BAR_COLORS`.
 
 ### Tap point
 
@@ -208,11 +209,11 @@ it releases between ticks via `sleep_ms`.
 loop and the FFT/scope tap. The pipeline ordering is load-bearing:
 
 ```
-MP3 frame -> nanomp3 decode -> PCM (s16 interleaved)
-         -> f32 conversion -> EQ cascade (SSE2 or scalar)
-         -> gain (volume + balance)
-         -> s16 write to virtio-snd ring
-         -> tap the final submitted period for FFT + scope
+MP3 frame -> minimp3 decode (SSE2 SIMD) -> PCM (s16 interleaved)
+          -> EQ cascade (SSE2 or scalar)
+          -> gain (volume + balance)
+          -> s16 write to virtio-snd ring
+          -> tap the final submitted period for FFT + scope
 ```
 
 The tap is **completion-aligned**: it reads from the *final submitted
@@ -222,6 +223,25 @@ decoder ahead of the audible output.
 
 `submission_target()` caps in-flight periods at `RING_SLOTS` (8) to bound
 latency. Batch decode submits up to `DECODE_BATCH` (4) frames per tick.
+
+### Memory-bounded tick loop
+
+`tick()` enforces a strict submit-before-decode order to keep `pcm_s16`
+bounded at ~1 period + 1 frame (≈8.7KB):
+
+1. Submit pending periods (drain `pcm_s16` → ring) first.
+2. Only decode when `pcm_s16.len() < PERIOD_BYTES` — prevents
+   accumulation when the ring is nearly full.
+3. Submit again after decoding.
+
+The original code decoded up to 4 frames before submitting, which grew
+`pcm_s16` unbounded (+14KB/tick when the ring had 1 free slot) and
+triggered Vec doubling to 65MB.
+
+`refill_stream` clamps each VFS read to `want.min(STREAM_BUF_SIZE -
+stream_buf.len())` so the buffer never exceeds its 256KB cap — without
+the clamp, a 64KB read chunk overshooting the 256KB limit caused Vec
+doubling to 512KB that never shrank.
 
 `TapMetadata` is keyed by `PcmHandle` so a `stop()` followed by a fresh
 `play()` cannot leak the previous track's tap into the new track's
@@ -350,11 +370,15 @@ above the file list, so rendering both would duplicate them.
 ### ID3 metadata
 
 `id3.rs` parses ID3v2 (header at file start) and ID3v1 (128-byte trailer
-at file end) tags into `TrackMeta { title, artist, album }`. The parser
-runs lazily: `main.rs` reads the first `META_READ_LEN` bytes of each
-track via `read_file_head()` and calls `id3::parse()`. Results are
-cached in `AudioEngine::track_metas`. `display_title()` returns the ID3
-title if available, otherwise the filename.
+at file end) tags into `TrackMeta { title, artist, album, duration_ms }`.
+The parser runs lazily: `main.rs` reads the first `META_READ_LEN` bytes
+of each track via `read_file_head_into()` and calls `id3::parse()`. A
+second read past the ID3v2 tag provides audio data for bitrate-based
+duration estimation. Results are cached in
+`AudioEngine::track_metas`. `write_display_title()` writes the ID3 title
+(if available, else filename) into a caller-provided `&mut String` to
+avoid per-frame heap allocation — the old `display_title()` that returned
+a `String` was a per-frame allocation source.
 
 ## Supporting libcluu / libtui changes
 
@@ -376,6 +400,15 @@ CLUUamp required a few supporting APIs in the shared libraries:
 - `libtui::ScreenBuffer::diff` tracks the last *emitted* style, not the
   prev buffer cell — a colored cell's style was bleeding into the
   following default-style cell.
+- `View::write_styled_n(row, col, s, max_chars, cell)` — clips a styled
+  string to at most `max_chars` characters, for sub-area width clipping.
+- `View::write_field(row, col, s, width, cell)` — truncates or pads a
+  string to exactly `width` chars, no allocation. Used by `top` for
+  column-aligned output.
+- `AudioSessionClient::drain_completions_into(&mut Vec)` — reuses a
+  caller-provided Vec instead of allocating via `core::mem::take`.
+- `libcluu::allocator::AllocStats::leaked_deallocs` — counter for
+  deferred-free leaks (should always read 0 with the blocking-lock fix).
 
 ## Render loop
 

@@ -6,9 +6,9 @@ the trap exists, and the structural fix (shipped or planned).
 ## allocator-reentrancy-leak
 
 The default Rust userspace allocator (`LockedAllocator` in
-`userspace/libcluu/src/allocator.rs`) leaks memory on re-entrant `free`.
+`userspace/libcluu/src/allocator.rs`) had two leak modes for `dealloc`:
 
-### The code
+### The original code
 
 `allocator.rs`:
 
@@ -28,44 +28,39 @@ unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
 }
 ```
 
-`alloc` (`allocator.rs`) uses a blocking `lock()` and drains the
-deferred-free queue before each allocation.
-
-### Why it exists
+### Why it existed
 
 The allocator is a single `spin::Mutex`. A re-entrant call, a `free` that
 fires while the mutex is already held by the same thread, would deadlock if
 it used a blocking `lock()`. The classic trigger is a GC: an `alloc` holds
 the mutex, the allocator runs a GC callback, and the GC tries to `free`
-unreachable objects. The `try_lock` fallback turns the deadlock into a leak:
-the re-entrant `free` is dropped and the block is never returned to the free
-list.
+unreachable objects. The `try_lock` fallback turned the deadlock into a
+deferred free.
 
-This is the same single-threaded-mutual-blocking class as
-[ipc-deadlock](#single-threaded-mutual-blocking-ipc-deadlock): a
-single-threaded server cannot service a re-entrant request without yielding,
-and the allocator has no yield point.
+### The two-thread leak (FIXED)
+
+The `try_lock` + deferred-free approach silently leaked when two *separate*
+threads competed for the lock — not re-entrancy, but contention. Thread A
+holds the lock in `alloc`; thread B's `dealloc` fails `try_lock` and
+defers. After 64 deferred deallocs, the list overflowed and all subsequent
+deallocs were **permanently leaked**. cluuamp's audio + UI threads hit
+this: each `format!` and Vec reallocation on one thread leaked its dealloc
+while the other thread was in `alloc`.
+
+**Fix:** `dealloc` now uses a blocking `lock()`. This is safe because
+`dealloc` does not call `alloc` (no re-entrancy), and `spin::Mutex::lock`
+does not allocate. The deferred-free list and `leaked_deallocs` counter
+remain for diagnostics but should always read 0.
 
 ### Impact
 
-- Pure Rust binaries that never re-enter the allocator are unaffected.
-- Interpreters that run a GC inside `malloc`/`free` no longer leak on
-  re-entrant `dealloc` — the deferred-free queue (64 entries) buffers
-  them for the next `alloc`/`dealloc` to drain.
-- `alloc` uses a blocking `lock()` (safe — alloc never re-enters alloc).
-- Residual: if 64+ re-entrant frees happen before any drain, the overflow
-  entries are leaked (same as old behavior, but now with a 64-entry buffer
-  instead of 0).
-
-### Deferred-free mechanism (LANDED)
-
-The deferred-free list is implemented: on re-entrant `dealloc`, push the
-pointer onto a 64-entry ring buffer (`DEFERRED_FREE_CAP = 64`) instead of
-dropping it; drain the list on the next non-re-entrant `alloc`/`dealloc`.
-`alloc` uses a blocking `lock()` and drains before each allocation.
-`dealloc` keeps `try_lock` + deferred-free to preserve the no-deadlock
-guarantee for re-entrant frees. See `allocator.rs` (`DeferredFreeList`,
-`drain_deferred`).
+- Two-thread programs (cluuamp, any server with a worker thread) no longer
+  leak on allocator contention.
+- `alloc` uses a blocking `lock()` and drains the deferred-free queue
+  before each allocation.
+- `dealloc` uses a blocking `lock()` — the deferred-free path is now only
+  a diagnostic counter, never taken in normal operation.
+- `AllocStats::leaked_deallocs` tracks any residual leaks (should be 0).
 
 ### See also
 
@@ -77,6 +72,77 @@ guarantee for re-entrant frees. See `allocator.rs` (`DeferredFreeList`,
 - AGENTS.md §7 for the canonical deadlock-avoidance rationale behind the
   async runtime; the allocator fix follows the same "don't block re-entrant"
   shape.
+
+## cluuamp-pcm-s16-unbounded-growth
+
+`AudioEngine::tick()` decoded up to 4 MP3 frames (~18KB) per tick before
+submitting periods to the virtio-snd ring. Each `submit_period` drains
+only 4KB. When the ring had 1 free slot: +18KB decode, -4KB submit =
++14KB net accumulation per tick. Over hundreds of ticks, `pcm_s16` grew
+to megabytes, triggering Vec capacity doubling (16KB→32KB→...→1MB+).
+
+### The fix
+
+`tick()` now enforces submit-before-decode:
+1. Submit pending periods first (drain `pcm_s16` → ring).
+2. Only decode when `pcm_s16.len() < PERIOD_BYTES`.
+3. Submit again after decoding.
+
+`pcm_s16` is bounded at ~1 period + 1 frame (≈8.7KB).
+
+### Lesson
+
+In a producer-consumer pipeline where the consumer (ring submit) drains
+less per tick than the producer (frame decode) produces, always submit
+first and gate decoding on the buffer being below the period threshold.
+The original code's decode-first-then-submit order assumed the ring would
+always have enough free slots — it doesn't when the hardware is slow to
+acknowledge completions.
+
+## cluuamp-stream-buf-overshoot
+
+`refill_stream()` read 64KB chunks from VFS with loop guard
+`stream_buf.len() < STREAM_BUF_SIZE` (256KB). When `len()` was 248KB, one
+more 64KB read pushed it to 312KB — exceeding the 256KB initial capacity.
+Vec doubled to 512KB and never shrank (the drain path compacts bytes but
+never calls `shrink_to_fit`).
+
+### The fix
+
+Clamp each read: `let want = want.min(STREAM_BUF_SIZE - stream_buf.len());`
+so `len()` never exceeds `STREAM_BUF_SIZE`.
+
+### Lesson
+
+When filling a Vec to a target capacity via chunked reads, always clamp
+the final chunk to `target - current_len`. A loop guard `len() < target`
+allows one overshoot read whose size is the full chunk size, not the
+remaining space. Vec doubling is amortized but permanent — the capacity
+stays even after `drain` compacts the contents.
+
+## cluuamp-mp3dec-struct-layout
+
+The FFI `Mp3dec` struct in `mp3_ffi.rs` must exactly match the C
+`mp3dec_t` layout from minimp3. A zero-sized or incorrectly-sized Rust
+wrapper causes heap corruption: minimp3 writes ~6667 bytes of decoder
+state (IMDCT overlap buffers, QMF state), and if the Rust struct is too
+small, those writes land in adjacent heap metadata → page fault at
+`0x800008` or similar.
+
+### The fix
+
+`Mp3dec` is `#[repr(C)]` with exact field layout matching the C struct:
+`mdct_overlap: [[f32; 288]; 2]`, `qmf_state: [f32; 960]`, plus header
+and reserv fields. A compile-time `assert!(size_of::<Mp3dec>() >= ...)`
+would be ideal but the exact size depends on minimp3 version — the
+current layout matches minimp3 commit as vendored.
+
+### Lesson
+
+FFI structs wrapping C decoder state must replicate the exact C struct
+layout with `#[repr(C)]` and matching field types/sizes. A "thin
+wrapper" that holds a pointer or is zero-sized is wrong — the C code
+writes inline state into the struct itself, not through a pointer.
 
 ## single-threaded-mutual-blocking-ipc-deadlock
 
