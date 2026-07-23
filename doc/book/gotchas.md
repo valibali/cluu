@@ -1426,3 +1426,82 @@ only has 3 — the data is the only source that can exercise all 25.
 This is the same trap as coloring a heatmap by cell row when the value
 range is wider than the row count: the palette is defined, the rendering
 is correct, but the color resolution is capped at the grid resolution.
+
+## cluu-pixel-region-stale-backbuf-on-drag
+
+### The code
+
+The compositor's `compose_cell` returned `BG_CELL` for cells inside a
+pixel region. `flush_grid_to_backbuf` compares `cell_grid[idx]` against
+`prev_cell_grid[idx]` and skips unchanged cells. Since pixel-region
+cells were always `BG_CELL` (both before and after a window move),
+`flush_grid_to_backbuf` never re-blitted them — but the backbuffer still
+held pixel data from the previous frame's `flush_pixel_regions_to_backbuf`.
+
+When the user dragged the window, the old position showed a frozen
+snapshot of the image — a "trace" — because nobody cleared those pixels.
+
+### Why this was hard to spot
+
+The pixel data isn't in `cell_grid` — it's written directly to the
+backbuffer by a separate blit pass. `cell_grid` only tracks the *cell
+type* (`BG_CELL` vs actual content), not the pixel data. So the dirty-
+cell mechanism correctly reported "no change" at the cell level, even
+though the backbuffer content was stale at the pixel level.
+
+### Fix
+
+Introduced a `PIXEL_CELL` sentinel (distinct from `BG_CELL`) for
+pixel-region cells. When the window moves away, those cells transition
+`PIXEL_CELL → BG_CELL`, which `flush_grid_to_backbuf` detects as a
+change and blits the background color — clearing the stale pixels.
+
+`flush_grid_to_backbuf` skips `PIXEL_CELL` cells (the pixel blit handles
+them), so the sentinel never reaches the glyph-blit path.
+
+### Key insight
+
+In a hybrid compositor (cell-grid + direct-pixel), the cell grid must
+distinguish "this cell is pixel-managed" from "this cell is background."
+Using the same value for both makes the dirty-cell diff blind to
+pixel-to-background transitions — the cell value didn't change, but the
+backbuffer content did.
+
+## cluu-pixel-region-z-order-leak
+
+### The code
+
+`flush_pixel_regions_to_backbuf` iterated all windows and blitted the
+full pixel region for each, unconditionally writing pixels to the
+backbuffer at the window's screen position. It did not check whether a
+higher window (e.g. cluuterm) was covering those cells.
+
+When cluuterm was focused and on top of imgview, imgview's pixels still
+appeared through cluuterm — but only for cells where cluuterm's content
+hadn't changed since the last frame (because `flush_grid_to_backbuf`
+skips unchanged cells, so the pixel data from the earlier blit survived).
+
+### Why this was hard to spot
+
+The compose pass (`compose_cell`) correctly respected z-order — it
+walked windows top-to-bottom and returned the topmost window's cell. But
+the pixel blit ran as a separate pass that didn't consult `cell_grid` at
+all. It just iterated windows and wrote pixels. The grid blit then ran
+on top, but only for *changed* cells — unchanged cells from the higher
+window were skipped, leaving the lower window's pixels visible.
+
+### Fix
+
+`flush_pixel_regions_to_backbuf` now checks `cell_grid[idx] ==
+PIXEL_CELL` per cell before blitting. Since `compose_cell` only sets
+`PIXEL_CELL` for the topmost window at each cell, cells covered by a
+higher window have that window's cell value — not `PIXEL_CELL` — so the
+pixel blit skips them.
+
+### Key insight
+
+When two blit passes share a backbuffer (pixel blit + cell blit), both
+must agree on z-order. The cell grid is the source of truth for "what
+owns this cell." The pixel blit must consult it, not independently
+decide what to write. Otherwise, unchanged cells in the grid blit leave
+stale pixel data from the lower window visible through the upper window.

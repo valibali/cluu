@@ -1,0 +1,16 @@
+[package]
+name = "cluu-imgview"
+version = "0.1.0"
+edition = "2021"
+description = "JPEG image viewer using compositor pixel regions"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["posix"] }
+zune-jpeg = { version = "0.5", default-features = false, features = ["x86"] }
+zune-core = { version = "0.5", default-features = false }
+
+[[bin]]
+name = "imgview"
+path = "src/main.rs"

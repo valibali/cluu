@@ -21,6 +21,11 @@ const PAD_RIGHT: u16 = 1;
 /// Default desktop background cell: codepoint 0x20 (space), fg 0, bg 0.
 pub const BG_CELL: u64 = pack_cell(b' ' as u32, 0, 0, 0);
 
+/// Sentinel for pixel-region cells. Distinct from BG_CELL so that
+/// `flush_grid_to_backbuf` detects the transition when a pixel region
+/// moves away and clears the old backbuf area.
+pub const PIXEL_CELL: u64 = pack_cell(0x10FFFF, 0, 0, 0);
+
 /// Pack `(codepoint:21, fg:8, bg:8, attrs:4)` into a single u64.
 pub const fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u8) -> u64 {
     (cp as u64 & 0x1F_FFFF)
@@ -60,9 +65,13 @@ fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
         }
         let local_x = cx - win.x;
         let local_y = cy - win.y;
-        // Fullscreen windows have no chrome — treat every cell as interior.
-        // When any window is fullscreen-focused, suppress chrome on all windows
-        // (the fullscreen window's interior covers the whole screen anyway).
+
+        if let Some(ref pr) = win.pixel_region {
+            if pr.contains_cell(local_x, local_y) {
+                return PIXEL_CELL;
+            }
+        }
+
         let suppress_chrome = win.fullscreen || win.no_chrome || win.modal || fullscreen_mode;
         let in_chrome = if suppress_chrome {
             false

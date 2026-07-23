@@ -322,6 +322,28 @@ pub const COMP_WIN_RESIZE_LABEL: u32 = 105;
 /// words[0]=dx(i32 as usize), words[1]=dy(i32 as usize), words[2]=buttons(u8: L=1,R=2,M=4).
 pub const MOUSE_EVENT_LABEL: u32 = 104;
 
+/// App → compositor:client. Declare a pixel sub-region within a text window.
+///
+/// After this call, the compositor stops glyph-blitting cells inside the
+/// region and instead reads raw ARGB32 pixels from a separate SHM frame
+/// token, blitting them directly to the backbuffer at framebuffer resolution.
+///
+/// Wire layout:
+///   words[0] = window_id
+///   words[1] = cell_x (region left edge in window-local cell coords)
+///   words[2] = cell_y (region top edge in window-local cell coords)
+///   words[3] = cell_w (region width in cells)
+///   words[4] = cell_h (region height in cells)
+///   words[5] = pixel_frame_token (frame token for the pixel SHM buffer)
+///
+/// The pixel SHM buffer must contain
+///   `cell_w * GLYPH_W * cell_h * GLYPH_H * 4` bytes of ARGB32 data
+/// (row-major, stride = `cell_w * GLYPH_W`), where GLYPH_W=8, GLYPH_H=16.
+///
+/// Sending this message again with the same window_id replaces the prior
+/// region. Sending with cell_w=0 and cell_h=0 clears the pixel region.
+pub const COMP_WIN_SET_PIXEL_REGION_LABEL: u32 = 106;
+
 // --- Input routing (vtmgr today; inputd post-extraction). ---
 // client → vtmgr: request a VT switch. vtmgr decides per policy.
 // Words: [vt: u32]. Reply: words[0] = errno (0 ok).

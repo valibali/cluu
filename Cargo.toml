@@ -168,6 +168,7 @@ members = [
     "userspace/httpd",
     "userspace/ntp",
     "userspace/cluuamp",
+    "userspace/imgview",
 
     # Language tooling
     "crates/cluu_lang",
@@ -269,6 +270,7 @@ default-members = [
     "userspace/sed",
     "userspace/awk",
     "userspace/make",
+    "userspace/imgview",
 ]
 
 [workspace.package]
@@ -553,6 +555,10 @@ debug = 0
 
 [profile.dev.package."cluu-stat"]
 debug = 0
+
+[profile.dev.package."cluu-imgview"]
+debug = 0
+
 
 [profile.release]
 opt-level = 2

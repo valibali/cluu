@@ -226,9 +226,14 @@ keyboard input to the focused window, and exposes a shared-memory cell-grid
 protocol for native apps.
 
 - **Windows**: 1 app = 1 window (v1). `WIN_REGISTER`, `WIN_DAMAGE`,
-  `WIN_DESTROY`.
+  `WIN_DESTROY`, `WIN_SET_PIXEL_REGION`.
 - **SHM cell-grid**: clients share a memory region via `MAP_SHARE_PHYS`; the
   compositor reads cell grids and composites them.
+- **Pixel regions**: a sub-rectangle of a window can be declared as
+  direct-pixel (ARGB32) via `WIN_SET_PIXEL_REGION`. The compositor skips
+  glyph-blitting those cells and blits raw pixels from a separate SHM frame
+  token to the backbuffer. Pixel resolution is `GLYPH_W × GLYPH_H` per cell
+  (8×16 = 128 px/cell). See [`libcluu::pixel_region`] for the client API.
 - **Input**: keyboard events from vtmgr, routed to focused window.
 - **Hotkeys**: focus next/prev, move, resize, close, spawn cluuterm.
 - **Status bar**: clock (subscribes to `TIME_TICK_LABEL`), session info.
@@ -236,8 +241,53 @@ protocol for native apps.
 
 Modules: `compose` (composition loop), `config` (palette, keybindings),
 `hotkeys` (hotkey dispatch), `protocol` (wire protocol), `render` (framebuffer
-blit), `shm` (SHM cell-grid), `state` (compositor state), `status` (status
-bar), `window_mgr` (window management).
+blit + pixel-region blit), `shm` (SHM cell-grid), `state` (compositor state +
+`WindowPixelRegion`), `status` (status bar), `window_mgr` (window management +
+`handle_win_set_pixel_region`).
+
+### Pixel regions (2026-07-23)
+
+A compositor window can embed a direct-pixel sub-region for displaying
+real framebuffer pixels (e.g. JPEG images, video frames). The region is
+declared via `COMP_WIN_SET_PIXEL_REGION_LABEL` (label 106):
+
+```
+words[0] = window_id
+words[1] = cell_x   (region left edge, window-local cell coords)
+words[2] = cell_y   (region top edge)
+words[3] = cell_w   (region width in cells)
+words[4] = cell_h   (region height in cells)
+words[5] = pixel_frame_token  (frame token for the pixel SHM buffer)
+```
+
+The pixel SHM buffer contains `cell_w * GLYPH_W * cell_h * GLYPH_H * 4`
+bytes of ARGB32 data (row-major, stride = `cell_w * GLYPH_W`).
+
+**Compose/render pipeline:**
+
+1. `compose_cell` returns `PIXEL_CELL` sentinel for cells inside a pixel
+   region (topmost window only — respects z-order).
+2. `flush_pixel_regions_to_backbuf` runs *before* `flush_grid_to_backbuf`,
+   blitting pixels only to cells where `cell_grid == PIXEL_CELL`.
+3. `flush_grid_to_backbuf` skips `PIXEL_CELL` cells — the pixel blit
+   already wrote the correct data.
+4. The cursor and higher windows' cells are blitted on top by
+   `flush_grid_to_backbuf`, ensuring correct z-order and cursor
+   visibility.
+
+**Client API:** `libcluu::pixel_region::PixelRegion` — allocates a frame
+token, maps ARGB32 SHM, provides `write_pixel(x, y, argb)`, `write_row()`,
+`write_buf()`. The frame token is sent to the compositor via
+`COMP_WIN_SET_PIXEL_REGION_LABEL`.
+
+**libtui widget:** `libtui::components::pixel::PixelArea` — bordered box
+with title, exposes `pixel_width(area)` / `pixel_height(area)` for
+sizing the pixel buffer.
+
+**Demo app:** `imgview` (`containers/imgview/`) — reads a JPEG from
+`/host`, decodes it with `zune-jpeg` (no_std), nearest-neighbor scales
+to the pixel region, and displays via the compositor. Run: `spawn
+imgview <path-to-jpg>`.
 
 ## cluuterm — graphical terminal emulator
 

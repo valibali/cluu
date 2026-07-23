@@ -6,6 +6,79 @@ use crate::config::MIN_FRAME_MS;
 use crate::state::{Compositor, PixelRect};
 
 impl Compositor {
+    /// Blit pixel regions from SHM into the backbuffer.
+    ///
+    /// For each window that has a pixel region, copy the ARGB32 pixel data
+    /// from the shared SHM buffer into the backbuffer at the correct screen
+    /// pixel coordinates. Extends `dirty_rect` to cover the blitted area.
+    ///
+    /// Called from `tick_frame` before `flush_grid_to_backbuf` so that
+    /// pixel content overwrites the BG_CELL placeholder that the compose
+    /// pass wrote for pixel-region cells.
+    pub fn flush_pixel_regions_to_backbuf(&mut self) {
+        let pitch_words = self.width_px as usize;
+        let cols = self.cols as usize;
+        let glyph_w = crate::state::GLYPH_W as usize;
+        let glyph_h = crate::state::GLYPH_H as usize;
+
+        for win in self.windows.iter() {
+            let Some(ref pr) = win.pixel_region else { continue; };
+
+            let base_cell_x = win.x.saturating_add(pr.cell_x) as usize;
+            let base_cell_y = win.y.saturating_add(pr.cell_y) as usize;
+
+            let pixels_ptr = pr.mapping.as_ptr() as *const u32;
+            let pw = pr.pixel_w as usize;
+
+            for cy in 0..pr.cell_h as usize {
+                let screen_cy = base_cell_y + cy;
+                if screen_cy >= self.rows as usize { break; }
+                for cx in 0..pr.cell_w as usize {
+                    let screen_cx = base_cell_x + cx;
+                    if screen_cx >= cols { break; }
+
+                    let grid_idx = screen_cy * cols + screen_cx;
+                    if self.cell_grid[grid_idx] != crate::compose::PIXEL_CELL {
+                        continue;
+                    }
+
+                    let px = screen_cx * glyph_w;
+                    let py = screen_cy * glyph_h;
+                    let src_row = cy * glyph_h;
+                    let src_col = cx * glyph_w;
+
+                    for row in 0..glyph_h {
+                        let dst_y = py + row;
+                        if dst_y >= self.height_px as usize { break; }
+                        let copy_w = glyph_w.min(self.width_px as usize - px);
+                        if copy_w == 0 { continue; }
+
+                        let src_off = (src_row + row) * pw + src_col;
+                        let dst_off = dst_y * pitch_words + px;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                pixels_ptr.add(src_off),
+                                self.backbuf.as_mut_ptr().add(dst_off),
+                                copy_w,
+                            );
+                        }
+                    }
+
+                    let cell_pr = PixelRect {
+                        x: px as u32,
+                        y: py as u32,
+                        w: glyph_w as u32,
+                        h: glyph_h as u32,
+                    };
+                    self.dirty_rect = Some(match self.dirty_rect {
+                        Some(prev) => prev.extend(cell_pr),
+                        None => cell_pr,
+                    });
+                }
+            }
+        }
+    }
+
     /// Flush dirty cells to the framebuffer if active.
     ///
     /// Push-mode: `now_ms` (= cached `last_clock_now_ms`) only advances on
@@ -24,7 +97,7 @@ impl Compositor {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
-        // Flush immediately — message arrival is the throttle.
+        self.flush_pixel_regions_to_backbuf();
         self.flush_grid_to_backbuf();
         self.flush_backbuf_to_fb();
         self.deadlines.next_frame_ms = u64::MAX;
@@ -98,7 +171,6 @@ impl Compositor {
                 }
                 self.prev_cell_grid[idx] = cell;
 
-                // Extend the pixel dirty rect to cover this cell.
                 let cell_pr = PixelRect {
                     x: (cx as u32) * glyph_w as u32,
                     y: (cy as u32) * glyph_h as u32,
@@ -109,6 +181,10 @@ impl Compositor {
                     Some(prev) => prev.extend(cell_pr),
                     None => cell_pr,
                 });
+
+                if cell == crate::compose::PIXEL_CELL {
+                    continue;
+                }
 
                 let cp = (cell & 0x1F_FFFF) as u32;
                 let fg_idx = ((cell >> 21) & 0xFF) as u8;

@@ -355,6 +355,11 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                         protocol::Incoming::WinResize { window_id, cols, rows } => {
                             comp.resize_window_by_id(window_id, cols, rows);
                         }
+                        protocol::Incoming::WinSetPixelRegion { window_id, cell_x, cell_y, cell_w, cell_h, pixel_token } => {
+                            let _ = comp.handle_win_set_pixel_region(
+                                window_id, cell_x, cell_y, cell_w, cell_h, pixel_token,
+                            );
+                        }
                         protocol::Incoming::QueryScreenSize => {
                             let reply_token = extract_reply_id(&msg).unwrap_or(0);
                             let reply_msg = Message::new(

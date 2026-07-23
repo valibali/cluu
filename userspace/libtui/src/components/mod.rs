@@ -36,4 +36,5 @@ pub mod scrollbar;
 pub mod button;
 pub mod marquee;
 pub mod canvas;
+pub mod pixel;
 pub mod treebuilder;

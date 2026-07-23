@@ -2,7 +2,7 @@
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
-use crate::state::{Compositor, DragMode, DragState, ShmMapping, Window, WindowId, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION, GLYPH_W, GLYPH_H};
+use crate::state::{Compositor, DragMode, DragState, ShmMapping, Window, WindowId, WindowPixelRegion, WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION, GLYPH_W, GLYPH_H};
 use libcluu::Result;
 
 impl Compositor {
@@ -124,6 +124,7 @@ impl Compositor {
             no_chrome,
             modal,
             session_id: None,
+            pixel_region: None,
         };
         // Modal windows go to z-top (end of Vec). Non-modal windows are
         // inserted before the first existing modal so modals stay on top.
@@ -792,6 +793,96 @@ impl Compositor {
                 self.cell_dirty.push((cx, cy));
             }
         }
+    }
+
+    /// Handle `COMP_WIN_SET_PIXEL_REGION_LABEL`.
+    ///
+    /// Maps the client-provided frame token into the compositor's address
+    /// space and stores the region on the window. Sending `cell_w=0,
+    /// cell_h=0` clears any existing pixel region.
+    pub fn handle_win_set_pixel_region(
+        &mut self,
+        window_id: WindowId,
+        cell_x: u16,
+        cell_y: u16,
+        cell_w: u16,
+        cell_h: u16,
+        pixel_token: u64,
+    ) -> libcluu::Result<()> {
+        let pos = self.windows.iter().position(|w| w.id == window_id);
+        let Some(pos) = pos else {
+            return Err(libcluu::Error::NotFound);
+        };
+
+        if let Some(old) = self.windows[pos].pixel_region.take() {
+            let old_bytes = old.pixel_w as usize * old.pixel_h as usize * 4;
+            let old_pages = (old_bytes + 0xFFF) / 0x1000;
+            let _ = libcluu::syscall::space_unmap(
+                libcluu::boot::space_token(),
+                old.mapping.as_ptr() as usize,
+                old_pages,
+            );
+            if old.shm_token != 0 {
+                unsafe {
+                    let _ = libcluu::syscall::invoke(
+                        old.shm_token as usize,
+                        libcluu::syscall::InvokeOp::FrameFree,
+                        0, 0, 0, 0,
+                    );
+                }
+            }
+            for cy in old.cell_y..old.cell_y.saturating_add(old.cell_h) {
+                for cx in old.cell_x..old.cell_x.saturating_add(old.cell_w) {
+                    self.cell_dirty.push((cx, cy));
+                }
+            }
+        }
+
+        if cell_w == 0 || cell_h == 0 {
+            return Ok(());
+        }
+
+        let pixel_w = cell_w as u32 * GLYPH_W;
+        let pixel_h = cell_h as u32 * GLYPH_H;
+        let total_pixels = pixel_w as usize * pixel_h as usize;
+        let total_bytes = total_pixels * 4;
+        let rounded = (total_bytes + 0xFFF) & !0xFFF;
+        let num_pages = rounded / 0x1000;
+
+        // VA must not collide with text-cell SHM (0xC100_0000+).
+        let pixel_va: usize = 0xC800_0000 + (window_id as usize) * 0x40_0000;
+
+        let flags = 0x07 | libcluu::syscall::MAP_FRAME_TOKEN;
+        libcluu::syscall::space_map_range(
+            libcluu::boot::space_token(),
+            pixel_va,
+            pixel_token as usize,
+            flags,
+            num_pages,
+            0,
+        )?;
+
+        let mapping = ShmMapping::new(pixel_va, rounded)
+            .ok_or(libcluu::Error::InvalidArgument)?;
+
+        self.windows[pos].pixel_region = Some(WindowPixelRegion {
+            cell_x,
+            cell_y,
+            cell_w,
+            cell_h,
+            pixel_w,
+            pixel_h,
+            mapping,
+            shm_token: pixel_token,
+        });
+
+        for cy in cell_y..cell_y.saturating_add(cell_h) {
+            for cx in cell_x..cell_x.saturating_add(cell_w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+
+        Ok(())
     }
 }
 

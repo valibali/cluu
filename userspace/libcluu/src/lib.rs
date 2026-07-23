@@ -60,6 +60,7 @@ pub mod types;
 pub mod vfs_view;
 pub mod vspace;
 pub mod window_shm;
+pub mod pixel_region;
 
 pub mod session;
 pub mod spawn;

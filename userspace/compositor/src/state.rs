@@ -82,6 +82,33 @@ impl Deadlines {
 
 pub use libcluu::window_shm::{WindowShm, WIN_SHM_MAGIC, WIN_SHM_VERSION};
 
+/// A pixel sub-region within a compositor text window.
+///
+/// Set via `COMP_WIN_SET_PIXEL_REGION_LABEL`. The compositor maps the
+/// client-provided frame token and blits raw ARGB32 pixels to the backbuffer
+/// for the cells covered by `cell_x..cell_x+cell_w`, `cell_y..cell_y+cell_h`,
+/// skipping glyph-blit for those cells.
+pub struct WindowPixelRegion {
+    pub cell_x: u16,
+    pub cell_y: u16,
+    pub cell_w: u16,
+    pub cell_h: u16,
+    pub pixel_w: u32,
+    pub pixel_h: u32,
+    pub mapping: ShmMapping,
+    pub shm_token: u64,
+}
+
+impl WindowPixelRegion {
+    /// True if cell `(cx, cy)` falls inside this pixel region.
+    pub fn contains_cell(&self, cx: u16, cy: u16) -> bool {
+        cx >= self.cell_x
+            && cx < self.cell_x.saturating_add(self.cell_w)
+            && cy >= self.cell_y
+            && cy < self.cell_y.saturating_add(self.cell_h)
+    }
+}
+
 /// A mapped SHM region shared between the compositor and one window client.
 ///
 /// Wraps the raw `*mut u8` pointer so that all unsafe pointer arithmetic is
@@ -186,6 +213,9 @@ pub struct Window {
     /// Session that owns this window, if any. Set on session handoff;
     /// `None` for sessionless windows (e.g. login modal, demo shells).
     pub session_id: Option<u32>,
+    /// Optional pixel sub-region. When set, cells inside the region are
+    /// blitted as raw ARGB32 pixels from SHM instead of glyph-blitted.
+    pub pixel_region: Option<WindowPixelRegion>,
 }
 
 /// Long-lived compositor state.  Single instance per process, owned by `main`.
