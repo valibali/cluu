@@ -15,13 +15,19 @@
 //! reaches this function; we only ever see kind=0 here.
 
 use crate::tty_backend::Cluuterm;
+use libcluu::input::ForwardedKey;
 use libcluu::tty_core::keymap::encode_extended;
 use libcluu::tty_core::routing::ServiceAction;
 use libcluu::types::Message;
 
 pub fn handle(term: &mut Cluuterm, msg: &Message, _payload: &[u8]) {
-    let ascii    = msg.words[1] as u8;
-    let extended = msg.words[4] as u8;
+    let Some(fk) = ForwardedKey::from_message(&msg.words) else { return; };
+
+    let (ascii, extended) = match fk {
+        ForwardedKey::Press { ascii, extended, .. } => (ascii, extended),
+        ForwardedKey::Release { .. } => return,
+        ForwardedKey::Close => return,
+    };
 
     if let Some(bytes) = encode_extended(extended) {
         let actions = alloc::vec![ServiceAction::DeliverBytes(

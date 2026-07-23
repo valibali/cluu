@@ -312,6 +312,8 @@ pub struct Compositor {
     pub drag_state: Option<DragState>,
     pub cursor_needs_render: bool,
 
+    pub pixel_dirty: bool,
+
 }
 
 #[derive(Clone, Copy)]
@@ -439,6 +441,7 @@ impl Compositor {
             pointer_buttons: 0,
             drag_state: None,
             cursor_needs_render: false,
+        pixel_dirty: false,
         })
     }
 }

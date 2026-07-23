@@ -558,6 +558,13 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         run_wait_s=60,
         pre_sendkey_wait_marker="login: window registered",
     ),
+    "l2_doom": CaseDefaults(
+        test_command="doom -iwad /host/freedoom1.wad",
+        sendkey_sequence=_creds_slow(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=90,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
 }
 
 

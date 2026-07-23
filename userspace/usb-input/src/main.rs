@@ -336,6 +336,36 @@ fn handle_kbd_report(
     let count = (report.len() - 2).min(6);
     new_keys[..count].copy_from_slice(&report[2..2 + count]);
 
+    // Forward key-release events for keys that were in last_keys but are
+    // no longer pressed. kind=2 signals a release; scancode gets the PS/2
+    // set-1 break bit (0x80) set. ascii=0 so legacy consumers that only
+    // react to ascii!=0 (tty, login) ignore these. Games like DOOM read
+    // kind to distinguish press/release.
+    for &old in dev.last_keys.iter() {
+        if old == 0 {
+            continue;
+        }
+        if new_keys.contains(&old) {
+            continue;
+        }
+        let extended = hid_usage_to_extended(old);
+        let scancode = hid_to_ps2_scancode(old).unwrap_or(0);
+        let msg_mods = pack_mods_for_ipc(kbd_mods);
+        let msg = Message::new(
+            KBD_EVENT_LABEL,
+            [
+                0,
+                0,
+                msg_mods as usize,
+                (scancode | 0x80) as usize,
+                extended as usize,
+                2, // kind=2: key release
+            ],
+            5,
+        );
+        ctx.forward(&msg);
+    }
+
     for &key in new_keys.iter() {
         if key == 0 {
             continue;

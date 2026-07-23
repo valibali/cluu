@@ -93,10 +93,11 @@ impl Compositor {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
-        if self.cell_dirty.is_empty() && self.prev_cell_grid == self.cell_grid {
+        if self.cell_dirty.is_empty() && self.prev_cell_grid == self.cell_grid && !self.pixel_dirty {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
+        self.pixel_dirty = false;
         self.flush_pixel_regions_to_backbuf();
         self.flush_grid_to_backbuf();
         self.flush_backbuf_to_fb();

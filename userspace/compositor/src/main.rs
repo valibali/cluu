@@ -4,6 +4,8 @@
 extern crate alloc;
 extern crate cluu_wire;
 
+use alloc::vec::Vec;
+
 mod config;
 mod state;
 mod shm;
@@ -58,6 +60,35 @@ fn broadcast_frame_ready(comp: &mut state::Compositor) {
             win.pending_frame_ready = false;
             win.last_gen = current_gen;
         }
+    }
+}
+
+/// Reap windows whose owner process has exited.
+///
+/// TODO: This is a workaround. The proper fix is to implement SIGINT
+/// delivery in procmgr so that a process can register a cleanup handler
+/// (e.g. send WIN_DESTROY) before being terminated. Currently CLUU's
+/// signal model kills the thread directly — no user handler runs.
+/// Once sigaction + signal delivery is wired through procmgr, this
+/// reaper can be removed and doom-cluu can install a SIGINT handler
+/// that sends WIN_DESTROY before exiting.
+///
+/// Called periodically from the main loop (~1 Hz).  Sends a zero-payload
+/// probe to each window's input endpoint; if the send fails the endpoint
+/// is gone (process died and the kernel revoked its tokens), so we
+/// destroy the window.
+fn reap_dead_windows(comp: &mut state::Compositor) {
+    let mut dead: Vec<state::WindowId> = Vec::new();
+    for win in comp.windows.iter() {
+        if win.input_endpoint == 0 { continue; }
+        let probe = libcluu::types::Message::new(0, [0; 6], 0);
+        if libcluu::ipc::send(win.input_endpoint, &probe, libcluu::types::IpcFlags::empty()).is_err() {
+            dead.push(win.id);
+        }
+    }
+    for id in dead {
+        let _ = debug_print(&alloc::format!("compositor: reaping dead window {}", id));
+        comp.handle_win_destroy(id);
     }
 }
 
@@ -172,10 +203,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
         comp.registry_endpoint,
     ];
     let mut buf = [0u8; 1024];
-    // Cached timeserver endpoint — 0 means not yet resolved.
     let mut time_ep: usize = 0;
-    // Whether we have already sent a subscription request for timeserver:main.
     let mut requested_timeserver = false;
+    let mut reap_counter: u64 = 0;
 
     // Subscribe to timeserver:main up-front so we get a Grant when it registers.
     if registry::request_subscription("timeserver", "main").is_ok() {
@@ -373,7 +403,7 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                 IpcFlags::empty(),
                             );
                         }
-                        protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended } => {
+                        protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended, kind } => {
                             if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
                                 comp.forward_close_request();
                             } else if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
@@ -396,7 +426,7 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                     }
                                 }
                             } else {
-                                comp.forward_input_event(ascii, modifiers, scancode, extended);
+                                comp.forward_input_event(ascii, modifiers, scancode, extended, kind);
                             }
                         }
                         protocol::Incoming::MouseEvent { dx, dy, buttons } => {
@@ -468,6 +498,12 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
 
         if comp.tick_frame(now_ms) {
             broadcast_frame_ready(&mut comp);
+        }
+
+        reap_counter = reap_counter.saturating_add(1);
+        if reap_counter >= 60 {
+            reap_counter = 0;
+            reap_dead_windows(&mut comp);
         }
     }
 }

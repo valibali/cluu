@@ -20,7 +20,7 @@ use context::{idle_on_error, KbdContext};
 use libcluu::ipc::KBD_RAW_LABEL;
 use libcluu::types::Message;
 use libcluu::Result;
-use protocol::{build_kbd_event, parse_message};
+use protocol::{build_kbd_event, build_release_event, parse_message};
 use scancode::ScancodeDecoder;
 
 #[no_mangle]
@@ -92,24 +92,38 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
 
     if let Some(event) = decoder.handle_scancode(scancode) {
         // Intercept Shift+PageUp/PageDown for scrollback before forwarding.
-        if event.modifiers.shift && event.extended == protocol::KEY_PAGE_UP {
+        if event.pressed && event.modifiers.shift && event.extended == protocol::KEY_PAGE_UP {
             ctx.send_scroll(0); // scroll back (show older)
             return;
         }
-        if event.modifiers.shift && event.extended == protocol::KEY_PAGE_DOWN {
+        if event.pressed && event.modifiers.shift && event.extended == protocol::KEY_PAGE_DOWN {
             ctx.send_scroll(1); // scroll forward (show newer)
             return;
         }
 
         // Forward if there's an ASCII char OR an extended key code (arrows etc.)
-        if event.ascii.is_some() || event.extended != 0 {
-            let outbound = build_kbd_event(
-                event.ascii,
-                event.scancode,
-                event.modifiers.as_bits(),
-                event.extended,
-            );
-            ctx.send_to_router(&outbound);
+        // Release events (ascii=None, pressed=false) are forwarded with kind=2
+        // so game clients (DOOM) can detect key-up. Legacy consumers ignore
+        // kind=2 because ascii=0.
+        if event.pressed {
+            if event.ascii.is_some() || event.extended != 0 {
+                let outbound = build_kbd_event(
+                    event.ascii,
+                    event.scancode,
+                    event.modifiers.as_bits(),
+                    event.extended,
+                );
+                ctx.send_to_router(&outbound);
+            }
+        } else {
+            if event.extended != 0 || event.scancode != 0 {
+                let release = build_release_event(
+                    event.scancode,
+                    event.modifiers.as_bits(),
+                    event.extended,
+                );
+                ctx.send_to_router(&release);
+            }
         }
     }
 }

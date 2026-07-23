@@ -1,0 +1,16 @@
+[package]
+name = "doom-cluu"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU platform backend for doomgeneric"
+license = "MIT"
+
+[lib]
+name = "doom_cluu"
+crate-type = ["staticlib"]
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["c-runtime"] }
+
+[features]
+default = []

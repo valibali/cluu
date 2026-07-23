@@ -598,6 +598,17 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             category="bench",
             description="spawn/ipc/thread cycle benchmark — avg cycles per noop spawn",
         ),
+        MarkerModeSpec(
+            name="l2_doom",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+                "doom-cluu: DG_Init",
+            ],
+            fail_marker="doom-cluu: init failed",
+            category="container",
+            description="DOOM port: doomgeneric boots and initializes compositor window",
+        ),
     ]
 }
 

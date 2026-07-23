@@ -31,7 +31,7 @@ pub enum Incoming {
     WinResize { window_id: u64, cols: u16, rows: u16 },
     WinSetPixelRegion { window_id: u64, cell_x: u16, cell_y: u16, cell_w: u16, cell_h: u16, pixel_token: u64 },
     QueryScreenSize,
-    KbdEvent { ascii: u8, modifiers: u8, scancode: u8, extended: u8 },
+    KbdEvent { ascii: u8, modifiers: u8, scancode: u8, extended: u8, kind: u32 },
     MouseEvent { dx: i32, dy: i32, buttons: u8 },
     VtActivate,
     VtDeactivate,
@@ -84,6 +84,7 @@ pub fn parse(msg: &Message) -> Incoming {
             modifiers: msg.words[2] as u8,
             scancode:  msg.words[3] as u8,
             extended:  msg.words[4] as u8,
+            kind:      msg.words[5] as u32,
         },
         MOUSE_EVENT_LABEL => Incoming::MouseEvent {
             dx:      msg.words[1] as i32,

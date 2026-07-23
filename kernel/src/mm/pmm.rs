@@ -218,7 +218,7 @@ const MAX_FRAMES: usize = 1024 * 1024;
 const BITMAP_LEN: usize = MAX_FRAMES / 64;
 
 /// Number of buddy orders: 0 = 4KB, 1 = 8KB, ..., 9 = 2MB
-const MAX_ORDER: usize = 10;
+const MAX_ORDER: usize = 11;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Intrusive free list — stored in the free pages themselves via physmap

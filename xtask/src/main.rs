@@ -227,6 +227,9 @@ enum Commands {
     /// Internal: build micropython port
     #[command(hide = true)]
     BuildMicropython,
+    /// Internal: build doom port
+    #[command(hide = true)]
+    BuildDoom,
     /// Internal: create initrd
     #[command(hide = true)]
     CreateInitrd {
@@ -369,6 +372,9 @@ fn main() -> Result<()> {
         }
         Commands::BuildMicropython => {
             build_micropython()?;
+        }
+        Commands::BuildDoom => {
+            build_doom()?;
         }
         Commands::CreateInitrd { profile } => {
             create_initrd(&profile)?;
@@ -3291,6 +3297,50 @@ fn build_micropython() -> Result<()> {
         }
     }
     println!("  ✓ MicroPython built");
+    Ok(())
+}
+
+fn build_doom() -> Result<()> {
+    let doom_dir = project_root().join("userspace/doom-cluu");
+    let doom_src = project_root().join("external/doomgeneric/doomgeneric/doomgeneric.h");
+    if !doom_src.exists() {
+        eprintln!("  Warning: doomgeneric source not found at {}, skipping DOOM build", doom_src.display());
+        return Ok(());
+    }
+
+    println!("▸ Building doom-cluu Rust staticlib...");
+    let target_spec = project_root().join("triplets/x86_64-cluu-user.json");
+    let status = Command::new("cargo")
+        .current_dir(project_root())
+        .args(["build", "-p", "doom-cluu", "--target"])
+        .arg(&target_spec)
+        .arg("-Z")
+        .arg("build-std=core,alloc,compiler_builtins")
+        .status()
+        .context("Failed to build doom-cluu staticlib")?;
+    if !status.success() {
+        bail!("doom-cluu Rust build failed");
+    }
+
+    let cluu_lib = project_root().join("target/sysroot/lib");
+    let staticlib_src = project_root()
+        .join("target/x86_64-cluu-user/debug/libdoom_cluu.a");
+    let staticlib_dst = cluu_lib.join("libdoom_cluu.a");
+    fs::create_dir_all(&cluu_lib).ok();
+    fs::copy(&staticlib_src, &staticlib_dst).context("Failed to copy libdoom_cluu.a to sysroot")?;
+    println!("  ✓ doom-cluu staticlib built and staged");
+
+    println!("▸ Building DOOM...");
+    let status = Command::new("make")
+        .current_dir(&doom_dir)
+        .arg("-j4")
+        .status()
+        .context("Failed to build DOOM")?;
+    if !status.success() {
+        bail!("DOOM build failed");
+    }
+
+    println!("  ✓ DOOM built");
     Ok(())
 }
 

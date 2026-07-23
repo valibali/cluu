@@ -1712,6 +1712,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "doom-cluu"
+version = "0.1.0"
+dependencies = [
+ "libcluu",
+]
+
+[[package]]
 name = "dynprobe"
 version = "0.1.0"
 dependencies = [

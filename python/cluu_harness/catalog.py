@@ -491,6 +491,9 @@ class L2BlkConcurrent: pass
 @cluu_case("benchprobe", marker_mode="benchprobe", description="spawn/ipc/thread cycle benchmark — avg cycles per noop spawn", tags=["bench", "spawn", "perf"])
 class Benchprobe: pass
 
+@cluu_case("l2_doom", marker_mode="l2_doom", description="DOOM port: doomgeneric boots and initializes compositor window", tags=["doom", "container", "compositor", "audio"])
+class L2Doom: pass
+
 
 __all__ = [
     "Benchprobe",
@@ -548,4 +551,5 @@ __all__ = [
     "M5Fairness",
     "MmapProbe",
     "StackProbe",
+    "L2Doom",
 ]

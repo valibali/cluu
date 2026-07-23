@@ -105,6 +105,7 @@ members = [
     "userspace/probes/timetick_probe",
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
+    "userspace/doom-cluu",
     "userspace/basename",
     "userspace/date",
     "userspace/dirname",

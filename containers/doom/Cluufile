@@ -1,0 +1,6 @@
+FROM minimal
+PROFILE ipc registry
+MOUNT /tmp inherit
+MOUNT /host ro
+BUILD "cargo xtask build-doom" target/x86_64-cluu-user/debug/doom.elf /bin/doom
+ENTRYPOINT /bin/doom

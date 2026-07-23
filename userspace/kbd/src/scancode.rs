@@ -34,13 +34,15 @@ impl Modifiers {
     }
 }
 
-/// Output of a scancode decode (only for key presses).
+/// Output of a scancode decode.
 pub struct KeyEvent {
     pub ascii: Option<u8>,
     pub scancode: u8,
     pub modifiers: Modifiers,
     /// Extended key code for non-ASCII keys (arrows, nav). 0 = normal key.
     pub extended: u8,
+    /// true = key press, false = key release.
+    pub pressed: bool,
 }
 
 /// Stateful decoder for set-1 scancodes.
@@ -106,7 +108,9 @@ impl ScancodeDecoder {
 
     /// Process a raw scancode, updating modifiers and producing an event.
     ///
-    /// Returns `None` for releases or modifier-only presses.
+    /// Returns `None` for modifier-only events (modifiers are tracked but
+    /// no key event is emitted). Returns `Some(KeyEvent)` for both presses
+    /// and releases of non-modifier keys; check `.pressed`.
     pub fn handle_scancode(&mut self, scancode: u8) -> Option<KeyEvent> {
         // Extended scancode prefix.
         if scancode == 0xE0 {
@@ -127,17 +131,19 @@ impl ScancodeDecoder {
             return None;
         }
 
-        if !pressed {
-            return None;
-        }
-
-        let ascii = ascii_for_scancode(code, self.modifiers, was_extended);
         let extended = extended_key_code(code, was_extended);
+        let ascii = if pressed {
+            ascii_for_scancode(code, self.modifiers, was_extended)
+        } else {
+            None
+        };
+
         Some(KeyEvent {
             ascii,
             scancode: code,
             modifiers: self.modifiers,
             extended,
+            pressed,
         })
     }
 

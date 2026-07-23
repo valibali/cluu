@@ -10,6 +10,42 @@ pub enum InputEvent {
     Mouse { dx: i32, dy: i32, buttons: u8 },
 }
 
+/// Parsed COMP_INPUT_FORWARD message from the compositor.
+///
+/// | word | field    | notes                                    |
+/// |------|----------|------------------------------------------|
+/// |  0   | window_id| the focused window's id                  |
+/// |  1   | ascii    | printable/control byte (0 if none)       |
+/// |  2   | mods     | modifier bitmask                         |
+/// |  3   | scancode | hardware scancode                        |
+/// |  4   | extended | KEY_* enum from kbd driver               |
+/// |  5   | kind     | 0=press, 2=release, 99=close-request     |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardedKey {
+    Press { ascii: u8, modifiers: u8, scancode: u8, extended: u8 },
+    Release { scancode: u8, extended: u8 },
+    Close,
+}
+
+impl ForwardedKey {
+    pub fn from_message(words: &[usize; 6]) -> Option<Self> {
+        match words[5] as u32 {
+            0 => Some(Self::Press {
+                ascii: words[1] as u8,
+                modifiers: words[2] as u8,
+                scancode: words[3] as u8,
+                extended: words[4] as u8,
+            }),
+            2 => Some(Self::Release {
+                scancode: words[3] as u8,
+                extended: words[4] as u8,
+            }),
+            99 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
 impl InputEvent {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();

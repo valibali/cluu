@@ -195,6 +195,7 @@ impl Compositor {
     /// See [[cluu-modal-damage-clamps-border-out]].
     pub fn handle_win_damage(&mut self, id: WindowId, x: u32, y: u32, w: u32, h: u32) {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else { return; };
+        let has_pixel_region = win.pixel_region.is_some();
         let chrome_off_x: u16 = if win.modal { 0 } else { 2 };
         let chrome_off_y: u16 = if win.modal { 0 } else { 1 };
         let inner_w = win.w.saturating_sub(chrome_off_x * 2);
@@ -204,6 +205,9 @@ impl Compositor {
         let cx1 = ((x as u16).saturating_add(w as u16)).min(inner_w);
         let cy1 = ((y as u16).saturating_add(h as u16)).min(inner_h);
         win.pending_frame_ready = true;
+        if has_pixel_region {
+            self.pixel_dirty = true;
+        }
         let (win_x, win_y) = (win.x, win.y);
         for iy in cy0..cy1 {
             for ix in cx0..cx1 {
@@ -457,7 +461,7 @@ impl Compositor {
     /// Forward a raw kbd event to the focused window's input endpoint.
     /// `ascii`/`mods`/`scancode`/`extended` come straight from the
     /// `KbdEvent` variant of `protocol::Incoming`.
-    pub fn forward_input_event(&self, ascii: u8, mods: u8, scancode: u8, extended: u8) {
+    pub fn forward_input_event(&self, ascii: u8, mods: u8, scancode: u8, extended: u8, kind: u32) {
         let Some(id) = self.focused else { return; };
         let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
         if win.input_endpoint == 0 { return; }
@@ -469,7 +473,7 @@ impl Compositor {
                 mods as usize,
                 scancode as usize,
                 extended as usize,
-                0usize, // kind = 0 → ordinary input
+                kind as usize,
             ],
             6,
         );

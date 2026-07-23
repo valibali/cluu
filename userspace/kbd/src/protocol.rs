@@ -49,3 +49,20 @@ pub fn build_kbd_event(ascii: Option<u8>, scancode: u8, modifiers: u8, extended:
         5,
     )
 }
+
+/// Build a key-release event. ascii=0, scancode|0x80 (PS/2 break code),
+/// kind=2. Legacy consumers that check ascii!=0 ignore these.
+pub fn build_release_event(scancode: u8, modifiers: u8, extended: u8) -> Message {
+    Message::new(
+        KBD_EVENT_LABEL,
+        [
+            0,
+            0,
+            modifiers as usize,
+            (scancode | 0x80) as usize,
+            extended as usize,
+            2,
+        ],
+        5,
+    )
+}
