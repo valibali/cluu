@@ -15,6 +15,7 @@ use libtui::{Cell, View, ATTR_BOLD, ATTR_REVERSE};
 
 use crate::audio::PlaybackState;
 use crate::model::{CluuampModel, FocusArea, VisMode};
+use crate::viscolor;
 use crate::widgets;
 
 pub fn render_into(view: &mut View, model: &mut CluuampModel) {
@@ -295,7 +296,15 @@ fn draw_transport(view: &mut View, model: &CluuampModel) {
         .draw(Rect::new(col, row, "REP".chars().count() + 2, 1), view);
 }
 
-fn draw_eq_window(view: &mut View, model: &CluuampModel) {
+fn db_to_tick_row(db: i32, graph_height: usize) -> usize {
+    let dot_rows = graph_height * 4;
+    let f = (db + 12).clamp(0, 24) as usize;
+    let dot_row_from_bottom = if dot_rows > 0 { f * dot_rows / 24 } else { 0 };
+    let dot_row = dot_rows.saturating_sub(dot_row_from_bottom);
+    (dot_row / 4).min(graph_height.saturating_sub(1))
+}
+
+fn draw_eq_window(view: &mut View, model: &mut CluuampModel) {
     let layout = &model.layout;
     let area = layout.eq_area;
 
@@ -320,38 +329,93 @@ fn draw_eq_window(view: &mut View, model: &CluuampModel) {
     let pre = model.eq_bands[0] as i32;
     let freq_bands = &model.eq_bands[1..];
     let band_count = freq_bands.len();
-    let total_eighths = graph.height * 8;
-    for col in 0..graph.width {
-        let x = graph.x + col;
-        let pos = if graph.width > 1 { col * (band_count - 1) } else { 0 };
-        let lo = pos / (graph.width - 1).max(1);
+
+    let dot_rows = graph.height * 4;
+    let dot_cols = graph.width * 2;
+
+    let grid = &mut model.eq_grid;
+    grid.clear();
+    grid.resize(graph.width * graph.height, 0);
+
+    let mut f_sum = alloc::vec![0u32; graph.width * graph.height];
+    let mut f_cnt = alloc::vec![0u8; graph.width * graph.height];
+
+    for dc in 0..dot_cols {
+        let pos = if dot_cols > 1 { dc * (band_count - 1) } else { 0 };
+        let lo = pos / (dot_cols - 1).max(1);
         let hi = (lo + 1).min(band_count - 1);
-        let remainder = pos % (graph.width - 1).max(1);
-        let span = (graph.width - 1).max(1);
+        let remainder = pos % (dot_cols - 1).max(1);
+        let span = (dot_cols - 1).max(1);
         let val_lo = freq_bands[lo] as i32;
         let val_hi = freq_bands[hi] as i32;
         let interpolated = val_lo + (val_hi - val_lo) * remainder as i32 / span as i32;
         let f = (interpolated + pre + 12).clamp(0, 24) as usize;
-        let fill_eighths = f * total_eighths / 24;
-        for row in 0..graph.height {
-            let from_bottom = graph.height - 1 - row;
-            let cell_start = from_bottom * 8;
-            let cell_end = cell_start + 8;
-            let fill = if fill_eighths >= cell_end {
-                8
-            } else if fill_eighths > cell_start {
-                fill_eighths - cell_start
+        let dot_row_from_bottom = f * dot_rows / 24;
+        if dot_row_from_bottom == 0 {
+            continue;
+        }
+        let dot_row = dot_rows - dot_row_from_bottom;
+        let cell_row = dot_row / 4;
+        let local_row = dot_row % 4;
+        let cell_col = dc / 2;
+        let local_col = dc % 2;
+
+        const BRAILLE_DOT: [[u8; 2]; 4] = [
+            [0x01, 0x08],
+            [0x02, 0x10],
+            [0x04, 0x20],
+            [0x40, 0x80],
+        ];
+        let idx = cell_row * graph.width + cell_col;
+        if idx < grid.len() {
+            grid[idx] |= BRAILLE_DOT[local_row][local_col];
+            f_sum[idx] += f as u32;
+            f_cnt[idx] += 1;
+        }
+    }
+
+    for row in 0..graph.height {
+        for col in 0..graph.width {
+            let byte = grid[row * graph.width + col];
+            if byte != 0 {
+                let ch = char::from_u32(0x2800 + byte as u32).unwrap_or('\u{2800}');
+                let idx = row * graph.width + col;
+                let avg_f = if f_cnt[idx] > 0 {
+                    f_sum[idx] / f_cnt[idx] as u32
+                } else {
+                    0
+                };
+                view.set(
+                    graph.y + row,
+                    graph.x + col,
+                    Cell::new(ch).fg(viscolor::eq_curve_color(avg_f as usize)),
+                );
+            }
+        }
+    }
+
+    let hairline_x = graph.x.saturating_sub(1);
+    if hairline_x < graph.x && graph.height > 0 {
+        let top_row = db_to_tick_row(12, graph.height);
+        let mid_row = db_to_tick_row(0, graph.height);
+        let bot_row = db_to_tick_row(-12, graph.height);
+        let denom = (graph.height - 1).max(1);
+
+        for row in top_row..=bot_row {
+            let f = 24 * (graph.height - 1 - row) / denom;
+            let fg = viscolor::eq_curve_color(f);
+            let ch = if row == top_row && row == bot_row {
+                '├'
+            } else if row == top_row {
+                '┌'
+            } else if row == bot_row {
+                '└'
+            } else if row == mid_row {
+                '├'
             } else {
-                0
+                '│'
             };
-            let ch = if fill >= 8 {
-                '█'
-            } else if fill > 0 {
-                widgets::eighth_block(fill)
-            } else {
-                ' '
-            };
-            view.set(graph.y + row, x, Cell::new(ch).fg(51));
+            view.set(graph.y + row, hairline_x, Cell::new(ch).fg(fg));
         }
     }
 
@@ -590,5 +654,147 @@ use libtui::components::filedialog::FileDialog;
         let view = render(&mut model);
         assert_eq!(view.get(0, 0).unwrap().bg, 0);
         assert_eq!(view.get(0, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn eq_hairline_has_top_corner_at_plus_12_row() {
+        let mut model = focused_model(FocusArea::Eq);
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let hairline_x = graph.x.saturating_sub(1);
+        let top_row = db_to_tick_row(12, graph.height);
+        let cell = view.get(graph.y + top_row, hairline_x).unwrap();
+        assert_eq!(cell.ch, '┌');
+        assert_eq!(cell.fg, viscolor::eq_curve_color(24));
+    }
+
+    #[test]
+    fn eq_hairline_has_t_joint_at_zero_db_row() {
+        let mut model = focused_model(FocusArea::Eq);
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let hairline_x = graph.x.saturating_sub(1);
+        let mid_row = db_to_tick_row(0, graph.height);
+        let cell = view.get(graph.y + mid_row, hairline_x).unwrap();
+        assert_eq!(cell.ch, '├');
+        assert_eq!(cell.fg, viscolor::eq_curve_color(12));
+    }
+
+    #[test]
+    fn eq_hairline_has_bottom_corner_at_minus_12_row() {
+        let mut model = focused_model(FocusArea::Eq);
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let hairline_x = graph.x.saturating_sub(1);
+        let bot_row = db_to_tick_row(-12, graph.height);
+        let cell = view.get(graph.y + bot_row, hairline_x).unwrap();
+        assert_eq!(cell.ch, '└');
+        assert_eq!(cell.fg, viscolor::eq_curve_color(0));
+    }
+
+    #[test]
+    fn eq_hairline_vertical_between_ticks_is_pipe() {
+        let mut model = focused_model(FocusArea::Eq);
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let hairline_x = graph.x.saturating_sub(1);
+        let top_row = db_to_tick_row(12, graph.height);
+        let mid_row = db_to_tick_row(0, graph.height);
+        let bot_row = db_to_tick_row(-12, graph.height);
+        let denom = (graph.height - 1).max(1);
+        for row in top_row..=bot_row {
+            if row == top_row || row == bot_row || row == mid_row {
+                continue;
+            }
+            let f = 24 * (graph.height - 1 - row) / denom;
+            let cell = view.get(graph.y + row, hairline_x).unwrap();
+            assert_eq!(cell.ch, '│', "row {}", row);
+            assert_eq!(cell.fg, viscolor::eq_curve_color(f));
+        }
+    }
+
+    #[test]
+    fn eq_curve_uses_gradient_color_not_fixed_cyan() {
+        let mut model = focused_model(FocusArea::Eq);
+        model.eq_bands = [0, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let mut found_non_cyan = false;
+        for row in 0..graph.height {
+            for col in 0..graph.width {
+                let cell = view.get(graph.y + row, graph.x + col).unwrap();
+                if cell.ch != ' ' {
+                    assert_ne!(cell.fg, 51, "row {} col {} should not be cyan", row, col);
+                    found_non_cyan = true;
+                }
+            }
+        }
+        assert!(found_non_cyan, "expected gradient colors, not all cyan 51");
+    }
+
+    #[test]
+    fn eq_curve_flat_plus_12_is_green() {
+        let mut model = focused_model(FocusArea::Eq);
+        model.eq_bands = [0, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        for row in 0..graph.height {
+            for col in 0..graph.width {
+                let cell = view.get(graph.y + row, graph.x + col).unwrap();
+                if cell.ch != ' ' {
+                    assert_eq!(cell.fg, 46, "row {} col {}", row, col);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eq_curve_flat_minus_12_is_red() {
+        let mut model = focused_model(FocusArea::Eq);
+        model.eq_bands = [0, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12];
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        for row in 0..graph.height {
+            for col in 0..graph.width {
+                let cell = view.get(graph.y + row, graph.x + col).unwrap();
+                if cell.ch != ' ' {
+                    assert_eq!(cell.fg, 196, "row {} col {}", row, col);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eq_curve_flat_zero_is_yellow_orange() {
+        let mut model = focused_model(FocusArea::Eq);
+        model.eq_bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        for row in 0..graph.height {
+            for col in 0..graph.width {
+                let cell = view.get(graph.y + row, graph.x + col).unwrap();
+                if cell.ch != ' ' {
+                    assert_eq!(cell.fg, 214, "row {} col {}", row, col);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eq_curve_gradient_has_more_than_three_colors() {
+        let mut model = focused_model(FocusArea::Eq);
+        model.eq_bands = [0, -12, -6, 0, 6, 12, 6, 0, -6, -12, 0];
+        let view = render(&mut model);
+        let graph = model.layout.eq_graph;
+        let mut colors = alloc::collections::BTreeSet::new();
+        for row in 0..graph.height {
+            for col in 0..graph.width {
+                let cell = view.get(graph.y + row, graph.x + col).unwrap();
+                if cell.ch != ' ' {
+                    colors.insert(cell.fg);
+                }
+            }
+        }
+        assert!(colors.len() > 3, "expected >3 colors, got {}: {:?}", colors.len(), colors);
     }
 }

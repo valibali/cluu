@@ -1357,3 +1357,72 @@ Same bug class as [[cluu-compositor-focus-chrome-stale]] and
 [[cluu-modal-damage-clamps-border-out]]: a state-dependent overlay and
 a damage-driven re-render disagree about who owns a cell, and the
 damage path wins silently.
+
+## cluu-eq-gradient-per-cell-color
+
+### The code
+
+cluuamp EQ response curve (`userspace/cluuamp/src/view.rs::draw_eq_window`):
+
+The EQ graph area is only **3 cell rows tall** (`layout.rs`:
+`eq_graph = Rect::new(15, 13, 52, 3)`). The curve is drawn with braille
+dots, each cell getting a color from a 25-entry gradient palette
+(`viscolor.rs::EQ_CURVE_COLORS`, red → yellow-orange → green, mapping
+`f=0`..`24` where 0 = -12 dB and 24 = +12 dB).
+
+### Why this was hard to spot
+
+The first implementation colored each cell by its **row position**:
+
+```rust
+let f = 24 * (graph.height - 1 - row) / denom;
+let curve_fg = viscolor::eq_curve_color(f);
+```
+
+With `graph.height = 3`, this produces exactly 3 values of `f`: 24, 12,
+0 → green, yellow-orange, red. The 25-entry palette was correctly
+defined, the color emission path (SGR `38;5;N`) was correct, the ANSI
+parser and compositor palette were correct — but the user saw only 3
+colors because the color was derived from the cell's Y position, not
+from the curve's actual dB value at that position.
+
+The bug is invisible in a flat curve (all bands at the same gain → all
+cells get the same color regardless of approach), and it produces
+"correct-looking" output for a flat curve at any gain level. It only
+reveals itself when the curve slopes: the gradient should vary
+horizontally across the graph, but a row-based coloring can only vary
+vertically — and with 3 rows, that's 3 colors max.
+
+### Fix
+
+Color each cell by the **actual interpolated dB value of the curve at
+that column**, not by the cell's row. A parallel `f_sum`/`f_cnt` array
+accumulates the `f` value per cell during dot drawing; the average `f`
+per cell selects the gradient color:
+
+```rust
+let mut f_sum = alloc::vec![0u32; graph.width * graph.height];
+let mut f_cnt = alloc::vec![0u8; graph.width * graph.height];
+// ... in the dot loop:
+f_sum[idx] += f as u32;
+f_cnt[idx] += 1;
+// ... when rendering:
+let avg_f = f_sum[idx] / f_cnt[idx] as u32;
+view.set(..., Cell::new(ch).fg(viscolor::eq_curve_color(avg_f as usize)));
+```
+
+Now a curve sloping from -12 to +12 across the graph width shows the
+full red → orange → yellow → green gradient horizontally.
+
+### Key insight
+
+When a display region has few cells in one dimension (here, 3 rows),
+deriving a gradient color from that dimension's position quantizes the
+gradient to that many steps. To get the full palette resolution, derive
+the color from the **data value** being rendered, not from the cell's
+spatial position. The palette can have 25 entries; the spatial grid
+only has 3 — the data is the only source that can exercise all 25.
+
+This is the same trap as coloring a heatmap by cell row when the value
+range is wider than the row count: the palette is defined, the rendering
+is correct, but the color resolution is capped at the grid resolution.

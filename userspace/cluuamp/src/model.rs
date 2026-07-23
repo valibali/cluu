@@ -62,6 +62,7 @@ pub struct CluuampModel {
     pub dirty: bool,
     pub scratch_title: String,
     pub scratch_str: String,
+    pub eq_grid: Vec<u8>,
 }
 
 impl CluuampModel {
@@ -98,6 +99,7 @@ impl CluuampModel {
             dirty: false,
             scratch_title: String::new(),
             scratch_str: String::new(),
+            eq_grid: Vec::new(),
         };
         model.sync_equalizer();
         model.sync_fft_bars();

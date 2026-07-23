@@ -24,6 +24,42 @@ pub const BAR_COLORS: [u8; 16] = [
 /// Oscilloscope trace colors — 6 shades from center.
 pub const SCOPE_COLORS: [u8; 6] = [33, 75, 117, 209, 203, 196];
 
+/// EQ response-curve gradient: red (-12 dB, bottom) → yellow-orange (0 dB,
+/// middle) → green (+12 dB, top).  Maps `f` (0..=24, where 0 = -12 dB and
+/// 24 = +12 dB) to an xterm-256 color index.
+pub const EQ_CURVE_COLORS: [u8; 25] = [
+    196, // 0  — red            (-12 dB)
+    196, // 1  — red
+    202, // 2  — red-orange
+    202, // 3  — red-orange
+    208, // 4  — dark orange
+    208, // 5  — dark orange
+    208, // 6  — dark orange
+    214, // 7  — yellow-orange
+    214, // 8  — yellow-orange
+    214, // 9  — yellow-orange
+    214, // 10 — yellow-orange
+    214, // 11 — yellow-orange
+    214, // 12 — yellow-orange   (0 dB)
+    214, // 13 — yellow-orange
+    220, // 14 — gold
+    226, // 15 — yellow
+    226, // 16 — yellow
+    190, // 17 — yellow-green
+    190, // 18 — yellow-green
+    154, // 19 — green-yellow
+    154, // 20 — green-yellow
+    118, // 21 — chartreuse
+    118, // 22 — chartreuse
+    46,  // 23 — green
+    46,  // 24 — green           (+12 dB)
+];
+
+/// EQ curve color for a given `f` (0..=24).  Clamps to range.
+pub fn eq_curve_color(f: usize) -> u8 {
+    EQ_CURVE_COLORS[f.min(EQ_CURVE_COLORS.len() - 1)]
+}
+
 /// Bar color for a given level (0-15). Clamps to range.
 pub fn bar_color(level: u8) -> u8 {
     let idx = if level >= 16 { 15 } else { level as usize };
@@ -58,6 +94,32 @@ mod tests {
     #[test]
     fn scope_colors_has_6_entries() {
         assert_eq!(SCOPE_COLORS.len(), 6);
+    }
+
+    #[test]
+    fn eq_curve_color_at_bottom_is_red() {
+        assert_eq!(eq_curve_color(0), 196);
+    }
+
+    #[test]
+    fn eq_curve_color_at_zero_db_is_yellow_orange() {
+        assert_eq!(eq_curve_color(12), 214);
+    }
+
+    #[test]
+    fn eq_curve_color_at_top_is_green() {
+        assert_eq!(eq_curve_color(24), 46);
+    }
+
+    #[test]
+    fn eq_curve_color_clamps_above_24() {
+        assert_eq!(eq_curve_color(25), EQ_CURVE_COLORS[24]);
+        assert_eq!(eq_curve_color(255), EQ_CURVE_COLORS[24]);
+    }
+
+    #[test]
+    fn eq_curve_colors_has_25_entries() {
+        assert_eq!(EQ_CURVE_COLORS.len(), 25);
     }
 
     #[test]

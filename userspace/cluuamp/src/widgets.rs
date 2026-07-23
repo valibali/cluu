@@ -1,13 +1,7 @@
-//! TUI widgets: braille spectrum, oscilloscope, eighth-block chars.
+//! TUI widgets: braille spectrum, oscilloscope.
 
 use crate::viscolor;
 use libtui::{Cell, View};
-
-pub const EIGHTH_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-pub fn eighth_block(filled: usize) -> char {
-    EIGHTH_BLOCKS[filled.min(8)]
-}
 
 const BRAILLE_MASKS: [[u8; 2]; 4] = [
     [0x01, 0x08],
@@ -87,15 +81,6 @@ pub fn draw_scope_box(view: &mut View, top: usize, left: usize, width: usize, po
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn eighth_block_table() {
-        assert_eq!(eighth_block(0), ' ');
-        assert_eq!(eighth_block(1), '▁');
-        assert_eq!(eighth_block(4), '▄');
-        assert_eq!(eighth_block(8), '█');
-        assert_eq!(eighth_block(99), '█');
-    }
 
     #[test]
     fn braille_spectrum_full_fill_3_high() {

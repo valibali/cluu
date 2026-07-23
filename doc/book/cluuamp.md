@@ -49,14 +49,14 @@ Bands are centered via `(2*i+1)*width/(2*11)`.
 |------|------|
 | `fft.rs` | Winamp-exact spectrum temporal dynamics + 75-bar semitone mapping |
 | `scope.rs` | Oscilloscope point extraction (75 -> 24 columns) |
-| `viscolor.rs` | Spectrum/scope color palettes |
+| `viscolor.rs` | Spectrum/scope/EQ-curve color palettes |
 | `equalizer.rs` | SSE2 10-band RBJ peaking EQ + preamp |
 | `gain.rs` | Per-period volume + balance transform |
 | `id3.rs` | ID3v2 + ID3v1 metadata parser, `TrackMeta` cache |
 | `terminal.rs` | Terminal size negotiation (`ensure_terminal_size`) |
 | `audio.rs` | `AudioEngine`: two-thread decode/submit, EQ -> gain, completion-aligned tap, ID3 metadata |
 | `layout.rs` | Three-window cell map (MAIN / EQ / PLAYLIST / footer), `FocusArea` with `next()`/`prev()` |
-| `widgets.rs` | Braille spectrum, oscilloscope, eighth-block chars |
+| `widgets.rs` | Braille spectrum, oscilloscope |
 | `mp3_ffi.rs` | FFI bindings to vendored minimp3 (SSE2 SIMD decoder) |
 | `model.rs` | MVU state + key dispatch; `sync_equalizer()` forwards to engine |
 | `view.rs` | Cell rendering + modal browser overlay |
@@ -184,6 +184,37 @@ the center (value 0 = 12 eighths = half-filled). Unfilled cells show
 bar — so the slider is always visible even at minimum value. Focused
 sliders use bright yellow (226); unfocused use dim gray (238) for the
 track and green (46) for the fill.
+
+### EQ response curve — braille + gradient
+
+The curve strip (3 cell rows, `eq_graph` area) renders the interpolated
+EQ response as braille dots. Each dot column maps to a position in the
+10-band frequency axis; the curve height at that position is linearly
+interpolated between the two nearest band gains (plus preamp).
+
+**Color is per-cell, not per-row.** Each braille cell's color is the
+average `f` value (0..=24, where 0 = -12 dB and 24 = +12 dB) of the dot
+columns that landed in that cell. A flat +12 curve is all green (46); a
+flat -12 curve is all red (196); a sloping curve shows a horizontal
+gradient across the graph width. Coloring by row position would produce
+only 3 colors (the graph is 3 rows tall); coloring by curve height
+produces the full 25-step gradient. The palette is
+`viscolor.rs::EQ_CURVE_COLORS` (red → yellow-orange → green).
+
+### EQ level indicator — left-side hairline + T-joint ticks
+
+To the left of the curve (`graph.x - 1`) a vertical hairline spans the
+-12..+12 dB range with three tick markers:
+
+| Glyph | dB level | Color |
+|-------|----------|-------|
+| `┌` | +12 | green (46) |
+| `├` | 0 | yellow-orange (214) |
+| `└` | -12 | red (196) |
+
+Bare `│` segments between ticks are gradient-colored by row. The
+`db_to_tick_row(db, height)` helper maps a dB value to a graph cell row
+using the same dot-row math as the curve (4 dot-rows per cell row).
 
 ## Two-thread architecture
 
