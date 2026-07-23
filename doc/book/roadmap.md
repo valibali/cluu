@@ -370,6 +370,44 @@ Shipped:
 
 Not done: IRQ-driven `read_bytes` (blocked by `try_send` drop reliability).
 
+### Interlude: DOOM port (DONE 2026-07-23)
+
+Ported doomgeneric (ozkl/doomgeneric) to CLUU. First third-party C application
+ported to the newlib toolchain with a Rust platform backend. Proves the
+C-runtime + compositor + audio + input stack works for real software.
+
+Shipped:
+
+- **doom-cluu** (`userspace/doom-cluu/`): Rust staticlib implementing the 6
+  `DG_*` platform functions + C entry point. Compositor window with chrome
+  border, PixelRegion SHM (1280×800 ARGB32, 2× nearest-neighbor scaling from
+  DOOM's native 640×400). WAD loaded via chunked 64KB `read_grant` into a 28MB
+  buffer (9p can't handle >4MB grants). Frame throttled to 35fps (TICRATE).
+- **Key release events**: kbd + usb-input drivers now emit `kind=2` release
+  events (scancode|0x80, ascii=0). Compositor parses `kind` and forwards it.
+  `libcluu::input::ForwardedKey` provides a shared typed parser. cluuterm
+  ignores releases (was double-stepping arrows); DOOM handles both.
+- **Compositor dead-window reaper**: ~1Hz probe of window input endpoints;
+  `ipc_send` failure → endpoint destroyed → window reaped. Workaround for
+  missing SIGINT handler delivery (TODO: proper fix via procmgr signals).
+- **Compositor pixel_dirty flag**: PixelRegion windows' pixel content changes
+  every frame but `cell_grid` stays `PIXEL_CELL`, so `tick_frame` skipped
+  flushes. Added `pixel_dirty` flag set on WIN_DAMAGE for pixel-region windows.
+- **Kernel PMM MAX_ORDER 10→11**: 1280×800 PixelRegion needs 1000 pages
+  (order 10). PMM buddy allocator max was 10 (order 0..9). Raised to 11.
+  `frame_registry` order cap 9→10 to match.
+- **Harness**: `l2_doom` test case (DG_Init marker, WAD from /host share).
+
+Key findings:
+
+- 9p `read_grant` hangs on >4MB chunks — `GRANT_BUF_SIZE=4MB` in VFS, and 9p
+  blkdev can't handle large grant requests. 64KB chunks work (cluuamp pattern).
+- USB HID maps ENTER to ASCII 10 (LF), not 13 (CR). DOOM expects KEY_ENTER=13.
+  Scancode-first mapping for special keys fixes press/release key-ID mismatch.
+- `i_input.c` has a `break` after the first key-release event per
+  `I_GetEvent` call — only one release processed per tick. Not a bug for
+  normal play but limits release throughput.
+
 ### Phase 6: Ship (PENDING)
 
 Goal: a stranger can run CLUU from a download link and see it work.

@@ -1505,3 +1505,96 @@ must agree on z-order. The cell grid is the source of truth for "what
 owns this cell." The pixel blit must consult it, not independently
 decide what to write. Otherwise, unchanged cells in the grid blit leave
 stale pixel data from the lower window visible through the upper window.
+
+## cluu-pixel-region-dirty-flag
+
+### The code
+
+Compositor `tick_frame` checks `cell_dirty.is_empty() &&
+prev_cell_grid == cell_grid` to decide whether to flush. PixelRegion
+windows (imgview, DOOM) write pixel data to a separate SHM region, but
+`cell_grid` for those cells is always `PIXEL_CELL` — it never changes.
+So after the first frame, `tick_frame` skips flushing even though the
+pixel content changed.
+
+### Why this was hard to spot
+
+The symptom was "DOOM only redraws when I move the mouse or every
+second." Mouse movement dirties cells (cursor), and the 1Hz clock tick
+dirties row 0 (status bar). Both trigger `tick_frame` which flushes the
+pixel region as a side effect. But DOOM's own WIN_DAMAGE messages were
+pushing dirty cells that `recompute_dirty` consumed (setting them to
+`PIXEL_CELL` again — no change), so `cell_grid` never changed and
+`tick_frame` never fired.
+
+### Fix
+
+Added `pixel_dirty: bool` to `Compositor`. Set in `handle_win_damage`
+when the damaged window has a PixelRegion. `tick_frame` checks it and
+clears it after flushing.
+
+### Key insight
+
+When pixel content lives outside the cell grid (PixelRegion SHM), the
+cell-grid dirty tracking can't detect content changes. The grid only
+tracks structural changes (which window owns a cell). A separate dirty
+flag is needed for "pixel content changed but cell ownership didn't."
+
+## cluu-9p-grant-chunk-limit
+
+### The code
+
+`read_grant` for 9p-backed files calls `read_grant_remote_chunked` in
+VFS, which calls the blkdev's `FS_READ_GRANT`. For 9p, the blkdev is
+virtio-9p. Requesting >4MB hangs — the 9pblkdev never replies.
+
+### Why this was hard to spot
+
+The hang was silent — no error, no timeout, just a 42-second stall
+followed by thread destruction. The serial log showed "calling blkdev
+read_grant" and then nothing. It looked like a deadlock but was actually
+the 9p layer not supporting large grant reads.
+
+### Fix
+
+Use 64KB chunks (same as cluuamp). Read into a scratch buffer, memcpy
+into the destination. ~450 round-trips for a 28MB WAD, but each
+completes in ~1ms.
+
+### Key insight
+
+9p is a protocol with message-size limits. `GRANT_BUF_SIZE=4MB` in VFS
+is the max for ext2/memory backends, but 9p has its own MSIZE limit
+(256KB). Grant reads must be chunked to the smallest backend limit.
+
+## cluu-hid-enter-ascii-10
+
+### The code
+
+USB HID keyboard driver maps ENTER to ASCII 10 (LF), but DOOM expects
+KEY_ENTER=13 (CR). The key-mapping code used `ascii.to_ascii_uppercase()`
+for press events but fell through to scancode for release events —
+press sent key=10, release sent key=13. DOOM saw a keydown for 10 and a
+keyup for 13: mismatched key IDs, so the key appeared "stuck pressed."
+
+### Why this was hard to spot
+
+ENTER worked to open the menu (ESC opens it, not ENTER — confusing).
+But selecting menu items with ENTER did nothing. The debug log revealed
+press sends `doom_key=10` and release sends `doom_key=13` — two
+different key IDs for the same physical key.
+
+### Fix
+
+Scancode-first mapping for special keys. `map_to_doom_key` checks
+`scancode & 0x7F` before falling back to ascii. ENTER (0x1C) → 13,
+SPACE (0x39) → 0x20, ESC (0x01) → 27, etc. Both press and release use
+the same scancode-derived key ID.
+
+### Key insight
+
+Never trust ASCII from HID for control keys. HID maps ENTER to LF (10),
+not CR (13). Scancode is the stable identifier — ascii is layout-dependent
+and may differ between drivers (PS/2 kbd sends CR=13, USB HID sends LF=10).
+Map from scancode for any key where the DOOM key constant differs from
+the raw ASCII value.
