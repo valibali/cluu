@@ -15,6 +15,7 @@ extern crate alloc;
 pub mod equalizer;
 pub mod fft;
 pub mod gain;
+pub mod id3;
 pub mod layout;
 pub mod scope;
 pub mod viscolor;
@@ -24,5 +25,7 @@ pub mod widgets;
 pub mod audio;
 #[cfg(feature = "runtime")]
 pub mod model;
+#[cfg(feature = "runtime")]
+pub mod terminal;
 #[cfg(feature = "runtime")]
 pub mod view;

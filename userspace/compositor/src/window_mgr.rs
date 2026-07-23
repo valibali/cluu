@@ -368,6 +368,56 @@ impl Compositor {
 
     /// Mark every cell on screen dirty (used after focus changes so chrome
     /// repaints with correct focused/unfocused colours).
+    pub fn resize_window_by_id(&mut self, window_id: u64, cols: u16, rows: u16) {
+        let pos = match self.windows.iter().position(|w| w.id == window_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let win = &self.windows[pos];
+        let is_modal = win.modal;
+        let (iw_off, ih_off): (u16, u16) = if is_modal { (0, 0) } else { (4, 3) };
+        let new_w = cols.saturating_add(iw_off);
+        let new_h = rows.saturating_add(ih_off);
+        let x = win.x;
+        let y = win.y;
+        let old_w = win.w;
+        let old_h = win.h;
+        let clamped_w = new_w.min((self.cols as i32 - x as i32) as u16);
+        let clamped_h = new_h.min((self.rows as i32 - y as i32) as u16);
+        self.windows[pos].w = clamped_w;
+        self.windows[pos].h = clamped_h;
+        let max_w = old_w.max(clamped_w);
+        let max_h = old_h.max(clamped_h);
+        for cy in y..y.saturating_add(max_h) {
+            for cx in x..x.saturating_add(max_w) {
+                self.cell_dirty.push((cx, cy));
+            }
+        }
+        let input_ep = self.windows[pos].input_endpoint;
+        if input_ep != 0 && clamped_w > iw_off && clamped_h > ih_off {
+            let interior_w = clamped_w.saturating_sub(iw_off);
+            let interior_h = clamped_h.saturating_sub(ih_off);
+            {
+                let hdr = self.windows[pos].mapping.as_ptr() as *mut WindowShm;
+                unsafe {
+                    core::ptr::write_volatile(&mut (*hdr).width as *mut u32, interior_w as u32);
+                    core::ptr::write_volatile(&mut (*hdr).height as *mut u32, interior_h as u32);
+                }
+            }
+            let msg = libcluu::types::Message::new(
+                libcluu::ipc::COMP_WIN_CONFIGURE_LABEL,
+                [
+                    window_id as usize,
+                    interior_w as usize,
+                    interior_h as usize,
+                    0, 0, 0,
+                ],
+                3,
+            );
+            let _ = libcluu::ipc::send(input_ep, &msg, libcluu::types::IpcFlags::empty());
+        }
+    }
+
     pub fn repaint_all(&mut self) {
         for cy in 0..self.rows {
             for cx in 0..self.cols {

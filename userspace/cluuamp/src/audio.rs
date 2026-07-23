@@ -8,6 +8,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -22,12 +23,14 @@ use nanomp3::Decoder;
 
 use crate::equalizer::Equalizer;
 use crate::gain::{apply_period, Gain};
+use crate::id3::{self, TrackMeta};
 
 const PERIOD_BYTES: usize = 4096;
 const SCRATCH_VA: usize = 0x7000_0000;
 const SCRATCH_PAGES: usize = 24;
 const RING_SLOTS: usize = 8;
 const READ_CHUNK: usize = 64 * 1024;
+const DECODE_BATCH: usize = 4;
 
 const FFT_WINDOW: usize = 512;
 const SCOPE_WINDOW: usize = 576;
@@ -169,6 +172,7 @@ pub enum PlaybackState {
 pub struct AudioEngine {
     playlist: Vec<String>,
     current_index: usize,
+    track_metas: Vec<Option<TrackMeta>>,
     decoder: Decoder,
     audio: Option<AudioSessionClient>,
     mp3_data: Vec<u8>,
@@ -190,6 +194,9 @@ pub struct AudioEngine {
     sample_rate: u32,
     channels: u8,
     pcm_submitted: u64,
+    pcm_played: u64,
+    pcm_total_decoded: u64,
+    decode_complete: bool,
     new_pcm_available: bool,
     file_loaded: bool,
     bitrate_kbps: u32,
@@ -199,9 +206,11 @@ const _: () = assert!(core::mem::size_of::<AudioEngine>() < 16 * 1024);
 
 impl AudioEngine {
     pub fn new(playlist: Vec<String>) -> Self {
+        let metas = vec![None; playlist.len()];
         Self {
             playlist,
             current_index: 0,
+            track_metas: metas,
             decoder: Decoder::new(),
             audio: None,
             mp3_data: Vec::new(),
@@ -223,6 +232,9 @@ impl AudioEngine {
             sample_rate: 44100,
             channels: 2,
             pcm_submitted: 0,
+            pcm_played: 0,
+            pcm_total_decoded: 0,
+            decode_complete: false,
             new_pcm_available: false,
             file_loaded: false,
             bitrate_kbps: 0,
@@ -234,6 +246,7 @@ impl AudioEngine {
     }
 
     pub fn extend_playlist(&mut self, paths: Vec<String>) {
+        self.track_metas.extend(paths.iter().map(|_| None));
         self.playlist.extend(paths);
     }
 
@@ -328,7 +341,9 @@ impl AudioEngine {
         if bytes_per_ms == 0 {
             return 0;
         }
-        self.pcm_submitted / bytes_per_ms
+        let pos = self.pcm_played / bytes_per_ms;
+        let dur = self.duration_ms();
+        pos.min(dur)
     }
 
     pub fn duration_ms(&self) -> u64 {
@@ -336,9 +351,9 @@ impl AudioEngine {
         if bytes_per_ms == 0 {
             return 0;
         }
-        // Use the probed bitrate (kbps) when available; before the first
-        // probe (bitrate_kbps == 0) fall back to the old ~88.2 kbps
-        // assumption (44100 * 2 bits/sec) so pre-probe behavior is unchanged.
+        if self.decode_complete {
+            return self.pcm_total_decoded / bytes_per_ms;
+        }
         let bitrate_bps = if self.bitrate_kbps > 0 {
             self.bitrate_kbps as u64 * 1000
         } else {
@@ -360,10 +375,56 @@ impl AudioEngine {
         }
     }
 
+    pub fn track_meta(&self, idx: usize) -> Option<&TrackMeta> {
+        self.track_metas.get(idx).and_then(|m| m.as_ref())
+    }
+
+    pub fn current_meta(&self) -> Option<&TrackMeta> {
+        self.track_meta(self.current_index)
+    }
+
+    pub fn set_track_meta(&mut self, idx: usize, meta: TrackMeta) {
+        if idx < self.track_metas.len() {
+            self.track_metas[idx] = Some(meta);
+        }
+    }
+
+    pub fn next_unparsed_meta(&self) -> Option<usize> {
+        self.track_metas.iter().position(|m| m.is_none())
+    }
+
+    pub fn display_title(&self, idx: usize) -> String {
+        if let Some(meta) = self.track_meta(idx) {
+            if !meta.title.is_empty() {
+                if !meta.artist.is_empty() {
+                    return format!("{} - {}", meta.artist, meta.title);
+                }
+                return meta.title.clone();
+            }
+        }
+        self.filename(idx).to_string()
+    }
+
+    pub fn filename(&self, idx: usize) -> &str {
+        if idx < self.playlist.len() {
+            let path = &self.playlist[idx];
+            if let Some(pos) = path.rfind('/') {
+                &path[pos + 1..]
+            } else {
+                path
+            }
+        } else {
+            ""
+        }
+    }
+
     pub fn play(&mut self) -> Result<()> {
         if self.state == PlaybackState::Paused {
             self.state = PlaybackState::Playing;
             return Ok(());
+        }
+        if self.state == PlaybackState::Stopped {
+            self.close_audio();
         }
         if !self.file_loaded {
             self.load_current()?;
@@ -431,6 +492,9 @@ impl AudioEngine {
         self.decode_pos = 0;
         self.pcm_s16.clear();
         self.pcm_submitted = 0;
+        self.pcm_played = 0;
+        self.pcm_total_decoded = 0;
+        self.decode_complete = false;
         self.ring_slot = 0;
         self.ring_inflight = 0;
         self.tap_metadata.fill(TapMetadata::EMPTY);
@@ -501,6 +565,12 @@ impl AudioEngine {
         self.decode_pos = 0;
         self.decoder = Decoder::new();
         self.file_loaded = true;
+
+        let meta = id3::parse(&self.mp3_data);
+        if !meta.is_empty() {
+            self.track_metas[self.current_index] = Some(meta);
+        }
+
         debug_print("cluuamp: audio session open\n");
         Ok(())
     }
@@ -534,24 +604,35 @@ impl AudioEngine {
 
         self.drain_completions();
 
-        let submission_target = submission_target(self.sample_rate, self.channels) as u32;
-        if self.ring_inflight < submission_target {
+        let mut decoded = 0usize;
+        while self.ring_inflight < RING_SLOTS as u32 && decoded < DECODE_BATCH {
+            if self.decode_pos >= self.mp3_data.len() {
+                break;
+            }
             self.decode_one_frame()?;
+            decoded += 1;
         }
 
-        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_inflight < submission_target {
+        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_inflight < RING_SLOTS as u32 {
             self.submit_period()?;
         }
 
         let at_eof = self.decode_pos >= self.mp3_data.len();
+        if at_eof {
+            self.decode_complete = true;
+        }
         if at_eof && !self.pcm_s16.is_empty() && self.ring_inflight < RING_SLOTS as u32 {
             self.submit_period()?;
         }
-        if at_eof && self.pcm_s16.is_empty() {
+        if at_eof && self.pcm_s16.is_empty() && self.ring_inflight == 0 {
             self.advance_to_next()?;
         }
 
         Ok(())
+    }
+
+    pub fn ring_saturated(&self) -> bool {
+        self.state == PlaybackState::Playing && self.ring_inflight >= RING_SLOTS as u32
     }
 
     fn drain_completions(&mut self) {
@@ -561,6 +642,7 @@ impl AudioEngine {
         };
         for (handle, result) in completed {
             self.ring_inflight = self.ring_inflight.saturating_sub(1);
+            self.pcm_played += PERIOD_BYTES as u64;
             if let Some(slot) = metadata_slot_for_handle(&self.tap_metadata, handle) {
                 let metadata = self.tap_metadata[slot];
                 self.tap_metadata[slot] = TapMetadata::EMPTY;
@@ -581,7 +663,7 @@ impl AudioEngine {
             .decoder
             .decode(&self.mp3_data[self.decode_pos..], &mut self.pcm_f32);
         if consumed == 0 && info.is_none() {
-            self.decode_pos = self.mp3_data.len();
+            self.decode_pos += 1;
             return Ok(());
         }
         self.decode_pos += consumed;
@@ -593,6 +675,7 @@ impl AudioEngine {
                 let s = (clamped * 32767.0) as i16;
                 self.pcm_s16.extend_from_slice(&s.to_le_bytes());
             }
+            self.pcm_total_decoded += (total_samples * 2) as u64;
         }
         Ok(())
     }

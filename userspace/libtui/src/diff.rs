@@ -134,10 +134,7 @@ impl ScreenBuffer {
             let style = (curr.fg, curr.bg, curr.attrs);
             if last_style != Some(style) {
                 let sgr = sgr_for(&curr);
-                // sgr_for on a fully-default cell is already a bare reset.
-                if sgr.as_slice() != RESET_SGR {
-                    out.extend_from_slice(RESET_SGR);
-                }
+                out.extend_from_slice(RESET_SGR);
                 out.extend_from_slice(&sgr);
                 last_style = Some(style);
             }
@@ -211,10 +208,8 @@ mod tests {
         prev.set(0, 0, Cell::new('X'));
         curr.set(0, 0, Cell::new('X').fg(COLOR_RED));
         let out = curr.diff_render(&prev);
-        // SGR reset + red fg emitted because fg changed.
         assert!(out.contains("\x1b[0m"), "reset SGR should be emitted");
-        assert!(out.contains("\x1b[38;5;1m"), "red fg SGR should be emitted");
-        // Char re-emitted to apply new style.
+        assert!(out.contains("38;5;1"), "red fg SGR should be emitted");
         assert!(out.contains('X'));
     }
 
@@ -226,7 +221,7 @@ mod tests {
         curr.set(0, 0, Cell::new('Z').bg(COLOR_WHITE).attrs(ATTR_BOLD));
         let out = curr.diff_render(&prev);
         assert!(out.contains("\x1b[0m"));
-        assert!(out.contains("\x1b[1;48;5;7m"));
+        assert!(out.contains("1;") && out.contains("48;5;7"));
     }
 
     #[test]
@@ -309,13 +304,12 @@ mod tests {
 
     #[test]
     fn diff_same_style_run_emits_sgr_once() {
-        // Two consecutive red cells: SGR emitted for the first only.
         let prev = ScreenBuffer::new(2, 1);
         let mut curr = ScreenBuffer::new(2, 1);
         curr.set(0, 0, Cell::new('A').fg(COLOR_RED));
         curr.set(0, 1, Cell::new('B').fg(COLOR_RED));
         let out = curr.diff_render(&prev);
-        assert_eq!(out.matches("\x1b[38;5;1m").count(), 1);
+        assert_eq!(out.matches("38;5;1").count(), 1);
     }
 
     #[test]

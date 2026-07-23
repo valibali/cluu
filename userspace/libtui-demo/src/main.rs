@@ -93,11 +93,11 @@ fn draw_title(v: &mut View) {
 fn draw_text_styles(v: &mut View) {
     v.write_str(2, 0, "Text Styles:");
     let row = 3;
-    v.write_styled(row, 2, "Normal", COLOR_DEFAULT, COLOR_DEFAULT, 0);
-    v.write_styled(row, 12, "Bold", COLOR_DEFAULT, COLOR_DEFAULT, ATTR_BOLD);
-    v.write_styled(row, 20, "Underlined", COLOR_DEFAULT, COLOR_DEFAULT, ATTR_UNDERLINE);
-    v.write_styled(row, 36, "Bold+Underline", COLOR_DEFAULT, COLOR_DEFAULT, ATTR_BOLD | ATTR_UNDERLINE);
-    v.write_styled(row, 56, "Reverse", COLOR_DEFAULT, COLOR_DEFAULT, 0);
+    v.write_styled(row, 2, "Normal", Cell::new(' ').fg(COLOR_DEFAULT).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 12, "Bold", Cell::new(' ').fg(COLOR_DEFAULT).bg(COLOR_DEFAULT).attrs(ATTR_BOLD));
+    v.write_styled(row, 20, "Underlined", Cell::new(' ').fg(COLOR_DEFAULT).bg(COLOR_DEFAULT).attrs(ATTR_UNDERLINE));
+    v.write_styled(row, 36, "Bold+Underline", Cell::new(' ').fg(COLOR_DEFAULT).bg(COLOR_DEFAULT).attrs(ATTR_BOLD | ATTR_UNDERLINE));
+    v.write_styled(row, 56, "Reverse", Cell::new(' ').fg(COLOR_DEFAULT).bg(COLOR_DEFAULT).attrs(0));
 }
 
 fn draw_colors(v: &mut View) {
@@ -113,13 +113,13 @@ fn draw_colors(v: &mut View) {
     ];
     let row = 6;
     for (i, (color, name)) in colors.iter().enumerate() {
-        v.write_styled(row, 2 + i * 10, name, *color, COLOR_DEFAULT, ATTR_BOLD);
+        v.write_styled(row, 2 + i * 10, name, Cell::new(' ').fg(*color).bg(COLOR_DEFAULT).attrs(ATTR_BOLD));
     }
 
     v.write_str(7, 0, "Colors (bg):");
     let bg_row = 8;
     for (i, (color, name)) in colors.iter().enumerate() {
-        v.write_styled(bg_row, 2 + i * 10, name, COLOR_BLACK, *color, 0);
+        v.write_styled(bg_row, 2 + i * 10, name, Cell::new(' ').fg(COLOR_BLACK).bg(*color).attrs(0));
     }
 }
 
@@ -152,23 +152,23 @@ fn draw_border_box(v: &mut View, top: usize, left: usize, width: usize, height: 
     }
     let label_y = top + height / 2;
     let label_x = left + (width.saturating_sub(label.len())) / 2;
-    v.write_styled(label_y, label_x, label, color, COLOR_DEFAULT, 0);
+    v.write_styled(label_y, label_x, label, Cell::new(' ').fg(color).bg(COLOR_DEFAULT).attrs(0));
 }
 
 fn draw_blocks(v: &mut View) {
     v.write_str(16, 0, "Block Elements:");
     let row = 17;
-    v.write_styled(row, 2, "Full █", COLOR_GREEN, COLOR_DEFAULT, 0);
-    v.write_styled(row, 12, "Dark ▓", COLOR_GREEN, COLOR_DEFAULT, 0);
-    v.write_styled(row, 22, "Med ▒", COLOR_YELLOW, COLOR_DEFAULT, 0);
-    v.write_styled(row, 32, "Light ░", COLOR_WHITE, COLOR_DEFAULT, 0);
-    v.write_styled(row, 44, "Upper ▀", COLOR_CYAN, COLOR_DEFAULT, 0);
-    v.write_styled(row, 54, "Lower ▄", COLOR_CYAN, COLOR_DEFAULT, 0);
+    v.write_styled(row, 2, "Full █", Cell::new(' ').fg(COLOR_GREEN).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 12, "Dark ▓", Cell::new(' ').fg(COLOR_GREEN).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 22, "Med ▒", Cell::new(' ').fg(COLOR_YELLOW).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 32, "Light ░", Cell::new(' ').fg(COLOR_WHITE).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 44, "Upper ▀", Cell::new(' ').fg(COLOR_CYAN).bg(COLOR_DEFAULT).attrs(0));
+    v.write_styled(row, 54, "Lower ▄", Cell::new(' ').fg(COLOR_CYAN).bg(COLOR_DEFAULT).attrs(0));
 }
 
 fn draw_progress(v: &mut View, percent: u32) {
     let label = "Progress:";
-    v.write_styled(19, 0, label, COLOR_WHITE, COLOR_DEFAULT, ATTR_BOLD);
+    v.write_styled(19, 0, label, Cell::new(' ').fg(COLOR_WHITE).bg(COLOR_DEFAULT).attrs(ATTR_BOLD));
 
     let bar_left = 12;
     let bar_width = 50;
@@ -184,7 +184,7 @@ fn draw_progress(v: &mut View, percent: u32) {
     }
 
     let pct_str = alloc::format!("{:3}%", percent);
-    v.write_styled(19, bar_left + bar_width + 2, &pct_str, COLOR_GREEN, COLOR_DEFAULT, ATTR_BOLD);
+    v.write_styled(19, bar_left + bar_width + 2, &pct_str, Cell::new(' ').fg(COLOR_GREEN).bg(COLOR_DEFAULT).attrs(ATTR_BOLD));
 }
 
 fn draw_footer(v: &mut View, key_count: u32) {
@@ -193,24 +193,7 @@ fn draw_footer(v: &mut View, key_count: u32) {
 
     let info = alloc::format!("Keys: {}  |  Ctrl-C or q to quit", key_count);
     let centered = (WIDTH.saturating_sub(info.len())) / 2;
-    v.write_styled(22, centered, &info, COLOR_YELLOW, COLOR_DEFAULT, 0);
-}
-
-trait WriteStyled {
-    fn write_styled(&mut self, row: usize, col: usize, text: &str, fg: u8, bg: u8, attrs: u8);
-}
-
-impl WriteStyled for View {
-    fn write_styled(&mut self, row: usize, col: usize, text: &str, fg: u8, bg: u8, attrs: u8) {
-        let mut c = col;
-        for ch in text.chars() {
-            if c >= self.width || row >= self.height {
-                break;
-            }
-            self.set(row, c, Cell::new(ch).fg(fg).bg(bg).attrs(attrs));
-            c += 1;
-        }
-    }
+    v.write_styled(22, centered, &info, Cell::new(' ').fg(COLOR_YELLOW).bg(COLOR_DEFAULT).attrs(0));
 }
 
 #[no_mangle]

@@ -4,8 +4,10 @@
 //! from cid/pcid, and renders a live updating display with htop-style
 //! CPU/memory gauges and fixed-width aligned columns.
 //!
-//! Output goes through POSIX `_write(1, ...)` → VFS → PTS_WRITE_LABEL →
-//! cluuterm → compositor SHM. Input is not handled (Ctrl-C via shell signal).
+//! Rendering goes through `libtui::render::Renderer` (writes to fd 1 via
+//! `libcluu::posix::_write` → VFS → PTS_WRITE_LABEL → cluuterm → compositor
+//! SHM). Diff-based output via `libtui::diff::ScreenBuffer` — only changed
+//! cells are sent each frame. Input is not handled (Ctrl-C via shell signal).
 
 #![no_std]
 #![no_main]
@@ -25,6 +27,14 @@ use libcluu::debug_print;
 use libcluu::fs::client::VfsClient;
 use libcluu::registry;
 
+use libtui::components::gauge::Gauge;
+use libtui::components::helpline::HelpLine;
+use libtui::components::treebuilder::{build_tree, FlatNode, TreeEntry};
+use libtui::diff::ScreenBuffer;
+use libtui::layout::{Drawable, Rect};
+use libtui::render::Renderer;
+use libtui::{Cell, View};
+
 const GRANT_SIZE: usize = 4096;
 
 const W_CID: usize = 7;
@@ -39,6 +49,9 @@ const MAX_NAME: usize = 40;
 
 const MIN_COLS_FOR_DUAL_GAUGE: usize = 60;
 
+// _write is kept for the extern declaration even though Renderer uses
+// libcluu::posix::_write internally; _ioctl is needed by terminal_size.
+#[allow(dead_code)]
 extern "C" {
     fn _write(fd: i32, buf: *const u8, n: usize) -> isize;
     fn usleep(usec: u32) -> i32;
@@ -62,16 +75,6 @@ fn terminal_size() -> (usize, usize) {
         (ws.ws_col as usize, ws.ws_row.max(1) as usize)
     } else {
         (80, 24)
-    }
-}
-
-fn write_stdout(bytes: &[u8]) {
-    const MAX_CHUNK: usize = 900;
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let end = (pos + MAX_CHUNK).min(bytes.len());
-        let _ = unsafe { _write(1, bytes[pos..end].as_ptr(), end - pos) };
-        pos = end;
     }
 }
 
@@ -120,22 +123,20 @@ fn run() -> libcluu::Result<()> {
     let mut prev_frame_tsc: u64 = 0;
     let mut first_frame = true;
 
-    let mut prev_cols: usize = 0;
-    let mut prev_rows: usize = 0;
-
-    write_stdout(b"\x1b[2J\x1b[H\x1b[?25l");
+    let mut prev_buffer = ScreenBuffer::new(0, 0);
+    let renderer = Renderer::new();
+    renderer.enter_alt_screen();
+    renderer.clear_screen();
+    renderer.write(b"\x1b[?25l");
 
     loop {
         let now_tsc = libcluu::syscall::clock_now(clock_token).unwrap_or(0);
 
-        let (raw_cols, raw_rows) = terminal_size();
-        let cols = raw_cols;
-        let resized = raw_cols != prev_cols || raw_rows != prev_rows;
-        if resized && prev_cols != 0 {
-            write_stdout(b"\x1b[2J");
+        let (cols, rows) = terminal_size();
+        if prev_buffer.width() != cols || prev_buffer.height() != rows {
+            renderer.clear_screen();
+            prev_buffer = ScreenBuffer::new(0, 0);
         }
-        prev_cols = raw_cols;
-        prev_rows = raw_rows;
 
         let fixed_width = W_CID + 1 + W_PCID + 1 + W_PID + 1 + W_HEAP + 1 + W_MEM + 1 + W_CPU + 1 + W_ST;
         let w_name = if cols > fixed_width + MIN_NAME + 2 {
@@ -166,33 +167,19 @@ fn run() -> libcluu::Result<()> {
         }
 
         // Build container hierarchy tree from cid/pcid.
-        let mut children_map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-        let mut cid_set: BTreeMap<u64, usize> = BTreeMap::new();
-        for (idx, rec) in records.iter().enumerate() {
-            if rec.cid != 0 {
-                cid_set.insert(rec.cid, idx);
-            }
-            if rec.pcid != 0 {
-                children_map
-                    .entry(rec.pcid)
-                    .or_insert_with(Vec::new)
-                    .push(idx);
-            }
-        }
+        let flat_nodes: Vec<FlatNode> = records
+            .iter()
+            .map(|rec| FlatNode {
+                id: rec.cid,
+                parent_id: rec.pcid,
+                label: rec.name.clone(),
+            })
+            .collect();
+        let ordered: Vec<TreeEntry> = build_tree(&flat_nodes);
 
-        let mut roots: Vec<usize> = Vec::new();
+        let mut cid_to_idx: BTreeMap<u64, usize> = BTreeMap::new();
         for (idx, rec) in records.iter().enumerate() {
-            if rec.pcid == 0 || !cid_set.contains_key(&rec.pcid) {
-                roots.push(idx);
-            }
-        }
-        roots.sort_unstable_by_key(|&i| records[i].cid);
-
-        let mut ordered: Vec<DfsEntry> = Vec::new();
-        let mut visited: BTreeMap<usize, ()> = BTreeMap::new();
-        for (i, &root_idx) in roots.iter().enumerate() {
-            let is_last = i == roots.len() - 1;
-            dfs(root_idx, "", is_last, true, &records, &children_map, &mut ordered, &mut visited);
+            cid_to_idx.insert(rec.cid, idx);
         }
 
         // System CPU%: sum of per-process tick deltas / elapsed sched ticks.
@@ -214,25 +201,16 @@ fn run() -> libcluu::Result<()> {
             0
         };
 
-        let mut frame = String::new();
-        frame.push_str("\x1b[H");
+        let mut view = View::new(cols, rows);
 
-        // Title bar.
-        frame.push_str(&format!(
-            "\x1b[97;44m CLUU top   Processes: {}",
-            records.len()
-        ));
-        let hdr_content_len = 23 + digit_count(records.len());
-        let pad_len = cols.saturating_sub(hdr_content_len + 1);
-        for _ in 0..pad_len {
-            frame.push(' ');
-        }
-        frame.push_str("\x1b[K\x1b[0m\n");
+        // Title bar: white on blue.
+        view.fill_rect(0, 0, cols, 1, Cell::new(' ').fg(7).bg(4));
+        let title = format!(" CLUU top   Processes: {}", records.len());
+        write_styled(&mut view, 0, 0, &title, 7, 4);
 
-        // htop-style CPU + memory gauges (█/░ block elements via the u32
-        // codepoint pipeline). Bar widths scale to terminal width.
-        let cpu_color = gauge_color(sys_cpu_pct);
-        let mem_color = gauge_color(mem_pct);
+        // htop-style CPU + memory gauges via libtui::Gauge.
+        let cpu_color = gauge_fg(sys_cpu_pct);
+        let mem_color = gauge_fg(mem_pct);
         let cpu_pct_str = format!("{}%", sys_cpu_pct);
         let mem_str = format!("{}/{}", format_mem_kb(mem_used_kb), format_mem_kb(mem_total_kb));
 
@@ -240,50 +218,65 @@ fn run() -> libcluu::Result<()> {
             let overhead = 5 + 2 + 4 + 2 + 5 + 2 + mem_str.len();
             let remaining = cols.saturating_sub(overhead + 1);
             let bar_w = remaining / 2;
-            let cpu_bar = render_bar(sys_cpu_pct, bar_w);
-            let mem_bar = render_bar(mem_pct, bar_w);
-            frame.push_str(&format!(
-                "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {:<4}  \x1b[97mMem\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
-                cpu_color, cpu_bar, cpu_pct_str,
-                mem_color, mem_bar, mem_str,
-            ));
+
+            write_styled(&mut view, 1, 0, "CPU ", 7, 0);
+            view.set(1, 4, Cell::new('[').fg(cpu_color));
+            Gauge::new(100).value(sys_cpu_pct as u64).fg(cpu_color).bg(cpu_color)
+                .draw(Rect::new(5, 1, bar_w, 1), &mut view);
+            let after_cpu = 5 + bar_w;
+            view.set(1, after_cpu, Cell::new(']').fg(cpu_color));
+            write_styled(&mut view, 1, after_cpu + 1, &format!(" {:<4}  ", cpu_pct_str), 0, 0);
+
+            let mem_label_x = after_cpu + 7;
+            write_styled(&mut view, 1, mem_label_x, "Mem ", 7, 0);
+            view.set(1, mem_label_x + 4, Cell::new('[').fg(mem_color));
+            Gauge::new(mem_total_kb.max(1)).value(mem_used_kb).fg(mem_color).bg(mem_color)
+                .draw(Rect::new(mem_label_x + 5, 1, bar_w, 1), &mut view);
+            let after_mem = mem_label_x + 5 + bar_w;
+            view.set(1, after_mem, Cell::new(']').fg(mem_color));
+            write_styled(&mut view, 1, after_mem + 1, &format!(" {}", mem_str), 0, 0);
         } else {
             let overhead = 5 + 2 + 4;
             let bar_w = cols.saturating_sub(overhead + 1);
-            let cpu_bar = render_bar(sys_cpu_pct, bar_w);
-            frame.push_str(&format!(
-                "\x1b[97mCPU\x1b[0m {}[{}]\x1b[0m {}\x1b[K\n",
-                cpu_color, cpu_bar, cpu_pct_str,
-            ));
+
+            write_styled(&mut view, 1, 0, "CPU ", 7, 0);
+            view.set(1, 4, Cell::new('[').fg(cpu_color));
+            Gauge::new(100).value(sys_cpu_pct as u64).fg(cpu_color).bg(cpu_color)
+                .draw(Rect::new(5, 1, bar_w, 1), &mut view);
+            let after_cpu = 5 + bar_w;
+            view.set(1, after_cpu, Cell::new(']').fg(cpu_color));
+            write_styled(&mut view, 1, after_cpu + 1, &format!(" {:<4}", cpu_pct_str), 0, 0);
         }
 
         let name_hdr = fit_chars("NAME", w_name);
-        frame.push_str(&format!(
-            "\x1b[97m{:>W_CID$} {:>W_PCID$} {} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}\x1b[K\x1b[0m\n",
+        let header = format!(
+            "{:>W_CID$} {:>W_PCID$} {} {:>W_PID$} {:>W_HEAP$} {:>W_MEM$} {:>W_CPU$} {:<W_ST$}",
             "CID", "PCID", name_hdr, "PID", "HEAP", "MEM", "CPU%", "ST",
-        ));
-        frame.push_str("\x1b[0m");
-        for _ in 0..row_width {
-            frame.push('-');
-        }
-        frame.push_str("\x1b[K\n");
+        );
+        write_styled(&mut view, 2, 0, &header, 7, 0);
+
+        let sep_len = row_width.min(cols);
+        let sep: String = core::iter::repeat('-').take(sep_len).collect();
+        write_styled(&mut view, 3, 0, &sep, 0, 0);
 
         let fixed_rows = 6;
-        let max_data_rows = raw_rows.saturating_sub(fixed_rows);
-        for (i, entry) in ordered.iter().enumerate() {
+        let max_data_rows = rows.saturating_sub(fixed_rows);
+        for (i, tree_entry) in ordered.iter().enumerate() {
             if i >= max_data_rows { break; }
-            let rec = &records[entry.idx];
+            let Some(&rec_idx) = cid_to_idx.get(&tree_entry.id) else { continue; };
+            let rec = &records[rec_idx];
+            let row = 4 + i;
 
-            let color = if rec.state == "R" {
-                "\x1b[36m"
+            let fg = if rec.state == "R" {
+                6u8
             } else if rec.name.starts_with("su:") {
-                "\x1b[32m"
+                2
             } else if rec.name.starts_with("sudo:") {
-                "\x1b[33m"
+                3
             } else if rec.state == "Z" {
-                "\x1b[91m"
+                9
             } else {
-                "\x1b[0m"
+                0
             };
 
             let cid_str = format!("{:>1$}", rec.cid, W_CID);
@@ -293,7 +286,7 @@ fn run() -> libcluu::Result<()> {
                 format!("{:>1$}", rec.pcid, W_PCID)
             };
 
-            let full_name = format!("{}{}", entry.prefix, rec.name);
+            let full_name = format!("{}{}", tree_entry.connector, rec.name);
             let name_str = fit_chars(&full_name, w_name);
 
             let pid_str = format!("{:>1$}", rec.pid, W_PID);
@@ -331,22 +324,36 @@ fn run() -> libcluu::Result<()> {
             };
 
             let line = format!(
-                "{}{} {} {} {} {} {} {} {}\x1b[K\x1b[0m\n",
-                color, cid_str, pcid_str, name_str, pid_str, heap_col, mem_col, cpu_col, st_str
+                "{} {} {} {} {} {} {} {}",
+                cid_str, pcid_str, name_str, pid_str, heap_col, mem_col, cpu_col, st_str
             );
-            frame.push_str(&line);
+            write_styled(&mut view, row, 0, &line, fg, 0);
         }
 
-        frame.push_str(&format!(
-            "\x1b[90m H9: {}  H10: {}\x1b[K\x1b[0m\n",
-            h9, h10,
-        ));
-        frame.push_str(
-            "\x1b[90m Ctrl-C to quit                                   1s refresh \x1b[K\x1b[0m\n",
-        );
-        frame.push_str("\x1b[J");
+        let data_end = 4 + ordered.iter().count().min(max_data_rows);
 
-        write_stdout(frame.as_bytes());
+        let h9_line = format!(" H9: {}  H10: {}", h9, h10);
+        write_styled(&mut view, data_end, 0, &h9_line, 8, 0);
+
+        let footer_row = data_end + 1;
+        let help = HelpLine::new()
+            .entry("Ctrl-C", "quit")
+            .entry("1s", "refresh")
+            .key_fg(8)
+            .desc_fg(8);
+        help.draw(Rect::new(0, footer_row, cols, 1), &mut view);
+
+        let mut new_buffer = ScreenBuffer::new(cols, rows);
+        for (i, cell) in view.cells.iter().enumerate() {
+            let r = if cols > 0 { i / cols } else { 0 };
+            let c = if cols > 0 { i % cols } else { 0 };
+            new_buffer.set(r, c, *cell);
+        }
+        let diff = new_buffer.diff_render(&prev_buffer);
+        if !diff.is_empty() {
+            renderer.write(diff.as_bytes());
+        }
+        prev_buffer = new_buffer;
 
         prev_ticks.clear();
         for rec in &records {
@@ -359,7 +366,9 @@ fn run() -> libcluu::Result<()> {
     }
 
     let _ = libcluu::vspace::VSPACE.lock().free(grant_base, GRANT_SIZE);
-    write_stdout(b"\x1b[2J\x1b[H\x1b[?25h");
+    renderer.write(b"\x1b[?25h");
+    renderer.clear_screen();
+    renderer.exit_alt_screen();
     Ok(())
 }
 
@@ -460,55 +469,7 @@ fn parse_stat_line(text: &str, tid: &str) -> Option<ProcRecord> {
     })
 }
 
-struct DfsEntry {
-    idx: usize,
-    prefix: String,
-}
-fn dfs(
-    idx: usize,
-    prefix: &str,
-    is_last: bool,
-    is_root: bool,
-    records: &[ProcRecord],
-    children_map: &BTreeMap<u64, Vec<usize>>,
-    ordered: &mut Vec<DfsEntry>,
-    visited: &mut BTreeMap<usize, ()>,
-) {
-    if visited.contains_key(&idx) {
-        return;
-    }
-    visited.insert(idx, ());
-
-    let connector = if is_root {
-        String::new()
-    } else if is_last {
-        format!("{}\u{2514}\u{2500}\u{2500} ", prefix)
-    } else {
-        format!("{}\u{251C}\u{2500}\u{2500} ", prefix)
-    };
-    ordered.push(DfsEntry {
-        idx,
-        prefix: connector,
-    });
-
-    let cid = records[idx].cid;
-    if let Some(kids) = children_map.get(&cid) {
-        let mut sorted = kids.clone();
-        sorted.sort_unstable_by_key(|&i| records[i].cid);
-        for (i, &kid) in sorted.iter().enumerate() {
-            let child_prefix = if is_root {
-                String::new()
-            } else if is_last {
-                format!("{}    ", prefix)
-            } else {
-                format!("{}\u{2502}   ", prefix)
-            };
-            let kid_is_last = i == sorted.len() - 1;
-            dfs(kid, &child_prefix, kid_is_last, false, records, children_map, ordered, visited);
-        }
-    }
-}
-
+#[allow(dead_code)]
 fn digit_count(n: usize) -> usize {
     if n == 0 {
         return 1;
@@ -621,27 +582,20 @@ fn format_mem_kb(kb: u64) -> String {
     }
 }
 
-fn render_bar(pct: u32, width: usize) -> String {
-    let filled = ((pct as usize) * width / 100).min(width);
-    let empty = width - filled;
-    let mut bar = String::with_capacity(width);
-    for _ in 0..filled {
-        bar.push('\u{2588}');
-    }
-    for _ in 0..empty {
-        bar.push('\u{2591}');
-    }
-    bar
+fn gauge_fg(pct: u32) -> u8 {
+    if pct < 50 { 2 }
+    else if pct < 80 { 3 }
+    else { 1 }
 }
 
-/// Green under 50%, yellow under 80%, red at/above 80%.
-fn gauge_color(pct: u32) -> &'static str {
-    if pct < 50 {
-        "\x1b[32m"
-    } else if pct < 80 {
-        "\x1b[33m"
-    } else {
-        "\x1b[31m"
+fn write_styled(view: &mut View, row: usize, col: usize, s: &str, fg: u8, bg: u8) {
+    let mut c = col;
+    for ch in s.chars() {
+        if c >= view.width || row >= view.height {
+            break;
+        }
+        view.set(row, c, Cell::new(ch).fg(fg).bg(bg));
+        c += 1;
     }
 }
 

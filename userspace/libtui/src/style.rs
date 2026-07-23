@@ -11,11 +11,16 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use crate::buffer::{Cell, ATTR_NONE, ATTR_BOLD, ATTR_UNDERLINE, ATTR_REVERSE};
+use crate::layout::{Rect, Padding, Margin, Position, VPosition};
+
 // =========================================================================
 // Style
 // =========================================================================
 
 /// Styling descriptor: 256-color fg/bg plus bold/underline/reverse attrs.
+/// Extended with layout fields (width/height/padding/margin/alignment) for
+/// lipgloss-style rendering into a View.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style {
     pub fg: Option<u8>,
@@ -24,6 +29,12 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub reverse: bool,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub padding: Padding,
+    pub margin: Margin,
+    pub halign: Position,
+    pub valign: VPosition,
 }
 
 impl Style {
@@ -36,6 +47,13 @@ impl Style {
     pub fn italic(mut self) -> Self { self.italic = true; self }
     pub fn underline(mut self) -> Self { self.underline = true; self }
     pub fn reverse(mut self) -> Self { self.reverse = true; self }
+
+    pub fn width(mut self, w: usize) -> Self { self.width = Some(w); self }
+    pub fn height(mut self, h: usize) -> Self { self.height = Some(h); self }
+    pub fn padding(mut self, p: Padding) -> Self { self.padding = p; self }
+    pub fn margin(mut self, m: Margin) -> Self { self.margin = m; self }
+    pub fn align(mut self, h: Position) -> Self { self.halign = h; self }
+    pub fn valign(mut self, v: VPosition) -> Self { self.valign = v; self }
 
     pub fn to_sgr(&self) -> String {
         let mut s = String::from("\x1b[0");
@@ -52,6 +70,59 @@ impl Style {
     /// Wrap content with SGR prefix + reset suffix.
     pub fn apply(&self, content: &str) -> String {
         format!("{}{}\x1b[0m", self.to_sgr(), content)
+    }
+
+    /// Render styled text into a `View` at a `Rect`. Applies padding,
+    /// margin, alignment, fg/bg colors, and attributes. Multi-line content
+    /// splits on `\n`; each line is aligned independently within the inner area.
+    pub fn render(&self, content: &str, area: Rect, buf: &mut crate::View) {
+        let outer = area.outer(self.margin);
+        let inner = outer.inner(self.padding);
+
+        let clip_w = self.width.map(|w| w.min(inner.width)).unwrap_or(inner.width);
+        let clip_h = self.height.map(|h| h.min(inner.height)).unwrap_or(inner.height);
+
+        if clip_w == 0 || clip_h == 0 {
+            return;
+        }
+
+        if let Some(bg) = self.bg {
+            buf.fill_rect(inner.y, inner.x, clip_w, clip_h, Cell::new(' ').bg(bg));
+        }
+
+        let mut attrs = ATTR_NONE;
+        if self.bold { attrs |= ATTR_BOLD; }
+        if self.underline { attrs |= ATTR_UNDERLINE; }
+        if self.reverse { attrs |= ATTR_REVERSE; }
+
+        let lines: Vec<&str> = content.split('\n').collect();
+        for (row_i, line) in lines.iter().enumerate() {
+            if row_i >= clip_h {
+                break;
+            }
+            let chars: Vec<char> = line.chars().collect();
+            let content_w = chars.len().min(clip_w);
+            let x_offset = match self.halign {
+                Position::Left => 0,
+                Position::Center => (clip_w - content_w) / 2,
+                Position::Right => clip_w - content_w,
+            };
+            for (j, ch) in chars.iter().enumerate() {
+                if j >= clip_w {
+                    break;
+                }
+                let col = inner.x + x_offset + j;
+                let row = inner.y + row_i;
+                let mut cell = Cell::new(*ch).attrs(attrs);
+                if let Some(fg) = self.fg {
+                    cell = cell.fg(fg);
+                }
+                if let Some(bg) = self.bg {
+                    cell = cell.bg(bg);
+                }
+                buf.set(row, col, cell);
+            }
+        }
     }
 }
 
@@ -83,6 +154,7 @@ fn border_chars(b: Border) -> BorderChars {
 /// Wrap multi-line content with a styled border. Border chars receive `style`;
 /// content is left unstyled (caller styles it separately). `Border::None`
 /// returns content unchanged.
+#[deprecated(note = "use layout::Block::draw instead")]
 pub fn bordered(content: &str, border: Border, style: &Style) -> String {
     if border == Border::None {
         return content.to_string();
@@ -146,6 +218,7 @@ fn distribute(d: usize, a: Alignment) -> (usize, usize) {
 /// are padded with blank lines per `alignment` (Left=top, Center=middle,
 /// Right=bottom). Each block column is padded to its own widest line.
 /// Lines are concatenated horizontally with no separator.
+#[deprecated(note = "use layout::Rect::cols instead")]
 pub fn join_horizontal(blocks: &[&str], alignment: Alignment) -> String {
     if blocks.is_empty() { return String::new(); }
     let split: Vec<Vec<&str>> = blocks.iter().map(|b| b.split('\n').collect()).collect();
@@ -172,6 +245,7 @@ pub fn join_horizontal(blocks: &[&str], alignment: Alignment) -> String {
 /// Stack blocks top-to-bottom. Each block padded to the widest block's width
 /// per `alignment` (Left/Center/Right horizontal positioning). Blocks joined
 /// with `\n`.
+#[deprecated(note = "use layout::Rect::rows instead")]
 pub fn join_vertical(blocks: &[&str], alignment: Alignment) -> String {
     if blocks.is_empty() { return String::new(); }
     let split: Vec<Vec<&str>> = blocks.iter().map(|b| b.split('\n').collect()).collect();
@@ -194,6 +268,7 @@ pub fn join_vertical(blocks: &[&str], alignment: Alignment) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
     use super::*;
 
     #[test]

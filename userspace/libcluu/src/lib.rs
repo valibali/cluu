@@ -63,6 +63,8 @@ pub mod window_shm;
 
 pub mod session;
 pub mod spawn;
+#[cfg(feature = "posix")]
+pub mod thread;
 
 // POSIX syscall stubs (feature-gated for newlib compatibility)
 #[cfg(feature = "posix")]

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use libcluu::ansi::{Attr, EraseMode, Event, Parser};
 use libcluu::ipc::{
     self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_CONFIGURE_LABEL,
-    COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL,
+    COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL, COMP_WIN_RESIZE_LABEL,
 };
 use libcluu::ipc::{COMP_CLOSE_REQUEST_LABEL, PROCMGR_PG_SIGNAL_LABEL};
 use libcluu::registry::RegistryEvent;
@@ -1289,6 +1289,12 @@ impl Cluuterm {
                         Err(_) => continue,
                     };
                     self.pts.handle_pts_set_winsize(req, &msg);
+                    let resize_msg = Message::new(
+                        COMP_WIN_RESIZE_LABEL,
+                        [self.window_id as usize, req.cols as usize, req.rows as usize, 0, 0, 0],
+                        3,
+                    );
+                    let _ = ipc::send(self.comp_ep, &resize_msg, IpcFlags::empty());
                 }
 
                 // ── PTS_CLOSED (110): VFS notifies that all fds closed ──

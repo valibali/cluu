@@ -115,6 +115,12 @@ impl Default for TextInput {
     }
 }
 
+impl crate::layout::Drawable for TextInput {
+    fn draw(&self, area: crate::layout::Rect, buf: &mut View) {
+        self.render(area.y, area.x, buf);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

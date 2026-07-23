@@ -1232,6 +1232,7 @@ dependencies = [
 name = "cluu-top"
 version = "0.1.0"
 dependencies = [
+ "cluu-libtui",
  "libcluu",
 ]
 

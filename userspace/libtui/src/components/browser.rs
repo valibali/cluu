@@ -97,14 +97,23 @@ pub enum BrowserAction {
 pub struct BrowserRenderOptions {
     framed: bool,
     background: u8,
+    show_header: bool,
 }
 
 impl BrowserRenderOptions {
-    /// Borderless modal with a uniform background palette index.
     pub const fn borderless(background: u8) -> Self {
         Self {
             framed: false,
             background,
+            show_header: true,
+        }
+    }
+
+    pub const fn borderless_no_header(background: u8) -> Self {
+        Self {
+            framed: false,
+            background,
+            show_header: false,
         }
     }
 
@@ -112,6 +121,7 @@ impl BrowserRenderOptions {
         Self {
             framed: true,
             background: COLOR_DEFAULT,
+            show_header: true,
         }
     }
 }
@@ -171,6 +181,10 @@ impl FileBrowser {
     /// Current working directory path.
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    pub fn entries(&self) -> &[DirEntry] {
+        &self.entries
     }
 
     /// Set the cwd (after caller fulfilled an `EnterDir` request).
@@ -350,7 +364,10 @@ impl FileBrowser {
         };
         match entry.kind {
             EntryKind::Directory => {
-                if entry.name == ".." {
+                if entry.name == "./" {
+                    return BrowserAction::EnterDir(self.cwd.clone());
+                }
+                if entry.name == "../" || entry.name == ".." {
                     let parent = parent_dir(&self.cwd);
                     if parent != self.cwd {
                         return BrowserAction::EnterDir(parent);
@@ -416,7 +433,7 @@ impl FileBrowser {
         options: BrowserRenderOptions,
     ) {
         if !options.framed {
-            self.draw_borderless(row, col, width, height, view, options.background);
+            self.draw_borderless(row, col, width, height, view, options);
             return;
         }
         if width < 4 || height < 4 {
@@ -442,8 +459,9 @@ impl FileBrowser {
         width: usize,
         height: usize,
         view: &mut View,
-        background: u8,
+        options: BrowserRenderOptions,
     ) {
+        let background = options.background;
         if width == 0 || height < 2 {
             return;
         }
@@ -454,32 +472,38 @@ impl FileBrowser {
                 view.set(r, c, Cell::new(' ').bg(background));
             }
         }
-        for (offset, ch) in self.title.chars().enumerate() {
-            if col + offset >= end_col {
-                break;
+        if options.show_header {
+            for (offset, ch) in self.title.chars().enumerate() {
+                if col + offset >= end_col {
+                    break;
+                }
+                view.set(
+                    row,
+                    col + offset,
+                    Cell::new(ch)
+                        .fg(COLOR_YELLOW)
+                        .bg(background)
+                        .attrs(ATTR_BOLD),
+                );
             }
-            view.set(
-                row,
-                col + offset,
-                Cell::new(ch)
-                    .fg(COLOR_YELLOW)
-                    .bg(background)
-                    .attrs(ATTR_BOLD),
-            );
-        }
-        for (offset, ch) in self.cwd.chars().enumerate() {
-            if col + offset >= end_col {
-                break;
+            for (offset, ch) in self.cwd.chars().enumerate() {
+                if col + offset >= end_col {
+                    break;
+                }
+                view.set(
+                    row + 1,
+                    col + offset,
+                    Cell::new(ch).fg(COLOR_CYAN).bg(background),
+                );
             }
-            view.set(
-                row + 1,
-                col + offset,
-                Cell::new(ch).fg(COLOR_CYAN).bg(background),
-            );
         }
 
-        let list_row = row + 2;
-        let list_height = height.saturating_sub(2);
+        let list_row = if options.show_header { row + 2 } else { row };
+        let list_height = if options.show_header {
+            height.saturating_sub(2)
+        } else {
+            height
+        };
         let has_overflow = self.filtered.len() > list_height;
         let entry_width = width.saturating_sub(usize::from(has_overflow));
         let mut start = self.viewport_start.get();
@@ -500,30 +524,26 @@ impl FileBrowser {
             let entry_idx = self.filtered[index];
             let entry = &self.entries[entry_idx];
             let selected = index == self.selected;
+            let cursor_bg = if selected { COLOR_YELLOW } else { background };
+            let cursor_fg = if selected { 0 } else { COLOR_DEFAULT };
             let mut entry_col = col;
-            if selected && entry_col < col + entry_width {
-                view.set(
-                    display_row,
-                    entry_col,
-                    Cell::new('>').fg(COLOR_YELLOW).bg(background),
-                );
-                entry_col += 1;
-            } else if entry_col < col + entry_width {
-                entry_col += 1;
+
+            if selected {
+                for fill_col in col..(col + entry_width).min(end_col) {
+                    view.set(display_row, fill_col, Cell::new(' ').bg(cursor_bg));
+                }
             }
+
             let icon = match entry.kind {
                 EntryKind::Directory => '/',
                 EntryKind::File => ' ',
             };
             if entry_col < col + entry_width && entry_col < end_col {
-                let fg = match entry.kind {
-                    EntryKind::Directory => COLOR_CYAN,
-                    EntryKind::File => COLOR_DEFAULT,
-                };
+                let fg = if selected { cursor_fg } else if entry.kind == EntryKind::Directory { COLOR_CYAN } else { COLOR_DEFAULT };
                 view.set(
                     display_row,
                     entry_col,
-                    Cell::new(icon).fg(fg).bg(background),
+                    Cell::new(icon).fg(fg).bg(cursor_bg),
                 );
                 entry_col += 1;
             }
@@ -531,11 +551,8 @@ impl FileBrowser {
                 if entry_col >= col + entry_width || entry_col >= end_col {
                     break;
                 }
-                let fg = match entry.kind {
-                    EntryKind::Directory => COLOR_CYAN,
-                    EntryKind::File => COLOR_DEFAULT,
-                };
-                view.set(display_row, entry_col, Cell::new(ch).fg(fg).bg(background));
+                let fg = if selected { cursor_fg } else if entry.kind == EntryKind::Directory { COLOR_CYAN } else { COLOR_DEFAULT };
+                view.set(display_row, entry_col, Cell::new(ch).fg(fg).bg(cursor_bg));
                 entry_col += 1;
             }
         }
@@ -749,7 +766,10 @@ impl FileBrowser {
         self.filtered = (0..self.entries.len())
             .filter(|&i| {
                 let e = &self.entries[i];
-                if !self.show_hidden && e.name.starts_with('.') && e.name != ".." {
+                if !self.show_hidden && e.name.starts_with('.')
+                    && e.name != ".." && e.name != "../"
+                    && e.name != "./" && e.name != "."
+                {
                     return false;
                 }
                 match self.mode {
@@ -764,6 +784,12 @@ impl FileBrowser {
             })
             .collect();
         self.selected = 0;
+    }
+}
+
+impl crate::layout::Drawable for FileBrowser {
+    fn draw(&self, area: crate::layout::Rect, buf: &mut View) {
+        self.render(area.y, area.x, area.width, area.height, buf);
     }
 }
 
@@ -1137,8 +1163,8 @@ mod tests {
         b.handle_key(KeyEvent::Arrow(Direction::Down));
         let mut v = View::new(20, 6);
         b.render_with_options(0, 0, 20, 6, &mut v, BrowserRenderOptions::borderless(8));
-        assert_eq!(v.get(3, 0).unwrap().ch, '>');
-        assert_eq!(v.get(3, 0).unwrap().fg, COLOR_YELLOW);
+        let cell = v.get(3, 0).unwrap();
+        assert_eq!(cell.bg, COLOR_YELLOW);
     }
 
     #[test]
@@ -1151,7 +1177,7 @@ mod tests {
         ]);
         let mut v = View::new(20, 5);
         b.render_with_options(0, 0, 20, 5, &mut v, BrowserRenderOptions::borderless(8));
-        assert_eq!(v.get(4, 2).unwrap().ch, 'l');
+        assert_eq!(v.get(4, 1).unwrap().ch, 'l');
         assert_ne!(v.get(2, 19).unwrap().ch, '│');
     }
 
@@ -1168,7 +1194,7 @@ mod tests {
         }
         let mut v = View::new(20, 5);
         b.render_with_options(0, 0, 20, 5, &mut v, BrowserRenderOptions::borderless(8));
-        assert_eq!(v.get(2, 2).unwrap().ch, '2');
+        assert_eq!(v.get(2, 1).unwrap().ch, '2');
         assert_eq!(v.get(2, 19).unwrap().ch, '│');
     }
 

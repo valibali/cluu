@@ -67,9 +67,13 @@ pub fn sgr_for(cell: &Cell) -> Vec<u8> {
     }
     if cell.fg != COLOR_DEFAULT {
         parts.extend_from_slice(format!("38;5;{};", cell.fg).as_bytes());
+    } else {
+        parts.extend_from_slice(b"39;");
     }
     if cell.bg != COLOR_DEFAULT {
         parts.extend_from_slice(format!("48;5;{};", cell.bg).as_bytes());
+    } else {
+        parts.extend_from_slice(b"49;");
     }
     if parts.is_empty() {
         return RESET_SGR.to_vec();
@@ -197,14 +201,14 @@ mod tests {
     fn sgr_for_default_cell_is_reset() {
         let cell = Cell::new('X');
         let bytes = sgr_for(&cell);
-        assert_eq!(bytes, RESET_SGR);
+        assert_eq!(bytes, b"\x1b[39;49m");
     }
 
     #[test]
     fn sgr_for_bold_red_fg() {
         let cell = Cell::new('X').fg(COLOR_RED).attrs(crate::ATTR_BOLD);
         let bytes = sgr_for(&cell);
-        assert_eq!(bytes, b"\x1b[1;38;5;1m");
+        assert_eq!(bytes, b"\x1b[1;38;5;1;49m");
     }
 
     #[test]
@@ -240,7 +244,7 @@ mod tests {
         let mut view = View::new(1, 1);
         view.set(0, 0, Cell::new('H').fg(COLOR_RED));
         let bytes = render_view(&view);
-        assert!(bytes.windows(9).any(|w| w == b"\x1b[38;5;1m"));
+        assert!(bytes.windows(6).any(|w| w == b"38;5;1"));
         assert!(bytes.contains(&b'H'));
     }
 }

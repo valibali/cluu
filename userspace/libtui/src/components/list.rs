@@ -137,10 +137,115 @@ impl<T: Clone> List<T> {
     }
 }
 
+impl<T: Clone + alloc::string::ToString> crate::layout::Drawable for List<T> {
+    fn draw(&self, area: crate::layout::Rect, buf: &mut View) {
+        self.render(area.y, area.x, area.width, buf);
+    }
+}
+
 /// ASCII lowercase conversion — no_std compatible.
 fn ascii_lower(s: &str) -> String {
     s.chars().map(|c| c.to_ascii_lowercase()).collect()
 }
+
+// =========================================================================
+// ISP traits — separated data, rendering, and list (bubbletea-inspired)
+// =========================================================================
+
+pub trait Item {
+    fn filter_value(&self) -> &str;
+}
+
+pub trait ItemDelegate {
+    type Item: Item;
+    fn render(&self, item: &Self::Item, selected: bool, area: crate::layout::Rect, buf: &mut View);
+    fn height(&self) -> usize { 1 }
+    fn spacing(&self) -> usize { 0 }
+}
+
+pub struct DelegateList<D: ItemDelegate> {
+    items: Vec<D::Item>,
+    selected: usize,
+    offset: core::cell::Cell<usize>,
+    delegate: D,
+}
+
+impl<D: ItemDelegate> DelegateList<D> {
+    pub fn new(items: Vec<D::Item>, delegate: D) -> Self {
+        DelegateList { items, selected: 0, offset: core::cell::Cell::new(0), delegate }
+    }
+
+    pub fn set_items(&mut self, items: Vec<D::Item>) {
+        self.items = items;
+        self.selected = 0;
+        self.offset.set(0);
+    }
+
+    pub fn selected(&self) -> Option<&D::Item> {
+        self.items.get(self.selected)
+    }
+
+    pub fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn next(&mut self) {
+        if self.selected + 1 < self.items.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn prev(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn page_down(&mut self, page_size: usize) {
+        self.selected = (self.selected + page_size).min(self.items.len().saturating_sub(1));
+    }
+
+    pub fn page_up(&mut self, page_size: usize) {
+        self.selected = self.selected.saturating_sub(page_size);
+    }
+}
+
+impl<D: ItemDelegate> crate::layout::Drawable for DelegateList<D> {
+    fn draw(&self, area: crate::layout::Rect, buf: &mut View) {
+        let item_h = self.delegate.height();
+        let spacing = self.delegate.spacing();
+        let stride = item_h + spacing;
+        if stride == 0 {
+            return;
+        }
+
+        let visible_count = area.height / stride;
+        if visible_count == 0 {
+            return;
+        }
+
+        if self.selected < self.offset.get() {
+            self.offset.set(self.selected);
+        } else if self.selected >= self.offset.get() + visible_count {
+            self.offset.set(self.selected + 1 - visible_count);
+        }
+
+        let end = (self.offset.get() + visible_count).min(self.items.len());
+        for i in self.offset.get()..end {
+            let display_row = area.y + (i - self.offset.get()) * stride;
+            let item_area = crate::layout::Rect::new(area.x, display_row, area.width, item_h);
+            let selected = i == self.selected;
+            self.delegate.render(&self.items[i], selected, item_area, buf);
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

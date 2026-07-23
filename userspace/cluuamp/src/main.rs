@@ -10,49 +10,51 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use libcluu::boot::stdout;
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use libcluu::boot::{process_info, stdout, TOKEN_SPACE};
 use libcluu::fs::client::VfsClient;
 use libcluu::posix::tty::{enter_raw, restore};
 use libcluu::registry;
+use libcluu::syscall::space_map_range;
+use libcluu::thread::{join, sleep_ms, spawn, Shared};
 use libcluu::{debug_print, Result};
 
 use libtui::diff::ScreenBuffer;
 use libtui::input::{decode, StdinReader};
 use libtui::render::{Renderer, CLEAR_SCREEN, RESET_SGR};
 
-use cluu_cluuamp::{layout, model, view};
+use cluu_cluuamp::{id3, layout, model, terminal, view};
 
-const TICK_MS: usize = 13;
-const TIOCGWINSZ: u32 = 0x5413;
+const TICK_MS: u64 = 13;
+const RENDER_MS: usize = 33;
+const META_SCRATCH_VA: usize = 0x7100_0000;
+const META_SCRATCH_PAGES: usize = 1;
+const META_READ_LEN: usize = 4096;
 
-#[repr(C)]
-struct WinSize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
+struct AppState {
+    model: model::CluuampModel,
+    quit: AtomicU32,
 }
 
-extern "C" {
-    fn _ioctl(fd: i32, req: u32, arg: *mut core::ffi::c_void) -> i32;
-}
-
-
-fn terminal_size() -> (usize, usize) {
-    let mut ws = WinSize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    for _ in 0..10 {
-        let ret = unsafe { _ioctl(1, TIOCGWINSZ, &mut ws as *mut _ as *mut core::ffi::c_void) };
-        if ret == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            return (ws.ws_col as usize, ws.ws_row as usize);
+fn audio_thread(shared: Shared<AppState>) {
+    loop {
+        let saturated;
+        {
+            let mut s = shared.lock();
+            if s.quit.load(Ordering::Relaxed) != 0 {
+                break;
+            }
+            if let Err(e) = s.model.audio_tick() {
+                debug_print(&format!("cluuamp: audio tick error {:?}\n", e));
+            }
+            saturated = s.model.audio.ring_saturated();
         }
-        let _ = libcluu::syscall::yield_cpu();
+
+        let sleep = if saturated { 50 } else { TICK_MS };
+        sleep_ms(sleep);
     }
-    (80, 25)
 }
 
 #[no_mangle]
@@ -76,7 +78,7 @@ fn run() -> Result<()> {
 
     debug_print("CLUUAMP_STARTING\n");
 
-    let (w, h) = terminal_size();
+    let (w, h) = terminal::current_size();
     debug_print(&format!("cluuamp: terminal {}x{}\n", w, h));
     let mut mdl = model::CluuampModel::new(playlist, w, h);
 
@@ -94,7 +96,31 @@ fn run() -> Result<()> {
     let mut reader = StdinReader::new();
     let mut prev_buffer = ScreenBuffer::new(0, 0);
 
-    let result = event_loop(&mut mdl, &renderer, &mut reader, &mut prev_buffer);
+    let shared = Shared::new(AppState {
+        model: mdl,
+        quit: AtomicU32::new(0),
+    });
+
+    let tid = spawn({
+        let shared = shared.clone();
+        move || audio_thread(shared)
+    });
+    if tid != 0 {
+        debug_print("cluuamp: audio thread started\n");
+    } else {
+        debug_print("cluuamp: pthread_create failed\n");
+    }
+
+    let result = ui_loop(&shared, &renderer, &mut reader, &mut prev_buffer);
+
+    {
+        let s = shared.lock();
+        s.quit.store(1, Ordering::Relaxed);
+    }
+    sleep_ms(50);
+    if tid != 0 {
+        join(tid);
+    }
 
     renderer.write(RESET_SGR);
     renderer.write(b"\x1b[?25h");
@@ -106,76 +132,169 @@ fn run() -> Result<()> {
     result
 }
 
-fn event_loop(
-    mdl: &mut model::CluuampModel,
+fn ui_loop(
+    shared: &Shared<AppState>,
     renderer: &Renderer,
     reader: &mut StdinReader,
     prev_buffer: &mut ScreenBuffer,
 ) -> Result<()> {
     loop {
-        let (w, h) = terminal_size();
-        if w != prev_buffer.width() || h != prev_buffer.height() {
-            renderer.write(CLEAR_SCREEN);
-            *prev_buffer = ScreenBuffer::new(0, 0);
-            mdl.on_resize(w, h);
+        let (w, h) = terminal::current_size();
+
+        let (view, should_quit, pending_dir, pending_dir_import, pending_meta) = {
+            let mut s = shared.lock();
+
+            if w != prev_buffer.width() || h != prev_buffer.height() {
+                renderer.write(CLEAR_SCREEN);
+                *prev_buffer = ScreenBuffer::new(0, 0);
+                s.model.on_resize(w, h);
+            }
+
+            let browser_just_closed = s.model.browser_just_closed;
+            if browser_just_closed {
+                s.model.browser_just_closed = false;
+                renderer.write(b"\x1b[0m\x1b[2J\x1b[H");
+                *prev_buffer = ScreenBuffer::new(0, 0);
+            }
+
+            let force_redraw = s.model.force_redraw;
+            if force_redraw {
+                s.model.force_redraw = false;
+                renderer.write(b"\x1b[0m\x1b[2J\x1b[H");
+                *prev_buffer = ScreenBuffer::new(0, 0);
+            }
+
+            if s.model.confirm_just_happened {
+                s.model.confirm_just_happened = false;
+                let _ = s.model.audio.play();
+            }
+
+            s.model.ui_tick();
+
+            let was_playing = s.model.audio.state() == cluu_cluuamp::audio::PlaybackState::Playing;
+            let structural_change = force_redraw || browser_just_closed;
+            let needs_render = structural_change
+                || s.model.title_scroll_changed()
+                || was_playing
+                || s.model.browser.is_some();
+
+            let view = if needs_render {
+                let v = view::render(&s.model);
+                s.model.mark_title_rendered();
+                Some(v)
+            } else {
+                None
+            };
+
+            let should_quit = s.model.should_quit;
+            let pending_dir = s.model.take_pending_dir_list();
+            let pending_dir_import = s.model.take_pending_dir_import();
+            let pending_meta = if !should_quit {
+                s.model.audio.next_unparsed_meta()
+            } else {
+                None
+            };
+
+            (view, should_quit, pending_dir, pending_dir_import, pending_meta)
+        };
+
+        if let Some(v) = view {
+            let mut new_buffer = ScreenBuffer::new(v.width, v.height);
+            for (i, cell) in v.cells.iter().enumerate() {
+                let row = if v.width > 0 { i / v.width } else { 0 };
+                let col = if v.width > 0 { i % v.width } else { 0 };
+                new_buffer.set(row, col, *cell);
+            }
+            let diff = new_buffer.diff_render(prev_buffer);
+            if !diff.is_empty() {
+                renderer.write(diff.as_bytes());
+            }
+            *prev_buffer = new_buffer;
         }
 
-        if mdl.browser_just_closed {
-            mdl.browser_just_closed = false;
-            renderer.write(b"\x1b[0m\x1b[2J\x1b[H");
-            *prev_buffer = ScreenBuffer::new(0, 0);
-        }
-
-        if mdl.force_redraw {
-            mdl.force_redraw = false;
-            renderer.write(b"\x1b[0m\x1b[2J\x1b[H");
-            *prev_buffer = ScreenBuffer::new(0, 0);
-        }
-
-        if mdl.confirm_just_happened {
-            mdl.confirm_just_happened = false;
-            let _ = mdl.audio.play();
-        }
-
-        if let Err(e) = mdl.tick() {
-            debug_print(&format!("cluuamp: tick error {:?}\n", e));
-        }
-
-        let view = view::render(mdl);
-        let mut new_buffer = ScreenBuffer::new(view.width, view.height);
-        for (i, cell) in view.cells.iter().enumerate() {
-            let row = if view.width > 0 { i / view.width } else { 0 };
-            let col = if view.width > 0 { i % view.width } else { 0 };
-            new_buffer.set(row, col, *cell);
-        }
-
-        let diff = new_buffer.diff_render(prev_buffer);
-        if !diff.is_empty() {
-            renderer.write(diff.as_bytes());
-        }
-        *prev_buffer = new_buffer;
-
-        if mdl.should_quit {
+        if should_quit {
             return Ok(());
         }
 
-        if reader.wait_for_data(TICK_MS) {
+        if reader.wait_for_data(RENDER_MS) {
             while reader.has_data() {
                 if let Some(key) = decode(reader) {
-                    mdl.handle_key(key);
-                    if mdl.should_quit {
+                    let quit = {
+                        let mut s = shared.lock();
+                        s.model.handle_key(key);
+                        s.model.should_quit
+                    };
+                    if quit {
                         return Ok(());
                     }
                 }
             }
         }
 
-        if let Some(path) = mdl.take_pending_dir_list() {
+        if let Some(path) = pending_dir {
             let entries = list_directory(&path);
             debug_print(&format!("cluuamp: listed {} entries for {}\n", entries.len(), path));
-            mdl.browser_listed(entries);
+            let mut s = shared.lock();
+            s.model.browser_listed(entries);
+        }
+
+        if let Some(path) = pending_dir_import {
+            let entries = list_directory(&path);
+            let mut mp3_paths: Vec<String> = entries.into_iter()
+                .filter(|e| e.kind == libtui::components::browser::EntryKind::File && e.name.ends_with(".mp3"))
+                .map(|e| {
+                    if path == "/" {
+                        alloc::format!("/{}", e.name)
+                    } else {
+                        alloc::format!("{}/{}", path, e.name)
+                    }
+                })
+                .collect();
+            mp3_paths.sort();
+            let mut s = shared.lock();
+            s.model.audio.extend_playlist(mp3_paths);
+            s.model.force_redraw = true;
+        }
+
+        if let Some(idx) = pending_meta {
+            let path = {
+                let s = shared.lock();
+                s.model.audio.playlist().get(idx).cloned()
+            };
+            if let Some(path) = path {
+                if let Some(head) = read_file_head(&path, META_READ_LEN) {
+                    let meta = id3::parse(&head);
+                    let mut s = shared.lock();
+                    if !meta.is_empty() {
+                        s.model.audio.set_track_meta(idx, meta);
+                        s.model.force_redraw = true;
+                    } else {
+                        s.model.audio.set_track_meta(idx, id3::TrackMeta::default());
+                    }
+                } else {
+                    let mut s = shared.lock();
+                    s.model.audio.set_track_meta(idx, id3::TrackMeta::default());
+                }
+            }
         }
     }
+}
+
+fn read_file_head(path: &str, len: usize) -> Option<Vec<u8>> {
+    let info = process_info();
+    let space_token = info.tokens[TOKEN_SPACE];
+    let _ = space_map_range(space_token, META_SCRATCH_VA, 0, 0x03, META_SCRATCH_PAGES, 0);
+
+    let ep = registry::lookup_service("vfs:main")?;
+    let cid = registry::control_endpoint();
+    let vfs = VfsClient::new(ep, cid);
+    let file = vfs.open(path).ok()?;
+    let read_len = len.min(file.size);
+    let grant = vfs.read_grant(file, 0, read_len, space_token, META_SCRATCH_VA).ok()?;
+    let bytes = unsafe { core::slice::from_raw_parts(grant.base as *const u8, grant.len) };
+    let data = bytes.to_vec();
+    let _ = vfs.close(file);
+    Some(data)
 }
 
 fn list_directory(path: &str) -> Vec<libtui::components::browser::DirEntry> {
@@ -183,7 +302,12 @@ fn list_directory(path: &str) -> Vec<libtui::components::browser::DirEntry> {
 
     if path != "/" {
         result.push(libtui::components::browser::DirEntry {
-            name: alloc::string::String::from(".."),
+            name: alloc::string::String::from("./"),
+            kind: libtui::components::browser::EntryKind::Directory,
+            size: 0,
+        });
+        result.push(libtui::components::browser::DirEntry {
+            name: alloc::string::String::from("../"),
             kind: libtui::components::browser::EntryKind::Directory,
             size: 0,
         });

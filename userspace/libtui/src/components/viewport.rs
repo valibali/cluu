@@ -92,6 +92,18 @@ impl Viewport {
     }
 }
 
+impl crate::layout::Drawable for Viewport {
+    fn draw(&self, area: crate::layout::Rect, buf: &mut View) {
+        let visible = self.visible_lines();
+        for (i, line) in visible.iter().enumerate() {
+            if i >= area.height {
+                break;
+            }
+            buf.write_str(area.y + i, area.x, line);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

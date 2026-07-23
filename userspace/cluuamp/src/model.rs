@@ -5,7 +5,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libcluu::Result;
-use libtui::components::browser::{BrowserAction, FileBrowser};
+use libtui::components::browser::DirEntry;
+use libtui::components::filedialog::{DialogAction, FileDialog};
 use libtui::input::KeyEvent;
 
 use crate::audio::{AudioEngine, PlaybackState};
@@ -44,13 +45,16 @@ pub struct CluuampModel {
     pub shuffle: bool,
     pub repeat: bool,
     pub title_scroll_offset: usize,
+    pub last_rendered_scroll: usize,
+    pub scroll_accumulator: usize,
     pub playlist_scroll: usize,
     pub playlist_selected: usize,
     pub layout: Layout,
     pub transport_selected: usize,
     pub should_quit: bool,
-    pub browser: Option<FileBrowser>,
+    pub browser: Option<FileDialog>,
     pub pending_dir_list: Option<String>,
+    pub pending_dir_import: Option<String>,
     pub confirm_just_happened: bool,
     pub browser_just_closed: bool,
     pub force_redraw: bool,
@@ -58,6 +62,7 @@ pub struct CluuampModel {
 
 impl CluuampModel {
     pub fn new(playlist: Vec<String>, width: usize, height: usize) -> Self {
+        let (width, height) = crate::terminal::ensure_terminal_size();
         let mut model = Self {
             audio: AudioEngine::new(playlist),
             fft: SpectrumAnalyzer::new(),
@@ -72,6 +77,8 @@ impl CluuampModel {
             shuffle: false,
             repeat: false,
             title_scroll_offset: 0,
+            last_rendered_scroll: 0,
+            scroll_accumulator: 0,
             playlist_scroll: 0,
             playlist_selected: 0,
             layout: Layout::calculate(width, height, true, true),
@@ -79,6 +86,7 @@ impl CluuampModel {
             should_quit: false,
             browser: None,
             pending_dir_list: None,
+            pending_dir_import: None,
             confirm_just_happened: false,
             browser_just_closed: false,
             force_redraw: false,
@@ -118,7 +126,7 @@ impl CluuampModel {
         }
     }
 
-    pub fn tick(&mut self) -> Result<()> {
+    pub fn audio_tick(&mut self) -> Result<()> {
         self.audio.tick()?;
         if self.audio.has_new_pcm() {
             self.fft.process_pcm(self.audio.pcm_mono());
@@ -129,11 +137,22 @@ impl CluuampModel {
             self.audio.clear_new_pcm();
         }
         self.fft.tick();
-        let title = self.audio.current_title();
-        let title_len = title.chars().count();
+        Ok(())
+    }
+
+    pub fn ui_tick(&mut self) {
+        let display = self.audio.display_title(self.audio.current_index());
+        let title_len = display.chars().count();
         let marquee_width = self.layout.marquee_width;
         if title_len > marquee_width {
-            self.title_scroll_offset = (self.title_scroll_offset + 1) % (title_len + 7);
+            self.scroll_accumulator += 1;
+            if self.scroll_accumulator >= 15 {
+                self.scroll_accumulator = 0;
+                self.title_scroll_offset = (self.title_scroll_offset + 1) % (title_len + 7);
+            }
+        } else {
+            self.title_scroll_offset = 0;
+            self.scroll_accumulator = 0;
         }
         if self.audio.state() == PlaybackState::Stopped
             && self.playlist_selected != self.audio.current_index()
@@ -141,7 +160,6 @@ impl CluuampModel {
             self.playlist_selected = self.audio.current_index();
         }
         self.clamp_playlist_scroll();
-        Ok(())
     }
 
     fn clamp_playlist_scroll(&mut self) {
@@ -163,6 +181,26 @@ impl CluuampModel {
         }
     }
 
+    /// True when the marquee scroll offset advanced since the last render.
+    /// Callers must invoke `mark_rendered()` after drawing to re-arm.
+    pub fn title_scroll_changed(&self) -> bool {
+        self.title_scroll_offset != self.last_rendered_scroll
+    }
+
+    /// Latch the current scroll offset as "rendered". Called by the main
+    /// loop after view::render completes.
+    pub fn mark_title_rendered(&mut self) {
+        self.last_rendered_scroll = self.title_scroll_offset;
+    }
+
+    /// Whether the current title is long enough to require marquee scrolling.
+    /// Used by the main loop to decide tick cadence when paused — a scrolling
+    /// marquee needs ~13ms ticks to stay smooth even with audio stopped.
+    pub fn title_is_scrolling(&self) -> bool {
+        let display = self.audio.display_title(self.audio.current_index());
+        display.chars().count() > self.layout.marquee_width
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if let KeyEvent::Ctrl('c') = key {
             self.should_quit = true;
@@ -172,6 +210,7 @@ impl CluuampModel {
             self.handle_browser_key(key);
             return;
         }
+        self.force_redraw = true;
         match key {
             KeyEvent::Ctrl('c') | KeyEvent::Char('q') => {
                 self.should_quit = true;
@@ -231,6 +270,9 @@ impl CluuampModel {
             KeyEvent::Tab => {
                 self.focus = self.focus.next(self.show_eq, self.show_playlist);
             }
+            KeyEvent::ShiftTab => {
+                self.focus = self.focus.prev(self.show_eq, self.show_playlist);
+            }
             KeyEvent::Arrow(libtui::input::Direction::Left) => self.handle_left(),
             KeyEvent::Arrow(libtui::input::Direction::Right) => self.handle_right(),
             KeyEvent::Arrow(libtui::input::Direction::Up) => self.handle_up(),
@@ -242,35 +284,42 @@ impl CluuampModel {
 
     pub fn open_browser(&mut self, initial_dir: &str) {
         let page_size = self.layout.playlist_height.saturating_sub(2).max(5);
-        let mut b = FileBrowser::new(initial_dir, page_size, true);
-        b.set_title(" Add to playlist ");
+        let dialog = FileDialog::open_multi(initial_dir, page_size);
         self.pending_dir_list = Some(String::from(initial_dir));
-        self.browser = Some(b);
+        self.browser = Some(dialog);
+        self.force_redraw = true;
     }
 
     fn handle_browser_key(&mut self, key: KeyEvent) {
-        let browser = self.browser.as_mut().unwrap();
-        let action = browser.handle_key(key);
+        let dialog = self.browser.as_mut().unwrap();
+        let action = dialog.handle_key(key);
         match action {
-            BrowserAction::None => {}
-            BrowserAction::Cancel => {
+            DialogAction::None => {}
+            DialogAction::Cancel => {
                 self.browser = None;
                 self.pending_dir_list = None;
                 self.browser_just_closed = true;
             }
-            BrowserAction::EnterDir(path) => {
-                if let Some(b) = self.browser.as_mut() {
-                    b.set_cwd(&path);
+            DialogAction::EnterDir(path) => {
+                if let Some(d) = self.browser.as_mut() {
+                    d.set_cwd(&path);
                 }
                 self.pending_dir_list = Some(path);
             }
-            BrowserAction::Confirm(paths) => {
+            DialogAction::Open(paths) => {
                 self.audio.extend_playlist(paths);
                 self.browser = None;
                 self.pending_dir_list = None;
                 self.confirm_just_happened = true;
                 self.browser_just_closed = true;
             }
+            DialogAction::OpenDir(path) => {
+                self.pending_dir_list = Some(path.clone());
+                self.pending_dir_import = Some(path);
+                self.browser = None;
+                self.browser_just_closed = true;
+            }
+            _ => {}
         }
     }
 
@@ -278,11 +327,16 @@ impl CluuampModel {
         self.pending_dir_list.take()
     }
 
-    pub fn browser_listed(&mut self, entries: Vec<libtui::components::browser::DirEntry>) {
-        if let Some(b) = self.browser.as_mut() {
-            b.set_entries(entries);
+    pub fn take_pending_dir_import(&mut self) -> Option<String> {
+        self.pending_dir_import.take()
+    }
+
+    pub fn browser_listed(&mut self, entries: Vec<DirEntry>) {
+        if let Some(d) = self.browser.as_mut() {
+            d.set_entries(entries);
         }
         self.pending_dir_list = None;
+        self.force_redraw = true;
     }
 
     pub fn browser_active(&self) -> bool {

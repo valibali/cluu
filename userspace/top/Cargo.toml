@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
+libtui = { package = "cluu-libtui", path = "../libtui", features = ["runtime"] }
 
 [[bin]]
 name = "top"
