@@ -17,6 +17,7 @@ pub mod spawn;
 pub mod primordial;
 pub mod pts;
 pub mod session;
+pub mod display;
 
 // Re-exports populated as modules gain content:
 pub use spawn::*;

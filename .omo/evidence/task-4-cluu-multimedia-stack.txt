@@ -1,0 +1,112 @@
+T4 — Define typed display protocol and buffer state machine
+Plan: .omo/plans/cluu-multimedia-stack.md line 112
+Date: 2026-07-26
+Operator: Sisyphus-Junior (GLM-5.2)
+
+## Files
+
+Created:
+- userspace/cluu_wire/src/display.rs — wire types, buffer state machine, 27 host tests
+
+Modified:
+- userspace/cluu_wire/src/lib.rs — added `pub mod display;`
+
+## Verification
+
+Standalone host test (stopping condition):
+  rustc --edition 2021 --test userspace/cluu_wire/src/display.rs -o /tmp/display_test && /tmp/display_test
+  result: ok. 27 passed; 0 failed; 0 ignored
+
+Crate integration:
+  cargo check -p cluu_wire --features host-test  — clean
+  cargo test  -p cluu_wire --features host-test  — 42 passed (27 display + 15 existing), 0 failed
+
+## Wire types defined
+
+- DISPLAY_PROTOCOL_VERSION: u32 = 1
+- PixelFormat enum { Xrgb8888 } with bytes_per_pixel()
+- Rect { x, y, w, h } with overflow-checked new(), clip_to(), extend(), bounding_box()
+- OutputInfo { width, height, pitch, format }
+- SurfaceCreate { surface_cap_token, width, height, pitch }
+- BufferAcquire { surface_cap_token } / BufferAcquired { buffer_index, seq, ptr_or_offset, pitch }
+- DamageList { rects: [Rect; 8], count: u8, bounding_fallback: bool } with from_rects() fallback
+- BufferCommit { surface_cap_token, buffer_index, seq, damage }
+- Release { surface_cap_token, buffer_index, seq }
+- Geometry { surface_cap_token, x, y, z_order, visible }
+- Destroy { surface_cap_token }
+- Error enum (9 variants, exhaustive): NoFreeBuffer, DoubleCommit, StaleSequence,
+  ForeignSurface, UnacquiredBuffer, InvalidRect, PitchOverflow, BufferOverflow,
+  InvalidCapability
+
+## Buffer state machine
+
+BufferState: Free -> Drawing -> Queued -> Displayed -> Free
+- acquire: Free -> Drawing (NoFreeBuffer if none free; ForeignSurface if wrong token)
+- commit:  Drawing -> Queued (DoubleCommit if already Queued/Displayed; UnacquiredBuffer if Free; StaleSequence if seq mismatch; InvalidRect for bad damage)
+- flip:    Queued -> Displayed (displayd-side)
+- release: Displayed -> Free (UnacquiredBuffer if not Displayed; StaleSequence if seq mismatch)
+- destroy: all buffers -> Free, destroyed flag set, further ops -> InvalidCapability
+
+One outstanding queued commit per buffer (per-buffer, not per-surface). Double-buffered
+(NUM_BUFFERS = 2); both buffers may be Queued simultaneously.
+
+## Authority model
+
+No numeric surface ID grants authority. Every state-changing method takes a
+`surface_cap_token: u64` parameter. Mismatch -> Error::ForeignSurface. Destroyed
+surface -> Error::InvalidCapability. No runtime ACL, no sender_tid interrogation
+(AGENTS.md §2, §3, §5).
+
+## Damage coordinate spaces (documented in module-level rustdoc)
+
+- Content damage: client-local surface coords (0,0 = surface origin). Validated
+  against (surface_w, surface_h) by the state machine. Out-of-bounds -> InvalidRect.
+- Scene damage: compositor output coords (0,0 = output origin). Translated by
+  Geometry(x, y). displayd clips to output bounds via Rect::clip_to().
+- Backend damage: hardware/scanout coords. Backend narrows scene damage to scanout.
+
+Invariant (from cluu-modal-damage-clamps-border-out.md): offset in damage translation
+MUST match offset in compose readback. Documented in module rustdoc.
+
+## Test coverage (27 tests)
+
+1.  valid_lifecycle_1000_alternating_commits — 2 buffers alternate 1000x, no premature reuse
+2.  double_commit_returns_double_commit_error
+3.  commit_with_foreign_token_returns_foreign_surface
+3b. acquire_with_foreign_token_returns_foreign_surface
+4.  commit_of_unacquired_buffer_returns_error
+5.  stale_sequence_commit_returns_error
+5b. stale_sequence_release_returns_error
+6.  destroy_inflight_releases_buffers_and_errors_further_ops
+7.  malformed_rectangle_returns_invalid_rect (w=0 and h=0)
+8.  overflow_rectangle_returns_invalid_rect (x+w > surface_w)
+8b. rect_clip_to_narrows_to_bounds (clipping utility)
+8c. rect_new_rejects_zero_and_overflow
+9.  pitch_overflow_returns_error (pitch*height overflows u32)
+9b. zero_dimensions_return_error
+10. damage_list_falls_back_to_bounding_box (>8 rects -> bounding box, fallback=true)
+10b. damage_list_under_limit_no_fallback
+10c. empty_damage_list
+11. release_of_non_displayed_buffer_returns_error (Drawing + Queued both error)
+11b. buffer_index_out_of_range_returns_buffer_overflow
+11c. flip_of_non_queued_buffer_returns_error
+11d. state_transitions_are_exact (Free->Drawing->Queued->Displayed->Free verified)
+11e. acquire_seq_is_monotonic
+12. protocol_version_is_defined
+12b. pixel_format_bytes_per_pixel
+12c. rect_extend_and_bounding_box
+12d. geometry_and_destroy_constructible
+12e. error_enum_is_exhaustive (9 distinct variants)
+
+## Design notes
+
+- display.rs is self-contained: uses only core:: paths, no alloc, no serde.
+  Compiles standalone with `rustc --edition 2021 --test` and as a module in the
+  no_std cluu_wire crate.
+- Follows existing cluu_wire conventions: plain structs, #[derive(Debug, Clone,
+  Copy, PartialEq, Eq)], no external dependencies.
+- Verb labels (300-307) chosen to not collide with session.rs (89-96, 200) or
+  pts.rs (130-140).
+- DamageList uses fixed [Rect; 8] array — no Vec, no alloc.
+- SurfaceState uses [BufferSlot; 2] — double-buffered, fixed array.
+- No unwrap()/panic!/as any in new code (rust-best-practices compliance).
