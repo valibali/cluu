@@ -1,0 +1,18 @@
+[package]
+name = "displayd"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU display daemon — pure scene/composition core."
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+cluu_wire = { path = "../cluu_wire", default-features = false }
+
+[lib]
+name = "displayd"
+crate-type = ["rlib"]
+
+[features]
+default = []
+host-test = ["cluu_wire/host-test"]

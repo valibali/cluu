@@ -106,6 +106,7 @@ members = [
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
     "userspace/doom-cluu",
+    "userspace/sdl2-shim",
     "userspace/basename",
     "userspace/date",
     "userspace/dirname",
@@ -170,6 +171,7 @@ members = [
     "userspace/ntp",
     "userspace/cluuamp",
     "userspace/imgview",
+    "userspace/displayd",
 
     # Language tooling
     "crates/cluu_lang",
@@ -272,6 +274,7 @@ default-members = [
     "userspace/awk",
     "userspace/make",
     "userspace/imgview",
+    "userspace/displayd",
 ]
 
 [workspace.package]

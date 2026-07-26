@@ -1,0 +1,138 @@
+T5 — Build displayd pure scene/composition core
+Plan: .omo/plans/cluu-multimedia-stack.md line 120
+Date: 2026-07-26
+Operator: Sisyphus-Junior (GLM-5.2)
+
+## Files
+
+Created:
+- userspace/displayd/Cargo.toml — crate definition (no_std + alloc, depends on cluu_wire)
+- userspace/displayd/src/lib.rs — re-exports, no_std attribute, 22 host tests
+- userspace/displayd/src/surface.rs — surface ownership, double-buffered pixel data, geometry
+- userspace/displayd/src/scene.rs — z-order, visibility, geometry management, overlays
+- userspace/displayd/src/damage.rs — damage accumulator, content→scene translation, merge
+- userspace/displayd/src/compose.rs — XRGB8888 row-copy, integer nearest scaling, clip, occlusion
+- userspace/displayd/src/backend.rs — Backend trait + MemoryBackend for tests
+
+Modified:
+- Cargo.toml — added "userspace/displayd" to workspace members and default-members
+
+## Verification
+
+  cargo test -p displayd
+  result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+  cargo check -p displayd (no_std build)
+  result: clean — no errors, no warnings
+
+Pure core import check:
+  grep -rn '^use ' userspace/displayd/src/*.rs | grep -iv 'alloc\|cluu_wire\|crate'
+  result: no matches — pure core imports only alloc, cluu_wire, and internal crate modules
+
+Forbidden import check:
+  grep -rn 'framebuffer\|registry\|ipc\|pci' userspace/displayd/src/*.rs -i
+  result: only comment/doc references (no actual use statements)
+
+## Module separation
+
+### surface.rs — Surface ownership, buffer slot management
+- Surface struct: token, width, height, pitch, double-buffered Vec<u32> pixel data,
+  front buffer index, position (x, y), z_order, visible, display_w/display_h (scaling),
+  destroyed flag, last_content_damage
+- Uses cluu_wire::display::SurfaceState::new for validation (non-zero dims, pitch overflow)
+- write_buffer / write_pixel / present / displayed_pixels / clipped_scene_rect / destroy
+- Normal SHM uses nonvolatile slice copies (copy_from_slice); hardware ordering is backend-owned
+
+### scene.rs — Z-order, visibility, geometry management
+- Scene struct: output info, Vec<Surface>, Vec<Overlay>, pending DamageAccumulator
+- Surface lifecycle: create_surface, destroy_surface (damage + buffer release)
+- Content: write_surface_buffer, present_surface (translates content→scene damage)
+- Geometry: move_surface (damage old+new), set_visible (damage on hide/show),
+  set_z_order (damage surface + overlapping surfaces), set_display_size (damage old+new)
+- Overlays: add_overlay, set_overlay_position, set_overlay_visible
+- composite_frame delegates to compose::composite_frame
+
+### damage.rs — Content/scene/backend damage union, coordinate translation
+- DamageAccumulator: Vec<Rect> with add, add_all, add_content_damage, merge, take
+- add_content_damage: translates content coords → scene coords using surface (x, y) offset
+  CRITICAL INVARIANT: offset MUST match composition read offset (documented in module)
+- merge_overlapping: O(n^2) merge of overlapping/adjacent rects
+- Bounding-box fallback via DamageList::from_rects when >8 rects
+
+### compose.rs — XRGB8888 row-copy, integer nearest scaling, clip, occlusion
+- composite_frame: takes pending damage, clears damaged regions, paints surfaces
+  back-to-front (z-order), re-applies overlays (always — cursor invariant), returns damage
+- XRGB8888 row-copy fast path: copy_from_slice per row, handles pitch != width
+- Integer nearest scaling: precomputed ScaleTable (src_x[dst_x] = dst_x * src_w / dst_w),
+  no floating point
+- Clipping: surfaces partially off-screen (including negative position) composited
+  only in visible region
+- Occlusion: back-to-front painter's algorithm; higher z-order overwrites lower
+- Overlay re-apply: overlays painted unconditionally after all surfaces (cursor invariant
+  from cluu-compositor-cursor-clobbered-by-animated-win gotcha)
+
+### backend.rs — Backend trait + MemoryBackend
+- Backend trait: output_info, scanout_buffer_mut, flush, try_direct_scanout
+- MemoryBackend: Vec<u32> implementing Backend for host tests; pixel() accessor for
+  golden-array verification; fill() for test setup
+
+## Damage coordinate invariant
+
+Documented in damage.rs module docs and lib.rs docs:
+The offset used to translate content damage to scene damage MUST be the same offset
+the composition pass uses to read surface content. If content damage is translated
+with (x, y), the compose pass MUST read surface content at (x, y) — otherwise cells
+never refresh from SHM and appear "stale until hovered".
+Source: cluu-modal-damage-clamps-border-out.md gotcha.
+
+## Overlay/cursor invariant
+
+Overlays are re-applied after every dirty pass in composite_frame — unconditionally,
+not gated on a flag. Client content may overwrite overlay cells at any time; overlays
+must be repainted every frame regardless of whether they "moved".
+Source: cluu-compositor-cursor-clobbered-by-animated-win.md gotcha.
+
+## Test coverage (22 tests)
+
+Required 12 cases:
+1.  move_surface_damage_at_old_and_new_position — damage at (10,10,4,4) and (20,20,4,4)
+2.  hide_surface_damage_at_previous_position — damage at surface's last position
+3.  show_surface_damage_at_position — damage when surface becomes visible
+4.  destroy_surface_damage_and_buffer_release — damage + InvalidCapability on further ops
+5.  z_order_change_damage_where_occlusion_changes — overlap region changes top surface
+6.  clipping_surface_partially_off_screen — 4x4 at (30,22) on 32x24 output, only 2x2 visible
+6b. clipping_negative_position — 4x4 at (-2,-2), only (0,0)-(1,1) visible
+7.  occlusion_two_overlapping_only_top_composited — B (z=1) overwrites A (z=0) in overlap
+8.  unscaled_copy_1_to_1_pixel_match — checkerboard pattern verified pixel-by-pixel
+9.  integer_scale_2x_nearest_neighbor — 2x2 source → 4x4 output, each pixel = 2x2 block
+10. odd_pitch_correct_row_stride — pitch=32 (8 words) but width=4, padding doesn't bleed
+11. rgb_channel_pattern_specific_values — 0x00FF0000/0x0000FF00/0x000000FF verified
+12. multiple_surfaces_composited_correctly — 3 non-overlapping surfaces, correct colors
+
+Additional tests:
+13. overlay_reapplied_after_dirty_pass — overlay stays on top after surface content changes
+14. damage_union_overlapping_merged — two overlapping rects merge to bounding box
+14b. damage_union_bounding_box_fallback — 10 non-overlapping rects → bounding box
+15. content_to_scene_damage_translation — content (2,3,4,5) + offset (10,10) = scene (12,13,4,5)
+15b. content_to_scene_damage_clipped_to_output — damage beyond output clipped
+16. foreign_surface_operation_returns_error — unknown token → InvalidCapability
+16b. double_create_same_token_returns_error — duplicate token → ForeignSurface
+17. surface_creation_validates_dimensions — zero width → InvalidRect, pitch overflow → PitchOverflow
+18. buffer_write_out_of_range_returns_error — bad buffer_index → BufferOverflow, oversized → InvalidRect
+
+## Design notes
+
+- no_std + alloc: #![cfg_attr(not(any(test, feature = "host-test")), no_std)]
+  Tests use std (cfg(test) disables no_std); normal build is no_std + extern crate alloc.
+- #![forbid(unsafe_code)] — no unsafe in the pure core.
+- Uses cluu_wire::display types: Rect, DamageList, Error, OutputInfo, PixelFormat,
+  SurfaceState (validation), NUM_BUFFERS. No external dependencies beyond cluu_wire.
+- Surface uses a simple front/back buffer model (front: u8 index). The full
+  SurfaceState state machine (acquire/commit/release with seq validation) lives in
+  cluu_wire::display and will be used by the IPC layer in T7.
+- composition does a full repaint of all visible surfaces each frame. Damaged regions
+  are cleared to black first, then surfaces painted back-to-front. The damage tells
+  the backend what to flush. Optimization (partial repaint) deferred.
+- MemoryBackend buffer is pitch/4 * height u32 words, matching real backend layout.
+- No unwrap()/panic!/as any in production code (rust-best-practices compliance).
+- ScaleTable precomputes src_x[dst_x] and src_y[dst_y] — integer division, no float.
