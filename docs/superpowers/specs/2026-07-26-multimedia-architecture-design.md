@@ -229,7 +229,8 @@ applies, takes it to zero guest copies; promotion is **not guaranteed** and depe
 the backend and exact surface/output dimensions. The remaining host-side cost is
 addressed separately by virtio-gpu (§2.6, §2.7).
 
-Fullscreen becomes displayd pointing scanout at the client's buffer. No `VT_DEACTIVATE`,
+Fullscreen is displayd opportunistically pointing scanout at the client's buffer when
+the backend supports it; otherwise it falls back to a composite pass. No `VT_DEACTIVATE`,
 no BAR handoff. If anything needs to draw on top (compositor overlay, hotkey menu, status
 line), displayd demotes back to a composite pass for that frame and re-promotes
 afterwards. With a blob-capable virtio-gpu backend, promotion lets the host read the
@@ -290,7 +291,7 @@ consumer needs them.
 - `Output` — a scanout: `{width, height, pitch, format, backend}`.
 - `Backend` trait, two implementations sharing one interface:
   - `linear_fb` — WC-mapped BAR, as today.
-  - `virtio_gpu` — blob resource; additionally implements `try_direct_scanout`.
+  - `virtio_gpu` — classic 2D (CREATE_2D, ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D, RESOURCE_FLUSH); additionally implements `try_direct_scanout` for opportunistic zero-copy promotion when backend supports it. Blob resources are not a baseline feature.
 
   ```
   trait Backend {
@@ -459,7 +460,7 @@ run concurrently with Phase 1 (§5).
 | **1** | `displayd` + surface protocol; linear-fb backend; compositor becomes a client holding the WM cap; existing shim retargeted to surfaces | DOOM windowed CPU at target; TUI visually unchanged |
 | **2** | Upstream SDL2 port (exact revision pinned in T14); `sdl2-shim` frozen (bug fixes only); shim + `doomgeneric_sdl_cluu.c` deleted in T19 after stock `doomgeneric_sdl.c` validates | Stock doomgeneric builds and runs against CLUU backend |
 | **3** | `audiod` + SDL2 audio backend; cluuamp migrated | DOOM music + SFX + cluuamp simultaneously |
-| **4** | virtio-gpu backend behind the `Backend` trait, blob resources; linear-fb retained as fallback | Fullscreen = 0 copies; modeset works |
+| **4** | virtio-gpu backend behind the `Backend` trait, classic 2D with opportunistic direct scanout; linear-fb retained as fallback | Fullscreen ≤ 1 copy; direct scanout when backend-compatible; modeset works |
 | **5** | Port a NES emulator | API validated without modification |
 
 Phase 5 is a test, not a victory lap. If porting an emulator requires changing displayd or
@@ -505,7 +506,7 @@ regardless of client behaviour.
 | Scaling | displayd performs integer nearest scale | Removes a pass from every emulator/game port |
 | virtio-gpu | Classic 2D only (`CREATE_2D`, `ATTACH_BACKING`, `SET_SCANOUT`, `TRANSFER_TO_HOST_2D`, `RESOURCE_FLUSH`); blobs/virgl/Venus/3D deferred; direct scanout opportunistic, not guaranteed | Portable and spec-defined; blob/direct-scanout are optional host capabilities, not promises |
 | SDL2 | Port upstream with a CLUU backend; exact revision pinned in T14; transitional `sdl2-shim` frozen then deleted in T19 | Real API semantics; scope (file count, patch series) determined in T14, not fixed here |
-| Audio | `audiod` mixer server; virtio-snd stays thin; initial 2048-byte periods, measured 1024-byte experiment | Policy out of drivers; enables simultaneous audio; 1024 is an experiment, 2048 is the committed default |
+| Audio | `audiod` mixer server; virtio-snd stays thin; initial/default 2048-byte periods, measured 1024-byte experiment (2048 is the fallback if 1024 shows regressions) | Policy out of drivers; enables simultaneous audio; 1024 is an experiment, 2048 is the initial default and fallback |
 | Performance gates | Relative to T2 baseline (`.omo/evidence/task-2-cluu-multimedia-stack.md`), not an absolute CPU percentage | Host/QEMU-dependent; a fixed percentage target is not defensible before measurement |
 | Compositor scope | WM policy stays in compositor (holds `display:wm` cap) | One composite pass; preserves the existing process split |
 

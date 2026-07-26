@@ -347,7 +347,7 @@ this contract contradicts the spec, the spec wins.
 | Fullscreen | One composite pass expected; direct scanout promoted only when exact-size and backend-compatible. Zero guest copies is not guaranteed |
 | SDL2 | Upstream port with CLUU backend. **Exact SDL revision pinned in T14** — do not hardcode a revision now. Total file count and patch series are T14's scope, not fixed here |
 | Transitional shim | `userspace/sdl2-shim/` frozen (bug fixes only) at SDL port start; deleted in T19 after stock `doomgeneric_sdl.c` validates. `doomgeneric_sdl_cluu.c` deleted in T19 |
-| Audio | `audiod` mixer server; virtio-snd stays thin. Initial period 2048 bytes (11.6 ms); measured 1024-byte (5.8 ms) experiment in the audiod phase. 2048 is the committed default, not a fallback |
+| Audio | `audiod` mixer server; virtio-snd stays thin. Initial/default period 2048 bytes (11.6 ms); measured 1024-byte (5.8 ms) experiment in the audiod phase. 2048 is the initial default and fallback if 1024-byte experiment shows regressions |
 | Performance gates | Relative to T2 baseline (`.omo/evidence/task-2-cluu-multimedia-stack.md`), not an absolute CPU percentage. A fixed percentage target is not defensible |
 | QA commands | `python -m cluu_harness --case <name>`. Baseline cases: `l2_baseline_idle_tui`, `l2_baseline_quiet_shell`, `l2_baseline_doom_windowed`, `l2_baseline_doom_fullscreen`. `scripts/fb_dump.sh` and `scripts/harness_run.sh` do not exist |
 
