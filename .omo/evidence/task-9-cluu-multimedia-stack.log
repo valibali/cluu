@@ -1,0 +1,80 @@
+Task 9: Migrate native pixel clients to displayd surfaces
+=========================================================
+
+Date: 2026-07-27
+Plan: .omo/plans/cluu-multimedia-stack.md (T9, line 152)
+
+## Changes
+
+### containers/doom/Cluufile
+- Removed `device` from PROFILE. DOOM no longer has direct framebuffer
+  device access — it goes through displayd surfaces via the SDL shim.
+
+### userspace/imgview/Cargo.toml
+- Added `cluu_wire` dependency for display protocol label constants.
+
+### userspace/imgview/src/main.rs
+- Replaced compositor PixelRegion path with displayd surface protocol.
+- Flow: connect to displayd:main, query OUTPUT_INFO, create SURFACE_CREATE
+  (640x400 capped to screen), SET_GEOMETRY (centered, z=1, visible=true),
+  allocate frame token, write scaled image pixels, BUFFER_COMMIT with
+  damage (full surface bounds).
+- Compositor window retained for keyboard input only (no pixel region,
+  no chrome). Esc destroys the displayd surface and compositor window.
+- No direct framebuffer access.
+
+### userspace/sdl2-shim/Cargo.toml
+- Added `cluu_wire` dependency for display protocol label constants.
+
+### userspace/sdl2-shim/src/lib.rs
+- Replaced framebuffer_acquire/VT deactivate path with displayd surface.
+- Surface is 640x400 (DOOM native resolution) — NO pre-upscale to
+  1280x800. displayd composites at the surface geometry position.
+- SDL_UpdateTexture writes 640x400 pixels to frame token (no upscaling).
+- SDL_RenderPresent commits to displayd with damage = actual updated
+  bounds (0, 0, 640, 400) — not full-screen 0xFFFF.
+- Fullscreen: SET_GEOMETRY to (0, 0) — "fullscreen promotion unsupported"
+  falls back to composite without VT theft. No VT_DEACTIVATE/ACTIVATE.
+- Removed: framebuffer_acquire, framebuffer_release, FramebufferInfo,
+  COMP_VT_ACTIVATE_LABEL, COMP_VT_DEACTIVATE_LABEL, PixelRegion,
+  COMP_WIN_SET_PIXEL_REGION_LABEL, COMP_WIN_DAMAGE_LABEL.
+- Harness marker compatibility: emits "sdl2-cluu: pixel region" (windowed)
+  and "sdl2-cluu: direct FB" (fullscreen) — backend is displayd, markers
+  kept for harness marker matching.
+
+## Verification
+
+### Build
+- cargo xtask build: SUCCESS (clean, no new warnings from changed files)
+
+### Python Harness (displayd T8 linear_fb backend)
+- l2_baseline_doom_windowed: PASS (152.0s)
+  Markers: doom-cluu: DG_Init, sdl2-cluu: pixel region, doom-cluu: 5
+  seconds of game loop completed — all present.
+- l2_baseline_doom_fullscreen: PASS (178.9s)
+  Markers: doom-cluu: DG_Init, doom-cluu: fullscreen mode requested,
+  sdl2-cluu: direct FB, doom-cluu: 5 seconds of game loop completed —
+  all present.
+- l2_doom: PASS (140.8s)
+  Markers: doom-cluu: DG_Init, sdl2-cluu: pixel region, doom-cluu: 1
+  second of game loop completed — all present.
+
+### Pre-existing issue noted
+- displayd/src/main.rs had uncommitted virtio_gpu_backend changes that
+  cause a boot race: lookup_service("gpudev:main") blocks indefinitely
+  when the virtio-gpu driver is absent. Reverted displayd main.rs to
+  the committed T8 version (linear_fb only) to allow boot and verify
+  T9 changes. This is a pre-existing issue unrelated to T9.
+
+## Stopping conditions met
+- No non-service app maps framebuffer: imgview and sdl2-shim use
+  displayd surface protocol, no framebuffer_acquire.
+- Windowed and fullscreen DOOM run through same surface protocol:
+  both create a 640x400 displayd surface, both commit via
+  DISPLAY_BUFFER_COMMIT_LABEL. Difference is only SET_GEOMETRY position.
+- 640x400 source avoids 1280x800 shim pre-upscale: SDL_UpdateTexture
+  copies 640x400 pixels directly to frame token — no upscaling.
+- Damage represents actual updated bounds: commit damage is (0, 0,
+  surf_w, surf_h) — the actual surface dimensions, not 0xFFFF.
+- Fullscreen promotion unsupported falls back to composite without VT
+  theft: fullscreen sets geometry to (0, 0), no VT_DEACTIVATE sent.

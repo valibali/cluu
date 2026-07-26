@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["posix"] }
+cluu_wire = { path = "../cluu_wire" }
 zune-jpeg = { version = "0.5", default-features = false, features = ["x86"] }
 zune-core = { version = "0.5", default-features = false }
 

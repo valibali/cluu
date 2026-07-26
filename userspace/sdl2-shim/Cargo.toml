@@ -9,6 +9,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 libcluu = { path = "../libcluu", features = ["c-runtime"] }
+cluu_wire = { path = "../cluu_wire" }
 
 [features]
 bench = []
