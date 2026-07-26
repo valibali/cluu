@@ -1,10 +1,10 @@
 //! Compositor core state types and init.
 //!
-//! `Compositor` is the long-lived owner of the framebuffer mapping,
-//! cell grid, window list, and IPC token table. `Window` describes one
-//! tenant's region + SHM mapping. `WindowShm` is the on-the-wire header
-//! that lives at the start of each per-window shared region (32 bytes,
-//! cells follow) — canonical definition lives in `libcluu::window_shm`.
+//! `Compositor` is the long-lived owner of the cell grid, window list, and
+//! IPC token table.  It is a client of displayd — no framebuffer mapping.
+//! The compositor rasterizes TUI cells into a local backbuffer, copies the
+//! dirty region into a shared frame token, and commits it to displayd via
+//! `DISPLAY_BUFFER_COMMIT_LABEL`.  displayd owns the hardware output.
 //!
 //! Window lifecycle, focus management, input forwarding → `window_mgr`
 //! Render pipeline, timing                               → `render`
@@ -14,6 +14,14 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use cluu_wire::display::{
+    DISPLAY_OUTPUT_INFO_LABEL, DISPLAY_SET_GEOMETRY_LABEL,
+    DISPLAY_SURFACE_CREATE_LABEL,
+};
+use libcluu::ipc;
+use libcluu::types::{IpcFlags, Message};
+use libcluu::{debug_print, registry, Error, Result};
 
 /// Opaque identifier for a compositor-managed window.
 ///
@@ -220,24 +228,29 @@ pub struct Window {
 
 /// Long-lived compositor state.  Single instance per process, owned by `main`.
 ///
-/// Initialised by `Compositor::init` (opens `/dev/fb0`, sets up buffers and
-/// palette).  All other fields are populated by `main` after registry init.
+/// initialised by `Compositor::init` (connects to displayd, creates a surface,
+/// allocates a backbuffer frame token).  All other fields are populated by
+/// `main` after registry init.
 ///
 /// Methods are split across `window_mgr` (window lifecycle + input) and
-/// `render` (glyph blit, flush, frame/clock timing).
+/// `render` (glyph blit, displayd commit, frame/clock timing).
 pub struct Compositor {
-    /// Write-combined mapping of the hardware framebuffer (via `/dev/fb0` mmap).
-    pub fb_ptr: *mut u8,
-    #[allow(dead_code)]
-    // rationale: fb_phys/fb_size stored for debug diagnostics; not read yet.
-    pub fb_phys: u64,
-    /// Total byte length of the fb mapping.
-    pub fb_size: usize,
-    /// Screen dimensions in pixels.
+    /// displayd endpoint for IPC (resolved via PARAM_DISPLAYD_EP or registry).
+    pub displayd_ep: usize,
+    /// Capability token for our displayd surface.
+    pub surface_token: u64,
+    /// Screen dimensions in pixels (from displayd OUTPUT_INFO).
     pub width_px: u32,
     pub height_px: u32,
-    /// Framebuffer row pitch in *bytes* (may differ from `width_px * 4`).
+    /// Backbuffer pitch in bytes (== width_px * 4 for XRGB8888).
     pub pitch: u32,
+
+    /// Frame token for the pixel-transfer frame shared with displayd.
+    /// The compositor rasterizes into `backbuf`, then copies the dirty
+    /// region here and commits to displayd.
+    pub backbuf_frame_token: u64,
+    /// VA where `backbuf_frame_token` is mapped in the compositor's space.
+    pub backbuf_va: usize,
 
     /// Screen dimensions in cell units.
     pub cols: u16,
@@ -252,18 +265,19 @@ pub struct Compositor {
     /// xterm-256 ARGB palette; index = colour number from cell fg/bg fields.
     pub palette: [u32; 256],
     /// Software backbuffer (width_px×height_px u32 ARGB).  Written by
-    /// `flush_grid_to_backbuf`; pushed to `fb_ptr` by `flush_backbuf_to_fb`.
+    /// `flush_grid_to_backbuf`; copied to the displayd frame token by
+    /// `flush_backbuf_to_displayd`.
     pub backbuf: Vec<u32>,
 
-    /// Pixel-level bounding box of cells blitted since the last fb flush.
-    /// `None` means nothing was redrawn; `flush_backbuf_to_fb` is a no-op.
+    /// Pixel-level bounding box of cells blitted since the last displayd commit.
+    /// `None` means nothing was redrawn; `flush_backbuf_to_displayd` is a no-op.
     pub dirty_rect: Option<PixelRect>,
 
     /// Window list in z-order; last entry is the topmost (focused) window.
     pub windows: Vec<Window>,
     /// `WindowId` of the currently focused window, or `None` if no windows exist.
     pub focused: Option<WindowId>,
-    /// `true` while the compositor's VT is the active VT; `false` when hidden.
+    /// Always true — displayd owns the VT; compositor is always active.
     pub active: bool,
     /// Monotonically increasing counter used to assign `WindowId`s.
     pub next_id: u64,
@@ -334,85 +348,102 @@ pub struct DragState {
     pub start_win_h: u16,
 }
 
-use libcluu::posix::{
-    _close, _open, _read, mmap, c_void, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE,
-};
-use libcluu::{Error, Result};
-
 pub const GLYPH_W: u32 = 8;
 pub const GLYPH_H: u32 = 16;
 
-use crate::config::FB_HEADER_MAGIC;
+/// VA for the compositor's backbuf frame mapping (pixel transfer to displayd).
+const BACKBUF_VA: usize = 0xB000_0000;
+/// Maximum dirty-region frame size (1 MiB — enough for ~512×512 pixels).
+/// The compositor clips dirty rects to this size and sends multiple commits
+/// if needed.  Full-screen 8 MiB allocation causes OOM at boot.
+pub const BACKBUF_FRAME_BYTES: usize = 0x10_0000;
 
 impl Compositor {
-    /// Open `/dev/fb0`, read the 40-byte geometry header, mmap the
-    /// framebuffer write-combined, then close the fd.  Allocates
-    /// `cell_grid` and `backbuf` from the dimensions returned by the header.
+    /// Connect to displayd, create a surface, allocate a backbuf frame token.
+    ///
+    /// Emits `COMP_FAILSTOP_OK` and returns `Err` if displayd is unavailable,
+    /// so the compositor does not hang waiting for a service that isn't running.
     pub fn init() -> Result<Self> {
-        // 1. Open /dev/fb0
-        let path = b"/dev/fb0\0";
-        let fd = _open(path.as_ptr() as *const i8, O_RDWR, 0);
-        if fd < 0 {
+        let displayd_ep = match registry::lookup_service("displayd:main") {
+            Some(ep) => ep,
+            None => {
+                let _ = debug_print("COMP_FAILSTOP_OK displayd:main not found");
+                return Err(Error::NotFound);
+            }
+        };
+        let _ = debug_print("compositor: displayd ep resolved");
+
+        let mut info_msg = Message::new(DISPLAY_OUTPUT_INFO_LABEL, [0; 6], 0);
+        if ipc::call(displayd_ep, &mut info_msg, IpcFlags::empty()).is_err() {
+            let _ = debug_print("COMP_FAILSTOP_OK displayd OUTPUT_INFO call failed");
             return Err(Error::NotFound);
         }
-
-        // 2. Read 40-byte header
-        let mut hdr = [0u8; 40];
-        let n = _read(fd, hdr.as_mut_ptr() as *mut c_void, 40);
-        if n != 40 {
-            _close(fd);
+        let width_px = info_msg.words[0] as u32;
+        let height_px = info_msg.words[1] as u32;
+        let pitch = info_msg.words[2] as u32;
+        if width_px == 0 || height_px == 0 || pitch == 0 {
+            let _ = debug_print("COMP_FAILSTOP_OK displayd bad output info");
             return Err(Error::InvalidArgument);
         }
-        let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-        if magic != FB_HEADER_MAGIC {
-            _close(fd);
+        let _ = debug_print(&alloc::format!(
+            "compositor: displayd output {}x{} pitch={}", width_px, height_px, pitch
+        ));
+
+        let mut create_msg = Message::new(
+            DISPLAY_SURFACE_CREATE_LABEL,
+            [0, width_px as usize, height_px as usize, pitch as usize, 0, 0],
+            4,
+        );
+        if ipc::call(displayd_ep, &mut create_msg, IpcFlags::empty()).is_err() {
+            let _ = debug_print("COMP_FAILSTOP_OK displayd SURFACE_CREATE call failed");
+            return Err(Error::NotFound);
+        }
+        let surface_token = create_msg.words[0] as u64;
+        if surface_token == 0 {
+            let _ = debug_print("COMP_FAILSTOP_OK displayd SURFACE_CREATE rejected");
             return Err(Error::InvalidArgument);
         }
-        let width_px  = u32::from_le_bytes([hdr[ 4], hdr[ 5], hdr[ 6], hdr[ 7]]);
-        let height_px = u32::from_le_bytes([hdr[ 8], hdr[ 9], hdr[10], hdr[11]]);
-        let pitch     = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
-        // hdr[16..20] = bpp (unused by compositor, framebuffer is always 32bpp)
-        // hdr[20..24] = reserved
-        let fb_size = u64::from_le_bytes([
-            hdr[24], hdr[25], hdr[26], hdr[27],
-            hdr[28], hdr[29], hdr[30], hdr[31],
-        ]) as usize;
-        let fb_phys = u64::from_le_bytes([
-            hdr[32], hdr[33], hdr[34], hdr[35],
-            hdr[36], hdr[37], hdr[38], hdr[39],
-        ]);
+        let _ = debug_print("compositor: surface created");
 
-        // 3. mmap — libcluu::posix::mmap detects the FB magic and routes to
-        //    MAP_DEVICE_WC automatically for MAP_SHARED + /dev/fb0 fds.
-        let mapped = mmap(
-                core::ptr::null_mut::<c_void>(),
-                fb_size,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                fd,
-                0,
-            );
-
-        // 4. Close fd — mmap holds its own reference via the kernel mapping.
-        _close(fd);
-
-        if mapped as isize == -1 || mapped.is_null() {
-            return Err(Error::InvalidArgument);
-        }
-        let fb_ptr = mapped as *mut u8;
+        let geo_msg = Message::new(
+            DISPLAY_SET_GEOMETRY_LABEL,
+            [0, surface_token as usize, 0, 0, 0, 0],
+            4,
+        );
+        let geo_payload = [0u8; 5];
+        let _ = ipc::send_msg_with_payload(displayd_ep, &geo_msg, &geo_payload);
 
         let cols = (width_px / GLYPH_W) as u16;
         let rows = (height_px / GLYPH_H) as u16;
-        let cell_count  = cols as usize * rows as usize;
+        let cell_count = cols as usize * rows as usize;
         let pixel_count = (width_px * height_px) as usize;
 
+        let (backbuf_frame_token, _) = match crate::shm::alloc_frame(BACKBUF_FRAME_BYTES) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&alloc::format!(
+                    "COMP_FAILSTOP_OK backbuf frame alloc failed size={} err={:?}", BACKBUF_FRAME_BYTES, e
+                ));
+                return Err(Error::InvalidArgument);
+            }
+        };
+        let _ = debug_print("compositor: backbuf frame allocated");
+        crate::shm::map_frame_rw(BACKBUF_VA, backbuf_frame_token, BACKBUF_FRAME_BYTES)?;
+        let _ = debug_print("compositor: backbuf frame mapped");
+
+        let _ = debug_print(&alloc::format!(
+            "compositor: displayd surface {} ({}x{} pitch={})",
+            surface_token, width_px, height_px, pitch
+        ));
+
         Ok(Self {
-            fb_ptr,
-            fb_phys,
-            fb_size,
+            displayd_ep,
+            surface_token,
             width_px,
             height_px,
             pitch,
+            backbuf_frame_token,
+            backbuf_va: BACKBUF_VA,
             cols,
             rows,
             cell_grid: alloc::vec![0u64; cell_count],
@@ -423,7 +454,7 @@ impl Compositor {
             dirty_rect: None,
             windows: Vec::new(),
             focused: None,
-            active: false,
+            active: true,
             next_id: 1,
             clock_seconds: 0,
             clock_ready: false,
@@ -441,7 +472,7 @@ impl Compositor {
             pointer_buttons: 0,
             drag_state: None,
             cursor_needs_render: false,
-        pixel_dirty: false,
+            pixel_dirty: false,
         })
     }
 }

@@ -207,6 +207,7 @@ impl Compositor {
         win.pending_frame_ready = true;
         if has_pixel_region {
             self.pixel_dirty = true;
+            return;
         }
         let (win_x, win_y) = (win.x, win.y);
         for iy in cy0..cy1 {
@@ -433,26 +434,6 @@ impl Compositor {
 }
 
 impl Compositor {
-    /// VT switch: compositor's VT became active — resume fb writes.
-    /// Invalidate `prev_cell_grid` to force every cell to re-blit, since the
-    /// console (or another VT owner) overwrote the framebuffer while we were
-    /// inactive; our cached grid no longer matches what's on-screen.
-    pub fn handle_vt_activate(&mut self) {
-        self.active = true;
-        for slot in self.prev_cell_grid.iter_mut() {
-            *slot = u64::MAX;
-        }
-        self.repaint_all();
-    }
-
-    /// VT switch: compositor's VT became inactive — suppress fb writes.
-    pub fn handle_vt_deactivate(&mut self) {
-        self.active = false;
-    }
-}
-
-impl Compositor {
-    /// True if the currently focused window is modal.
     pub fn focused_is_modal(&self) -> bool {
         let Some(id) = self.focused else { return false; };
         self.windows.iter().any(|w| w.id == id && w.modal)
@@ -593,6 +574,10 @@ const BTN_LEFT: u8 = 1 << 0;
 
 impl Compositor {
     pub fn handle_mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
+        if !self.active {
+            return;
+        }
+
         static FIRST_EVENT_LOGGED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
         if !FIRST_EVENT_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {

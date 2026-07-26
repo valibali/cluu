@@ -40,10 +40,10 @@ use cluu_wire::display::{
     DISPLAY_SET_VISIBLE_LABEL, DISPLAY_SURFACE_DESTROY_LABEL,
 };
 
-use libcluu::boot::{process_info, TOKEN_IPC};
+use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::ipc::{extract_reply_id, parse_message, reply};
 use libcluu::registry;
-use libcluu::syscall;
+use libcluu::syscall::{self, MAP_FRAME_TOKEN};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error};
 
@@ -144,14 +144,25 @@ pub extern "C" fn main() -> i32 {
     run_self_test(&mut scene, &mut backend);
 
     // 6. Event-driven main loop.
-    let tokens = [endpoint];
+    // Include the registry control endpoint so displayd can process grant
+    // requests from clients resolving "displayd:main" via the registry.
+    let registry_ep = registry::control_endpoint();
+    let tokens = if registry_ep != 0 {
+        [endpoint, registry_ep]
+    } else {
+        [endpoint, endpoint]
+    };
     let mut buf = [0u8; RECV_BUF_LEN];
     let mut surfaces = surfaces;
 
     loop {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, RECV_TIMEOUT_MS) {
-            Ok((_idx, len, sender_tid)) => {
+            Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    if registry_ep != 0 && idx == 1 {
+                        let _ = registry::handle_incoming_message(&msg, payload);
+                        continue;
+                    }
                     handle_message(
                         &msg,
                         payload,
@@ -415,10 +426,12 @@ fn handle_message(
         }
 
         DISPLAY_BUFFER_COMMIT_LABEL => {
-            // words[1..3] = token, words[3] = buffer_index, words[4..6] = seq
+            // words[4] = client_frame_token: T8 extension for pixel transfer
+            // (T7 gap — BufferAcquired.ptr_or_offset was never wired).
             let token = msg.words[1] as u64;
             let buffer_index = msg.words[2] as u8;
             let seq = msg.words[3] as u64;
+            let client_frame_token = msg.words[4] as u64;
 
             // Damage rects from payload: each rect is 16 bytes (4*u32).
             let mut rects: Vec<Rect> = Vec::new();
@@ -447,6 +460,80 @@ fn handle_message(
             }
             let damage = DamageList::from_rects(&rects);
 
+            // Frame-token path: compositor client provides pixels via frame token.
+            if client_frame_token != 0 {
+                let surface_idx = scene.find_surface_idx(token);
+                let copied = if let Some(idx) = surface_idx {
+                    let (sw, sh, spitch) = {
+                        let s = scene.surface(idx).unwrap();
+                        (s.width, s.height, s.pitch)
+                    };
+                    let pitch_words = spitch as usize / 4;
+                    let dr = damage.rects().first().copied().unwrap_or(Rect {
+                        x: 0, y: 0, w: sw, h: sh,
+                    });
+                    let total_bytes = (dr.w as usize) * (dr.h as usize) * 4;
+                    let pages = (total_bytes + 0xFFF) / 0x1000;
+                    let scratch_va: usize = 0xD000_0000;
+                    let flags = 0x07 | MAP_FRAME_TOKEN;
+                    let mapped = syscall::space_map_range(
+                        space_token(),
+                        scratch_va,
+                        client_frame_token as usize,
+                        flags,
+                        pages,
+                        0,
+                    ).is_ok();
+                    if mapped {
+                        let src_len = (dr.w as usize) * (dr.h as usize);
+                        let src = unsafe {
+                            core::slice::from_raw_parts(
+                                scratch_va as *const u32,
+                                src_len,
+                            )
+                        };
+                        if let Some(surf) = scene.surface_mut(idx) {
+                            let buf = &mut surf.buffer_data[buffer_index as usize];
+                            for row in 0..dr.h as usize {
+                                let dst_off = (dr.y as usize + row) * pitch_words + dr.x as usize;
+                                let src_off = row * dr.w as usize;
+                                let copy_len = dr.w as usize;
+                                if dst_off + copy_len <= buf.len() && src_off + copy_len <= src.len() {
+                                    buf[dst_off..dst_off + copy_len]
+                                        .copy_from_slice(&src[src_off..src_off + copy_len]);
+                                }
+                            }
+                        }
+                        let _ = syscall::space_unmap(
+                            space_token(),
+                            scratch_va,
+                            pages,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if copied {
+                    let _ = scene.present_surface(token, buffer_index, damage);
+                    let frame_damage = scene.composite_frame(backend);
+                    emit_flush_marker(&frame_damage);
+                }
+
+                let error_code = if copied { 0 } else { DisplayError::InvalidCapability as usize };
+                let reply_msg = Message::new(
+                    DISPLAY_BUFFER_COMMIT_LABEL,
+                    [error_code, 0, 0, 0, 0, 0],
+                    1,
+                );
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                return;
+            }
+
+            // State-machine path (original T7).
             let ts = surfaces.iter_mut().find(|s| s.token == token);
             let result = match ts {
                 Some(ts) => {

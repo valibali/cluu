@@ -115,6 +115,20 @@ fn clock_now_ms(cached_ep: &mut usize) -> u64 {
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("compositor: init");
+
+    let info = process_info();
+    let ipc_cap = info.tokens[TOKEN_IPC];
+
+    // Registry must be initialised BEFORE Compositor::init() so that
+    // init() can resolve displayd:main via registry::lookup_service.
+    if registry::init("compositor").is_err() {
+        let _ = debug_print("compositor: registry init failed");
+        return -1;
+    }
+    if registry::register_default_outputs().is_err() {
+        let _ = debug_print("compositor: register_default_outputs failed");
+    }
+
     let mut comp = match state::Compositor::init() {
         Ok(c) => c,
         Err(_) => {
@@ -123,20 +137,11 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    let info = process_info();
-    let ipc_cap = info.tokens[TOKEN_IPC];
     comp.instance_id = 0;
     // session_mode removed — compositor runs in single persistent mode
     // (Task 9, Plan 3: session lifecycle refactor)
     // Register as "compositor" (not "compositor:0") so lookup_service("compositor:client")
     // resolves correctly: it splits on ':' to get service="compositor", output="client".
-    if registry::init("compositor").is_err() {
-        let _ = debug_print("compositor: registry init failed");
-        return -1;
-    }
-    if registry::register_default_outputs().is_err() {
-        let _ = debug_print("compositor: register_default_outputs failed");
-    }
 
     comp.client_endpoint = match syscall::endpoint_create(ipc_cap) {
         Ok(ep) => ep,
@@ -404,7 +409,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                             );
                         }
                         protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended, kind } => {
-                            if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
+                            if !comp.active {
+                                comp.forward_input_event(ascii, modifiers, scancode, extended, kind);
+                            } else if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
                                 comp.forward_close_request();
                             } else if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
                                 match hk {
@@ -433,12 +440,10 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                             comp.handle_mouse_event(dx, dy, buttons);
                         }
                         protocol::Incoming::VtActivate => {
-                            comp.handle_vt_activate();
-                            let _ = debug_print("compositor: VT activate");
+                            // displayd owns the VT — no-op.
                         }
                         protocol::Incoming::VtDeactivate => {
-                            comp.handle_vt_deactivate();
-                            let _ = debug_print("compositor: VT deactivate");
+                            // displayd owns the VT — no-op.
                         }
                         protocol::Incoming::Shutdown => {
                             let _ = debug_print("compositor: shutdown");

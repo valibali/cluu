@@ -1,9 +1,12 @@
-//! Render pipeline: glyph blit, backbuf-to-fb flush, frame timing, and font helpers.
+//! Render pipeline: glyph blit, backbuf-to-displayd commit, frame timing, and font helpers.
 //!
 //! All methods are `impl Compositor` blocks; the type itself lives in `state`.
 
 use crate::config::MIN_FRAME_MS;
 use crate::state::{Compositor, PixelRect};
+use cluu_wire::display::{DISPLAY_BUFFER_COMMIT_LABEL, Rect};
+use libcluu::ipc;
+use libcluu::types::Message;
 
 impl Compositor {
     /// Blit pixel regions from SHM into the backbuffer.
@@ -112,7 +115,7 @@ impl Compositor {
         if !was_pixel_only {
             self.flush_grid_to_backbuf();
         }
-        self.flush_backbuf_to_fb();
+        self.flush_backbuf_to_displayd();
         self.deadlines.next_frame_ms = u64::MAX;
         self.last_flush_at = now_ms;
 
@@ -176,7 +179,7 @@ impl Compositor {
 impl Compositor {
     /// Glyph-blit cells whose value differs from `prev_cell_grid` and write
     /// the resulting pixels into `backbuf`. Caller must follow with
-    /// `flush_backbuf_to_fb` to push to the framebuffer.
+    /// `flush_backbuf_to_displayd` to push to displayd.
     pub fn flush_grid_to_backbuf(&mut self) {
         #[cfg(feature = "bench")]
         let _bench_start = read_tsc();
@@ -268,58 +271,68 @@ impl Compositor {
         }
     }
 
-    /// Push only the dirty pixel rect from the backbuf to the framebuffer.
+    /// Push the dirty pixel rect from the backbuf to displayd via a shared
+    /// frame token.
+    ///
+    /// Copies the dirty region from `backbuf` into the pre-mapped
+    /// `backbuf_va` frame, then sends `DISPLAY_BUFFER_COMMIT_LABEL` with the
+    /// frame token and damage rects.  displayd maps the frame, copies pixels
+    /// into its surface buffer, and composites+flushes to the real framebuffer.
     ///
     /// Consumes and clears `dirty_rect` via `.take()`.  If `dirty_rect` is
     /// `None` (nothing changed since the last flush) the function returns
-    /// immediately without touching the framebuffer.
-    ///
-    /// Rows are copied individually so only the changed columns within each
-    /// dirty row are written, reducing WC write traffic by ~14× for a typical
-    /// small TUI window on a full 1024×768 screen.
-    ///
-    /// No-op when `fb_ptr` is null (compositor spawned without FB mapping,
-    /// e.g. shell-spawn in test harness before T24 wires up procmgr autostart).
-    pub fn flush_backbuf_to_fb(&mut self) {
-        if self.fb_ptr.is_null() { return; }
+    /// immediately without sending anything to displayd.
+    pub fn flush_backbuf_to_displayd(&mut self) {
         let Some(rect) = self.dirty_rect.take() else { return; };
 
-        // Clamp to screen bounds defensively.
-        let x     = rect.x.min(self.width_px);
-        let y     = rect.y.min(self.height_px);
+        let x = rect.x.min(self.width_px);
+        let y = rect.y.min(self.height_px);
         let right = (rect.x + rect.w).min(self.width_px);
-        let bot   = (rect.y + rect.h).min(self.height_px);
+        let bot = (rect.y + rect.h).min(self.height_px);
         if right <= x || bot <= y { return; }
         let w = right - x;
         let h = bot - y;
 
-        #[cfg(feature = "bench")]
-        let _bench_start = read_tsc();
-
-        let pitch_words   = self.width_px as usize; // backbuf stride (u32 words)
-        let bytes_per_row = (w as usize) * 4;
-        let total_bytes = bytes_per_row * (h as usize);
+        let pitch_words = self.width_px as usize;
+        let frame_ptr = self.backbuf_va as *mut u32;
+        let frame_max_pixels = crate::state::BACKBUF_FRAME_BYTES / 4;
+        let region_pixels = (w as usize) * (h as usize);
+        if region_pixels > frame_max_pixels {
+            return;
+        }
 
         for row in 0..(h as usize) {
-            let py      = y as usize + row;
+            let py = y as usize + row;
             let src_off = py * pitch_words + x as usize;
-            // fb uses the hardware pitch (may differ from width_px * 4).
-            let dst_off_bytes = py * (self.pitch as usize) + (x as usize) * 4;
+            let dst_off = row * w as usize;
             unsafe {
-                let src = self.backbuf.as_ptr().add(src_off) as *const u8;
-                let dst = self.fb_ptr.add(dst_off_bytes);
-                core::ptr::copy_nonoverlapping(src, dst, bytes_per_row);
+                core::ptr::copy_nonoverlapping(
+                    self.backbuf.as_ptr().add(src_off),
+                    frame_ptr.add(dst_off),
+                    w as usize,
+                );
             }
         }
 
-        #[cfg(feature = "bench")]
-        {
-            let elapsed = read_tsc().saturating_sub(_bench_start);
-            let _ = libcluu::debug_print(&alloc::format!(
-                "BENCH_COMP_BB2FB_BYTES: cycles={} bytes={} rect={}x{}",
-                elapsed, total_bytes, w, h
-            ));
-        }
+        let dr = Rect { x, y, w, h };
+        let mut damage_bytes = [0u8; 16];
+        damage_bytes[0..4].copy_from_slice(&dr.x.to_le_bytes());
+        damage_bytes[4..8].copy_from_slice(&dr.y.to_le_bytes());
+        damage_bytes[8..12].copy_from_slice(&dr.w.to_le_bytes());
+        damage_bytes[12..16].copy_from_slice(&dr.h.to_le_bytes());
+        let commit_msg = Message::new(
+            DISPLAY_BUFFER_COMMIT_LABEL,
+            [
+                0,
+                self.surface_token as usize,
+                0,
+                0,
+                self.backbuf_frame_token as usize,
+                0,
+            ],
+            5,
+        );
+        let _ = ipc::send_msg_with_payload(self.displayd_ep, &commit_msg, &damage_bytes);
     }
 }
 
