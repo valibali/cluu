@@ -1,0 +1,127 @@
+Task 11: virtio-gpu PCI 2D driver
+Plan: .omo/plans/cluu-multimedia-stack.md (T11, line 168)
+Date: 2026-07-26
+
+== FILES CREATED ==
+
+userspace/virtio-gpu/Cargo.toml          — crate manifest (bin target)
+userspace/virtio-gpu/src/lib.rs          — main entry + re-exports
+userspace/virtio-gpu/src/driver.rs       — PCI init, feature negotiation, virtqueue
+                                           setup, command submission, fence, events,
+                                           self-test, registry publish, main loop
+userspace/virtio-gpu/src/protocol.rs     — virtio-gpu wire types (VirtIO 1.3 §5.7)
+                                           with compile-time size assertions
+containers/virtio-gpu/Cluufile           — container manifest (DEVICE pci, 1af4:1050)
+
+== FILES MODIFIED ==
+
+Cargo.toml                — added "userspace/virtio-gpu" to workspace members + default-members
+xtask/src/main.rs         — added virtio-gpu to sys_programs, driver_programs,
+                             INIT_CRATES, and manifest_rights_mask
+
+== BUILD VERIFICATION ==
+
+$ cargo build --manifest-path userspace/virtio-gpu/Cargo.toml \
+    --target triplets/x86_64-cluu-user.json \
+    -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+  Compiling cluu-virtio-gpu v0.1.0
+  Finished `dev` profile [unoptimized + debuginfo] in 0.53s
+
+$ cargo run -p container-build -- containers/virtio-gpu/Cluufile
+  BUILD target/x86_64-cluu-user/release/virtio-gpu.elf → /sys/virtio-gpu
+  Generated manifest.toml
+  ✓ Container 'virtio-gpu' built
+
+$ cargo xtask build-init-crate virtio-gpu
+  ✓ virtio-gpu built
+
+Binary: target/x86_64-cluu-user/release/virtio-gpu.elf (62112 bytes)
+Container image: target/containers/virtio-gpu/manifest.toml
+
+== PROTOCOL LAYOUT ASSERTIONS (compile-time) ==
+
+CtrlHdr              = 24 bytes  ✓
+Rect                 = 16 bytes  ✓
+DisplayOne           = 24 bytes  ✓
+RespDisplayInfo      = 24 + 24*16 = 408 bytes  ✓
+ResourceCreate2d     = 40 bytes  ✓
+ResourceUnref        = 32 bytes  ✓
+SetScanout           = 48 bytes  ✓
+ResourceFlush        = 48 bytes  ✓
+TransferToHost2d     = 56 bytes  ✓
+ResourceAttachBacking = 32 bytes  ✓
+ResourceDetachBacking = 32 bytes  ✓
+MemEntry             = 16 bytes  ✓
+GpuConfig            = 16 bytes  ✓
+
+== SERIAL MARKERS EMITTED BY DRIVER ==
+
+VIRTIO_GPU_PCI           — PCI device discovered (1af4:1050), IRQ assigned
+VIRTIO_GPU_QUEUES        — controlq + cursorq configured
+VIRTIO_GPU_DISPLAY_INFO  — GET_DISPLAY_INFO succeeded, scanout mode reported
+VIRTIO_GPU_CREATE_2D     — RESOURCE_CREATE_2D succeeded
+VIRTIO_GPU_ATTACH_BACKING — RESOURCE_ATTACH_BACKING succeeded
+VIRTIO_GPU_SCANOUT       — SET_SCANOUT succeeded
+VIRTIO_GPU_TRANSFER      — TRANSFER_TO_HOST_2D succeeded (fenced)
+VIRTIO_GPU_FLUSH         — RESOURCE_FLUSH succeeded (fenced)
+VIRTIO_GPU_TEST_PATTERN  — test pattern written + transferred + flushed
+VIRTIO_GPU_UNREF         — UNREF_RESOURCE succeeded
+VIRTIO_GPU_SELFTEST_OK   — full lifecycle self-test passed
+VIRTIO_GPU_OK            — driver registered as gpudev:main
+VIRTIO_GPU_IRQ           — first IRQ received
+
+== ERROR HANDLING (typed errors with fallback) ==
+
+- Bad response (non-OK response type): Err(InvalidState) + debug_print
+- Missing feature (VIRGL/UUID/BLOB): rejected at negotiation, logged
+- Queue exhaustion (free_capacity < needed): Err(Busy)
+- Display event (VIRTIO_GPU_EVENT_DISPLAY): acked via events_clear, re-query
+- Fence timeout (≥2s, FENCE_TIMEOUT_SPINS=2_000_000): Err(Timeout)
+- Command timeout (~1s, CMD_TIMEOUT_SPINS=1_000_000): Err(Timeout)
+
+== QEMU TEST INSTRUCTIONS ==
+
+The virtio-gpu driver is auto-spawned by drivermgr phase-2 (userdisk bind
+rules) when PCI discovers device 1af4:1050. To test:
+
+  QEMU_EXTRA_ARGS="-device virtio-gpu-pci,max_outputs=1" \
+    cargo xtask run
+
+Or with the Python harness:
+
+  QEMU_EXTRA_ARGS="-device virtio-gpu-pci,max_outputs=1" \
+    python -m cluu_harness --case l2_login --no-build
+
+The driver self-test creates a B8G8R8X8 resource, attaches a contiguous
+DMA backing, sets scanout 0, writes a vertical gradient (orange→blue),
+transfers to host (fenced), flushes (fenced), then unrefs. The test
+pattern fills the entire scanout.
+
+== PRE-EXISTING BUILD ISSUE ==
+
+The full `cargo xtask build` fails at the `container-mp` (MicroPython)
+step due to a pre-existing build output path mismatch unrelated to this
+task. The virtio-gpu crate, container image, and init crate all build
+successfully. The initrd assembly step does not run because the build
+aborts at container-mp before reaching it.
+
+== FEATURE NEGOTIATION ==
+
+Accepted:  VIRTIO_F_VERSION_1 (bit 32), VIRTIO_GPU_F_EDID (bit 1, optional)
+Rejected:  VIRTIO_GPU_F_VIRGL (bit 0), VIRTIO_GPU_F_RESOURCE_UUID (bit 2),
+           VIRTIO_GPU_F_RESOURCE_BLOB (bit 3)
+
+Classic 2D only. No blobs, no virgl, no rutabaga. Cursorq is set up but
+no cursor commands are implemented (deferred per task spec).
+
+== FENCE HANDLING ==
+
+TRANSFER_TO_HOST_2D and RESOURCE_FLUSH use VIRTIO_GPU_FLAG_FENCE with a
+monotonically increasing fence_id. The response fence_id is verified to
+match the command fence_id. Fence timeout is ≥2s (FENCE_TIMEOUT_SPINS).
+
+== EVENT PROCESSING ==
+
+The driver reads GpuConfig.events_read on every IRQ and at self-test
+start. If VIRTIO_GPU_EVENT_DISPLAY is set, it acks via events_clear and
+re-queries GET_DISPLAY_INFO.

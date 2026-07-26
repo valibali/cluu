@@ -1732,6 +1732,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "virtio-net",
         "virtio-9p",
         "virtio-snd",
+        "virtio-gpu",
         "netd",
         "tpmd",
         "usb-input",
@@ -1781,6 +1782,7 @@ fn create_initrd(profile: &str) -> Result<()> {
         "virtio-net",
         "virtio-9p",
         "virtio-snd",
+        "virtio-gpu",
         "usb-input",
         "kbd",
         "mouse",
@@ -1919,6 +1921,16 @@ fn manifest_rights_mask(path: &str) -> u32 {
                 | RIGHT_IRQ_ACK
         }
         "sys/virtio-snd" => {
+            RIGHT_PCI_ACCESS
+                | RIGHT_SPACE_MAP
+                | RIGHT_IPC_SEND
+                | RIGHT_IPC_RECV
+                | RIGHT_CREATE
+                | RIGHT_GRANT
+                | RIGHT_IRQ_HANDLE
+                | RIGHT_IRQ_ACK
+        }
+        "sys/virtio-gpu" => {
             RIGHT_PCI_ACCESS
                 | RIGHT_SPACE_MAP
                 | RIGHT_IPC_SEND
@@ -2970,6 +2982,7 @@ const INIT_CRATES: &[&str] = &[
     "virtio-net",
     "virtio-9p",
     "virtio-snd",
+    "virtio-gpu",
     "netd",
     "tpmd",
     "usb-input",

@@ -1,0 +1,15 @@
+[package]
+name = "cluu-virtio-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "Virtio-gpu PCI 2D driver for CLUU userspace"
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu-virtio-core = { path = "../virtio-core" }
+
+[[bin]]
+name = "virtio-gpu"
+path = "src/lib.rs"

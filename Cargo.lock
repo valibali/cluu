@@ -1356,6 +1356,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-virtio-gpu"
+version = "0.1.0"
+dependencies = [
+ "cluu-virtio-core",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-virtio-net"
 version = "0.1.0"
 dependencies = [
