@@ -21,6 +21,9 @@ CLANG_RESOURCE = $(shell clang --target=x86_64-unknown-none-elf -print-resource-
 
 POSIX_DEFS = -D_POSIX_TIMERS=1 -D_POSIX_MONOTONIC_CLOCK=200112L \
              -D_POSIX_THREADS=1 -D_POSIX_PRIORITY_SCHEDULING=1 \
+             -D_POSIX_THREAD_PRIORITY_SCHEDULING=1 \
+             -D_POSIX_THREAD_PROCESS_SHARED=1 \
+             -D_UNIX98_THREAD_MUTEX_ATTRIBUTES=1 \
              -DSSIZE_MAX=0x7FFFFFFFFFFFFFFFL
 
 SDL_DEFS   = -D__CLUU__=1 \
@@ -94,13 +97,13 @@ SDL_SOURCES = \
     $(SDL_TOP)/src/stdlib/SDL_string.c \
     $(SDL_TOP)/src/stdlib/SDL_strtokr.c \
     $(SDL_TOP)/src/thread/SDL_thread.c \
-    $(SDL_TOP)/src/thread/generic/SDL_syscond.c \
-    $(SDL_TOP)/src/thread/generic/SDL_sysmutex.c \
+    $(SDL_TOP)/src/thread/pthread/SDL_syscond.c \
+    $(SDL_TOP)/src/thread/pthread/SDL_sysmutex.c \
     $(SDL_TOP)/src/thread/generic/SDL_syssem.c \
-    $(SDL_TOP)/src/thread/generic/SDL_systhread.c \
-    $(SDL_TOP)/src/thread/generic/SDL_systls.c \
+    $(SDL_TOP)/src/thread/pthread/SDL_systhread.c \
+    $(SDL_TOP)/src/thread/pthread/SDL_systls.c \
     $(SDL_TOP)/src/timer/SDL_timer.c \
-    $(SDL_TOP)/src/timer/dummy/SDL_systimer.c \
+    $(SDL_TOP)/src/timer/unix/SDL_systimer.c \
     $(SDL_TOP)/src/audio/SDL_audio.c \
     $(SDL_TOP)/src/audio/SDL_audiocvt.c \
     $(SDL_TOP)/src/audio/SDL_audiodev.c \

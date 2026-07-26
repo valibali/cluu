@@ -75,6 +75,13 @@ pub extern "C" fn _gettimeofday(tv: *mut Timeval, _tz: *mut c_void) -> c_int {
     }
 }
 
+/// Non-underscore alias for `_gettimeofday` — SDL's unix timer backend
+/// (`src/timer/unix/SDL_systimer.c`) calls `gettimeofday` directly.
+#[no_mangle]
+pub extern "C" fn gettimeofday(tv: *mut Timeval, tz: *mut c_void) -> c_int {
+    _gettimeofday(tv, tz)
+}
+
 /// Get process times.
 ///
 /// # Arguments

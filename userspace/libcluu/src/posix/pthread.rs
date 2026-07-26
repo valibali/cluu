@@ -881,6 +881,117 @@ pub extern "C" fn pthread_attr_getstacksize(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Mutex attributes (stubs — CLUU mutexes have no configurable type)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// pthread_mutexattr_t — opaque to CLUU; we accept newlib's struct layout
+/// (sized to fit newlib's `_pthreadtypes.h` definition) and ignore contents.
+#[repr(C)]
+pub struct pthread_mutexattr_t {
+    _opaque: [u8; 32],
+}
+
+#[no_mangle]
+pub extern "C" fn pthread_mutexattr_init(_attr: *mut pthread_mutexattr_t) -> c_int {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut pthread_mutexattr_t) -> c_int {
+    0
+}
+
+/// pthread_mutexattr_settype — accepted but ignored. CLUU's mutex is
+/// non-recursive; SDL's FAKE_RECURSIVE_MUTEX path tracks ownership via
+/// pthread_self(), so the attribute type is irrelevant.
+#[no_mangle]
+pub extern "C" fn pthread_mutexattr_settype(_attr: *mut pthread_mutexattr_t, _kind: c_int) -> c_int {
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Signal mask (no-op — CLUU has no kernel signal delivery to threads)
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub const SIG_BLOCK: c_int = 0;
+pub const SIG_UNBLOCK: c_int = 1;
+pub const SIG_SETMASK: c_int = 2;
+
+/// pthread_sigmask — no-op. CLUU signals are userspace-only (signal.rs
+/// dispatch table), never kernel-delivered per-thread, so blocking them
+/// in child threads is a no-op.
+#[no_mangle]
+pub extern "C" fn pthread_sigmask(
+    _how: c_int,
+    _set: *const u64,
+    _oset: *mut u64,
+) -> c_int {
+    0
+}
+
+/// pthread_setcanceltype — no-op stub. CLUU has no thread cancellation
+/// mechanism. SDL calls this to set PTHREAD_CANCEL_ASYNCHRONOUS; the
+/// no-op is safe because nothing in CLUU ever cancels threads.
+#[no_mangle]
+pub extern "C" fn pthread_setcanceltype(_type: c_int, _oldtype: *mut c_int) -> c_int {
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scheduler parameter stubs (CLUU scheduler doesn't expose policy/priority)
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub const SCHED_OTHER: c_int = 0;
+pub const SCHED_FIFO: c_int = 1;
+pub const SCHED_RR: c_int = 2;
+
+/// sched_param — matches newlib's sys/sched.h layout.
+#[repr(C)]
+pub struct sched_param {
+    pub sched_priority: c_int,
+}
+
+/// pthread_getschedparam — reports SCHED_OTHER + priority 0 (the only
+/// policy CLUU's userspace scheduler exposes).
+#[no_mangle]
+pub extern "C" fn pthread_getschedparam(
+    _thread: pthread_t,
+    policy: *mut c_int,
+    param: *mut sched_param,
+) -> c_int {
+    if !policy.is_null() {
+        unsafe { *policy = SCHED_OTHER };
+    }
+    if !param.is_null() {
+        unsafe { (*param).sched_priority = 0 };
+    }
+    0
+}
+
+/// pthread_setschedparam — no-op. CLUU's scheduler is priority-fixed;
+/// userspace priority hints are silently accepted.
+#[no_mangle]
+pub extern "C" fn pthread_setschedparam(
+    _thread: pthread_t,
+    _policy: c_int,
+    _param: *const sched_param,
+) -> c_int {
+    0
+}
+
+/// sched_get_priority_max — nominal max for SDL's priority computation.
+#[no_mangle]
+pub extern "C" fn sched_get_priority_max(_policy: c_int) -> c_int {
+    99
+}
+
+/// sched_get_priority_min — nominal min.
+#[no_mangle]
+pub extern "C" fn sched_get_priority_min(_policy: c_int) -> c_int {
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Mutex (futex-based, 3-state per Drepper's "Futexes Are Tricky")
 // ═══════════════════════════════════════════════════════════════════════════
 

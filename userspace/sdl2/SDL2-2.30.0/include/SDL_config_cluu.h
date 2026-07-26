@@ -145,18 +145,20 @@
 #define HAVE_NANOSLEEP 1
 #define HAVE_GETHOSTNAME 1
 #define HAVE_SYSCONF 1
+#define HAVE_CLOCK_GETTIME 1
+#define HAVE_PTHREAD_H 1
 
 #define HAVE_GCC_SYNC_LOCK_TEST_AND_SET 1
 #define HAVE_GCC_ATOMICS 1
 
-/* Threading: disabled for T14 (stubs in src/thread/generic/). T15 turns on
- * real CLUU synchronization (clocks, mutex, cond, TLS) and selects a real
- * backend. The dummy stubs let the static library link and let SDL_Init
- * succeed without pulling in pthread yet. */
-#define SDL_THREADS_DISABLED 1
+/* Threading: real CLUU pthread backend (libcluu/posix/pthread.rs).
+ * SDL_THREAD_PTHREAD_RECURSIVE_MUTEX intentionally undefined — CLUU's
+ * mutex is non-recursive; SDL's FAKE_RECURSIVE_MUTEX path tracks
+ * ownership via pthread_self(). */
+#define SDL_THREAD_PTHREAD 1
 
-/* Timer: dummy backend for T14. Real monotonic/realtime clocks land in T15. */
-#define SDL_TIMER_DUMMY 1
+/* Timer: unix backend (clock_gettime + nanosleep from libcluu/posix/time.rs). */
+#define SDL_TIMER_UNIX 1
 
 /* Audio: dummy + disk backends. Real audiod backend lands in T18. */
 #define SDL_AUDIO_DRIVER_DUMMY 1

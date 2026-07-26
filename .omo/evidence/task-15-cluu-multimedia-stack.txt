@@ -257,3 +257,93 @@ pattern as T14's init_quit_probe).
   # Compile Rust tests (can't run on host due to pre-existing segfault):
   cargo test --manifest-path userspace/libcluu/Cargo.toml \
       --features "host-test posix" --no-run
+
+## Real-backend enablement (follow-up)
+
+Initial T15 implemented the POSIX primitives but left SDL_config_cluu.h
+with SDL_THREADS_DISABLED 1 and SDL_TIMER_DUMMY 1 — SDL couldn't use
+the new primitives. Follow-up enabled real backends:
+
+### SDL_config_cluu.h changes
+
+- Removed `#define SDL_THREADS_DISABLED 1`
+- Removed `#define SDL_TIMER_DUMMY 1`
+- Added `#define SDL_THREAD_PTHREAD 1`
+- Added `#define SDL_TIMER_UNIX 1`
+- Added `#define HAVE_CLOCK_GETTIME 1`
+- Added `#define HAVE_PTHREAD_H 1`
+- HAVE_NANOSLEEP already defined
+- SDL_THREAD_PTHREAD_RECURSIVE_MUTEX intentionally NOT defined — CLUU's
+  mutex is non-recursive; SDL's FAKE_RECURSIVE_MUTEX path tracks
+  ownership via pthread_self()
+
+### Makefile source file swaps
+
+- src/thread/generic/SDL_systhread.c  → src/thread/pthread/SDL_systhread.c
+- src/thread/generic/SDL_sysmutex.c   → src/thread/pthread/SDL_sysmutex.c
+- src/thread/generic/SDL_syscond.c    → src/thread/pthread/SDL_syscond.c
+- src/thread/generic/SDL_systls.c     → src/thread/pthread/SDL_systls.c
+- src/timer/dummy/SDL_systimer.c      → src/timer/unix/SDL_systimer.c
+- KEPT src/thread/generic/SDL_syssem.c (avoids implementing POSIX sem_t)
+
+### Makefile POSIX_DEFS additions
+
+- `-D_POSIX_THREAD_PRIORITY_SCHEDULING=1` — unguards
+  pthread_getschedparam/setschedparam in newlib's pthread.h (SDL needs them)
+- `-D_POSIX_THREAD_PROCESS_SHARED=1` — unguards pthread_mutexattr_t fields
+- `-D_UNIX98_THREAD_MUTEX_ATTRIBUTES=1` — unguards mutex type field
+
+### Additional pthread.rs stubs (SDL pthread backend requires)
+
+- `pthread_mutexattr_init/destroy/settype` — no-op stubs (CLUU mutex has
+  no configurable type; SDL's FAKE_RECURSIVE_MUTEX path ignores the attr)
+- `pthread_sigmask(how, set, oset)` — no-op (CLUU signals are userspace-only)
+- `pthread_setcanceltype(type, oldtype)` — no-op (no thread cancellation)
+- `pthread_getschedparam(thread, policy, param)` — reports SCHED_OTHER + 0
+- `pthread_setschedparam(thread, policy, param)` — no-op (priority-fixed)
+- `sched_get_priority_max/min(policy)` — nominal 99/0
+- `SCHED_OTHER`/`SCHED_FIFO`/`SCHED_RR` constants, `sched_param` struct,
+  `pthread_mutexattr_t` struct, `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK`
+
+### time.rs addition
+
+- `gettimeofday(tv, tz)` — non-underscore alias for `_gettimeofday`;
+  SDL's unix timer calls `gettimeofday` directly (no underscore prefix)
+
+### Verification with real backends
+
+  $ cd userspace/sdl2 && make clean && make
+  Built libSDL2.a (99 objects) — zero errors, zero warnings
+
+  Real backend symbols confirmed in libSDL2.a (not dummy stubs):
+    T SDL_SYS_CreateThread   (pthread backend)
+    T SDL_GetTicks64         (unix timer backend)
+    T SDL_Delay              (unix timer backend)
+    T SDL_CondWaitTimeout    (pthread cond backend)
+    T SDL_LockMutex          (pthread mutex backend)
+    T SDL_SYS_GetTLSData     (pthread TLS backend)
+
+  $ make probe
+  Links clean — zero undefined symbols (llvm-nm-14 -u returns nothing)
+
+  T15 C sync probe also links clean with updated libcluu_syscalls.a.
+
+  New symbols in libcluu_syscalls.a:
+    T pthread_sigmask
+    T pthread_setcanceltype
+    T pthread_mutexattr_init / destroy / settype
+    T pthread_getschedparam / setschedparam
+    T sched_get_priority_max / min
+    T gettimeofday
+    T delay  (from initial T15)
+    T pthread_cond_timedwait  (from initial T15)
+    T pthread_attr_setdetachstate  (from initial T15)
+
+### SDL sem backend decision
+
+SDL's pthread/SDL_syssem.c uses POSIX sem_t (sem_init, sem_wait,
+sem_post, sem_timedwait, sem_getvalue). Implementing full POSIX
+semaphores would widen POSIX beyond what SDL's timer/thread contract
+requires. Kept generic/SDL_syssem.c (SDL_mutex + SDL_cond based) —
+it composes with the real pthread mutex/cond backends and needs no
+new POSIX primitives.
