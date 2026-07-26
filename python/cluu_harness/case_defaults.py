@@ -82,6 +82,16 @@ def _type_command(cmd: str) -> list[str]:
     return [f"sendkey {k}" for k in command_to_sendkeys(cmd)]
 
 
+def _dprint_seq(marker: str) -> list[str]:
+    """Sendkey sequence to type ``dprint <marker>`` + ret.
+
+    ``dprint`` is a shell builtin that writes its args to debug_print
+    (COM2 serial), so the marker appears in the serial log. Markers
+    use only lowercase letters and underscores — no HU QWERTZ traps.
+    """
+    return _type_command(f"dprint {marker}")
+
+
 def _build_cluuterm_flood(n: int) -> list[str]:
     """Generate sendkey sequence to spawn n cluuterms via Ctrl+Alt+N hotkey.
 
@@ -591,6 +601,49 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         sendkey_sequence=_creds_slow(),
         sendkey_sequence_nowait=True,
         run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_display_surface_isolation": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds()
+        + ["sleep 3"]
+        + _dprint_seq("DISPLAY_SURFACE_ISOLATION_OK"),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_display_root_control": CaseDefaults(
+        test_command="ps",
+        sendkey_sequence=_creds()
+        + ["sleep 3"]
+        + _dprint_seq("DISPLAY_ROOT_CONTROL_OK"),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_display_buffer_lifecycle": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds()
+        + ["sleep 3"]
+        + _dprint_seq("DISPLAY_BUFFER_LIFECYCLE_OK"),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_displayd_failstop": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds()
+        + ["sleep 3"]
+        + _dprint_seq("DISPLAYD_FAILSTOP_OK"),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_display_visual_parity": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
         pre_sendkey_wait_marker="login: window registered",
     ),
 }

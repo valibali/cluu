@@ -656,6 +656,60 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             category="generic",
             description="multimedia baseline: DOOM fullscreen direct framebuffer",
         ),
+        # ---- T10: displayd isolation / lifecycle / failstop -----------
+        MarkerModeSpec(
+            name="l2_display_surface_isolation",
+            required_markers=[
+                _TSC,
+                "DISPLAYD_READY",
+                "procmgr: SESSION_CREATE ok",
+                "DISPLAY_SURFACE_ISOLATION_OK",
+            ],
+            category="generic",
+            description="T10: displayd serves two sessions; surface isolation holds",
+        ),
+        MarkerModeSpec(
+            name="l2_display_root_control",
+            required_markers=[
+                _TSC,
+                "DISPLAYD_READY",
+                "DISPLAY_ROOT_CONTROL_OK",
+            ],
+            category="generic",
+            description="T10: root session observes all displayd processes",
+        ),
+        MarkerModeSpec(
+            name="l2_display_buffer_lifecycle",
+            required_markers=[
+                _TSC,
+                "DISPLAYD_READY",
+                "DISPLAYD_SELFTEST_OK",
+                "DISPLAY_BUFFER_LIFECYCLE_OK",
+            ],
+            category="generic",
+            description="T10: displayd self-test create/destroy/damage/quota lifecycle",
+        ),
+        MarkerModeSpec(
+            name="l2_displayd_failstop",
+            required_markers=[
+                _TSC,
+                "DISPLAYD_READY",
+                "compositor: ready",
+                "DISPLAYD_FAILSTOP_OK",
+            ],
+            category="generic",
+            description="T10: displayd+compositor failstop contract verified",
+        ),
+        MarkerModeSpec(
+            name="l2_display_visual_parity",
+            required_markers=[
+                _TSC,
+                "DISPLAYD_READY",
+                "compositor: ready",
+            ],
+            category="generic",
+            description="T10: FB dump captured for visual parity vs T2 baseline",
+        ),
     ]
 }
 

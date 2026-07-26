@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from cluu_harness.cases import cluu_case
 
+# Importing displayd_isolation registers its cases via @cluu_case
+# decorators. Side-effect import — same pattern as this module.
+from cluu_harness.cases import displayd_isolation  # noqa: E402, F401
+
 
 @cluu_case(
     "l2_login",
@@ -529,6 +533,11 @@ __all__ = [
     "L2Color256",
     "L2DhcpPing",
     "L2DevNodes",
+    "L2DisplaySurfaceIsolation",
+    "L2DisplayRootControl",
+    "L2DisplayBufferLifecycle",
+    "L2DisplaydFailstop",
+    "L2DisplayVisualParity",
     "L2Ext2Write",
     "L2Login",
     "L2Ls",
