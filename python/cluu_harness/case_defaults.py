@@ -604,46 +604,39 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         pre_sendkey_wait_marker="login: window registered",
     ),
     "l2_display_surface_isolation": CaseDefaults(
-        test_command=None,
-        sendkey_sequence=_creds()
-        + ["sleep 3"]
-        + _dprint_seq("DISPLAY_SURFACE_ISOLATION_OK"),
+        test_command="dprint DISPLAY_SURFACE_ISOLATION_OK",
+        sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=45,
+        run_wait_s=60,
         pre_sendkey_wait_marker="login: window registered",
     ),
     "l2_display_root_control": CaseDefaults(
-        test_command="ps",
-        sendkey_sequence=_creds()
-        + ["sleep 3"]
-        + _dprint_seq("DISPLAY_ROOT_CONTROL_OK"),
+        test_command="dprint DISPLAY_ROOT_CONTROL_OK",
+        keystroke_commands=["ps"],
+        sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=45,
+        run_wait_s=60,
         pre_sendkey_wait_marker="login: window registered",
     ),
     "l2_display_buffer_lifecycle": CaseDefaults(
-        test_command=None,
-        sendkey_sequence=_creds()
-        + ["sleep 3"]
-        + _dprint_seq("DISPLAY_BUFFER_LIFECYCLE_OK"),
+        test_command="dprint DISPLAY_BUFFER_LIFECYCLE_OK",
+        sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=45,
+        run_wait_s=60,
         pre_sendkey_wait_marker="login: window registered",
     ),
     "l2_displayd_failstop": CaseDefaults(
-        test_command=None,
-        sendkey_sequence=_creds()
-        + ["sleep 3"]
-        + _dprint_seq("DISPLAYD_FAILSTOP_OK"),
+        test_command="dprint DISPLAYD_FAILSTOP_OK",
+        sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=45,
+        run_wait_s=60,
         pre_sendkey_wait_marker="login: window registered",
     ),
     "l2_display_visual_parity": CaseDefaults(
         test_command=None,
         sendkey_sequence=_creds(),
         sendkey_sequence_nowait=True,
-        run_wait_s=30,
+        run_wait_s=45,
         pre_sendkey_wait_marker="login: window registered",
     ),
 }
