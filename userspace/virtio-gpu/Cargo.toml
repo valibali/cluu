@@ -12,4 +12,4 @@ cluu-virtio-core = { path = "../virtio-core" }
 
 [[bin]]
 name = "virtio-gpu"
-path = "src/lib.rs"
+path = "src/main.rs"
