@@ -11,6 +11,17 @@ use crate::TokenHandle;
 /// Wire label for the unified spawn IPC verb.
 pub const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = 50;
 
+/// ProcessInfo.params slot carrying the session-scoped displayd endpoint.
+///
+/// Installed at session spawn by root-procmgr (the sole holder of the global
+/// displayd control endpoint). Session binaries resolve `displayd:main` via
+/// this parameter — `subscribe_output("displayd", "main")` returns the
+/// session-scoped endpoint, NOT a global one. Analogous to
+/// `PARAM_SESSION_VFS_EP` (libcluu::boot, slot 18). The global endpoint never
+/// appears in any compositor or descendant envelope (AGENTS.md §2, §3, §5,
+/// §6). No runtime ACL — authority is possession of the scoped endpoint.
+pub const PARAM_DISPLAYD_EP: usize = 19;
+
 /// One spawn call's payload. Postcard-serialized into the IPC payload buffer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpawnEnvelope {

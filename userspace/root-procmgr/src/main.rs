@@ -339,6 +339,16 @@ struct ProcessManager {
     pending_restarts: BTreeSet<u64>,
     session_pmgr_endpoints: BTreeSet<usize>,
     session_service_tokens: BTreeMap<u32, alloc::vec::Vec<usize>>,
+    /// Global displayd control endpoint. Sole holder is root-procmgr
+    /// (AGENTS.md §6 root-godmode). NEVER forwarded to any compositor or
+    /// descendant. Used to broker cross-session display operations on root's
+    /// behalf. Displayd (T7) will service this endpoint for global control.
+    global_displayd_control_ep: usize,
+    /// Per-session scoped displayd endpoints installed via PARAM_DISPLAYD_EP
+    /// at session spawn. Keyed by session_id. The SEND-only derived token is
+    /// given to session-procmgr; root-procmgr retains the RECV capability.
+    /// Revoked on session teardown.
+    session_displayd_endpoints: BTreeMap<u32, usize>,
     /// Persistent shared-ring region for VFS bulk reads. Allocated once on
     /// first `load_from_vfs_ring` and reused for every subsequent call so
     /// the VFS-side grant survives across loads.
@@ -424,6 +434,8 @@ impl ProcessManager {
             pending_restarts: BTreeSet::new(),
             session_pmgr_endpoints: BTreeSet::new(),
             session_service_tokens: BTreeMap::new(),
+            global_displayd_control_ep: 0,
+            session_displayd_endpoints: BTreeMap::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
             pg_table: PgTable::new(),
@@ -1108,6 +1120,12 @@ impl ProcessManager {
         registry::register_output("session", self.spawn_endpoint)?;
         registry::register_output("main", self.spawn_endpoint)?;
         self.fault_endpoint = endpoint_create(self.token)?;
+
+        self.global_displayd_control_ep = endpoint_create(self.token)?;
+        let _ = debug_print(&format!(
+            "procmgr: global displayd control endpoint created ep={}",
+            self.global_displayd_control_ep
+        ));
 
         // Request tty:N main for all VTs (non-blocking); grants arrive via registry events.
         for i in 0..VT_COUNT {
@@ -5013,6 +5031,46 @@ impl ProcessManager {
         mounts
     }
 
+    /// Create a per-session scoped displayd endpoint for `session_id`.
+    ///
+    /// Root-procmgr retains the RECV capability (stored in
+    /// `session_displayd_endpoints`) and returns a SEND-only derived token
+    /// for installation via `PARAM_DISPLAYD_EP`. The global displayd control
+    /// endpoint (`global_displayd_control_ep`) is NEVER forwarded — only this
+    /// per-session SEND token leaves root-procmgr's token table. When displayd
+    /// (T7) launches it will be granted the RECV capabilities to service
+    /// requests. Revoked on session teardown (AGENTS.md §2, §3, §5, §6).
+    fn mint_session_displayd_ep(&mut self, session_id: u32) -> Option<usize> {
+        let ep = match endpoint_create(self.token) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: displayd endpoint_create FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                return None;
+            }
+        };
+        let send_rights = Rights::IPC_SEND.bits() as usize;
+        let send_tok = match token_derive(ep, send_rights | (Rights::IPC_CALL.bits() as usize), u64::MAX) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: displayd token_derive FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                let _ = token_revoke(ep);
+                return None;
+            }
+        };
+        self.session_displayd_endpoints.insert(session_id, ep);
+        let _ = debug_print(&format!(
+            "procmgr: session displayd endpoint minted sid={} recv_ep={} send_tok={}",
+            session_id & 0xFF, ep, send_tok
+        ));
+        Some(send_tok)
+    }
+
     /// Spawn a `session-procmgr` instance for the given session.
     ///
     /// Serialises a `procmgr_common::wire::SessionEnvelope` and passes it to
@@ -5021,7 +5079,14 @@ impl ProcessManager {
     /// reads those raw bytes on startup and deserialises the envelope.
     ///
     /// Errors are logged but NOT fatal — the session is created regardless.
-    fn spawn_session_procmgr_for(&mut self, session_id: u32, user_name: &str, profile_name: &str, session_token: u64) {
+    fn spawn_session_procmgr_for(
+        &mut self,
+        session_id: u32,
+        user_name: &str,
+        profile_name: &str,
+        session_token: u64,
+        displayd_send_tok: usize,
+    ) {
         use procmgr_common::wire::SessionEnvelope;
 
         let block_region_cap = self.mint_session_block_region();
@@ -5096,6 +5161,10 @@ impl ProcessManager {
         let saved_view_mgr = self.view_mgr_token;
         self.view_mgr_token = scoped_view_mgr;
 
+        let param_overrides: [(usize, u64); 1] = [
+            (cluu_wire::spawn::PARAM_DISPLAYD_EP, displayd_send_tok as u64),
+        ];
+
         let spawn_result = self.spawn_service_with_env(
             "/bin/session-procmgr",
             0,                      // default priority
@@ -5110,7 +5179,7 @@ impl ProcessManager {
             CapProfile::SUPERVISOR, // needs full VFS access to spawn children
             0,
             0,
-            &[],
+            &param_overrides,       // PARAM_DISPLAYD_EP = session-scoped displayd SEND token
             None,
             &[],
             &[],
@@ -7395,12 +7464,20 @@ impl ProcessManager {
 
         self.session_creators.insert(caller_pid, session_id);
 
+        let profile_name = rec.profile_name.clone();
+        let displayd_send_tok = self.mint_session_displayd_ep(session_id).unwrap_or(0);
+
         // Spawn session-procmgr for this session.  Serialise a minimal
         // SessionEnvelope and pass it to the child via argv bytes.
         // Caps are left empty for now; the session-procmgr initialises its
         // kernel adapter with MockKernel until Phase 12.4 wires real caps.
-        let profile_name = rec.profile_name.clone();
-        self.spawn_session_procmgr_for(session_id, &req.user_name, &profile_name, token);
+        self.spawn_session_procmgr_for(
+            session_id,
+            &req.user_name,
+            &profile_name,
+            token,
+            displayd_send_tok,
+        );
         self.spawn_session_vfs_for(session_id, &req.user_name);
 
         let reply =
@@ -7744,6 +7821,13 @@ impl ProcessManager {
             for tok in tokens {
                 let _ = thread_destroy(tok);
             }
+        }
+        if let Some(displayd_ep) = self.session_displayd_endpoints.remove(&sid) {
+            let _ = token_revoke(displayd_ep);
+            let _ = debug_print(&format!(
+                "procmgr: session displayd endpoint revoked sid={} ep={}",
+                sid & 0xFF, displayd_ep
+            ));
         }
         let event = cluu_wire::session::SessionEndedEvent { session_id: sid };
         let bytes = postcard::to_allocvec(&event).expect("ser");

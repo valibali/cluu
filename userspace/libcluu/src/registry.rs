@@ -118,6 +118,15 @@ pub fn lookup_service(full_name: &str) -> Option<usize> {
         }
     }
 
+    if full_name == "displayd:main" {
+        let info = process_info();
+        let session_displayd_ep =
+            info.params[cluu_wire::spawn::PARAM_DISPLAYD_EP] as usize;
+        if session_displayd_ep != 0 {
+            return Some(session_displayd_ep);
+        }
+    }
+
     {
         let state = REGISTRY_STATE.lock();
         if let Some(token) = state.lookup_cache.get(full_name) {
@@ -312,6 +321,15 @@ pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize
         let session_vfs_ep = info.params[crate::boot::PARAM_SESSION_VFS_EP] as usize;
         if session_vfs_ep != 0 {
             return Ok(session_vfs_ep);
+        }
+    }
+
+    if service_name == "displayd" && endpoint_name == "main" {
+        let info = process_info();
+        let session_displayd_ep =
+            info.params[cluu_wire::spawn::PARAM_DISPLAYD_EP] as usize;
+        if session_displayd_ep != 0 {
+            return Ok(session_displayd_ep);
         }
     }
 

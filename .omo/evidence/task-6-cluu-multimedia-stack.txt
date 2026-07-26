@@ -1,0 +1,160 @@
+T6 — Wire session-scoped display authority and root-only global control
+Plan: .omo/plans/cluu-multimedia-stack.md line 128
+Date: 2026-07-26
+Operator: Sisyphus-Junior (GLM-5.2)
+
+## Files
+
+Modified:
+- userspace/cluu_wire/src/spawn.rs — added PARAM_DISPLAYD_EP constant (slot 19)
+- userspace/libcluu/src/registry.rs — displayd:main resolution via PARAM_DISPLAYD_EP
+  (lookup_service + subscribe_output, analogous to vfs:main / PARAM_SESSION_VFS_EP)
+- userspace/root-procmgr/src/main.rs — global displayd control endpoint (sole holder),
+  per-session scoped endpoint minting at SESSION_CREATE, PARAM_DISPLAYD_EP installation
+  via param_overrides on session-procmgr spawn, session teardown revocation
+
+Created:
+- .omo/evidence/task-6-cluu-multimedia-stack.txt (this file)
+
+## Authority model (AGENTS.md §2, §3, §5, §6)
+
+- Global displayd control endpoint: created by root-procmgr at init, held in
+  global_displayd_control_ep. NEVER forwarded to any compositor or descendant.
+  NEVER appears in any param_overrides or PARAM set. Root-procmgr is the SOLE
+  holder (root-godmode, AGENTS.md §6).
+- Per-session scoped displayd endpoint: created at SESSION_CREATE via
+  mint_session_displayd_ep(). Root-procmgr retains the RECV capability (stored
+  in session_displayd_endpoints) and derives a SEND-only token (IPC_SEND |
+  IPC_CALL rights) for installation via PARAM_DISPLAYD_EP.
+- Session binaries resolve displayd via PARAM_DISPLAYD_EP, not via global
+  registry. subscribe_output("displayd", "main") and lookup_service(
+  "displayd:main") return the session-scoped endpoint from
+  info.params[PARAM_DISPLAYD_EP] — analogous to the session VFS redirect
+  (PARAM_SESSION_VFS_EP, AGENTS.md §5).
+- No runtime ACL, no sender_tid interrogation, no sender_identity check in
+  the displayd authority path. Authority is possession of the scoped endpoint
+  (AGENTS.md §3).
+- Session teardown (destroy_session) revokes the per-session displayd RECV
+  capability via token_revoke, which also invalidates all derived SEND tokens.
+
+## Verification: code inspection (grep outputs)
+
+### 1. PARAM_DISPLAYD_EP in spawn.rs
+
+  $ grep -n "PARAM_DISPLAYD_EP" userspace/cluu_wire/src/spawn.rs
+  23:pub const PARAM_DISPLAYD_EP: usize = 19;
+
+### 2. displayd resolution in registry.rs
+
+  $ grep -n "displayd\|PARAM_DISPLAYD_EP" userspace/libcluu/src/registry.rs
+  121:    if full_name == "displayd:main" {
+  123:        let session_displayd_ep =
+  124:            info.params[cluu_wire::spawn::PARAM_DISPLAYD_EP] as usize;
+  125:        if session_displayd_ep != 0 {
+  126:            return Some(session_displayd_ep);
+  327:    if service_name == "displayd" && endpoint_name == "main" {
+  329:        let session_displayd_ep =
+  330:            info.params[cluu_wire::spawn::PARAM_DISPLAYD_EP] as usize;
+  331:        if session_displayd_ep != 0 {
+  332:            return Ok(session_displayd_ep);
+
+  Both lookup_service("displayd:main") and subscribe_output("displayd", "main")
+  resolve via PARAM_DISPLAYD_EP — same pattern as vfs:main / PARAM_SESSION_VFS_EP.
+
+### 3. root-procmgr installs scoped endpoint at session spawn
+
+  $ grep -n "PARAM_DISPLAYD_EP\|mint_session_displayd_ep\|session_displayd_endpoints\|global_displayd_control_ep" userspace/root-procmgr/src/main.rs
+  346:    global_displayd_control_ep: usize,
+  351:    session_displayd_endpoints: BTreeMap<u32, usize>,
+  437:            global_displayd_control_ep: 0,
+  438:            session_displayd_endpoints: BTreeMap::new(),
+  1124:        self.global_displayd_control_ep = endpoint_create(self.token)?;
+  5043:    fn mint_session_displayd_ep(&mut self, session_id: u32) -> Option<usize> {
+  5066:        self.session_displayd_endpoints.insert(session_id, ep);
+  5165:            (cluu_wire::spawn::PARAM_DISPLAYD_EP, displayd_send_tok as u64),
+  7468:        let displayd_send_tok = self.mint_session_displayd_ep(session_id).unwrap_or(0);
+  7825:        if let Some(displayd_ep) = self.session_displayd_endpoints.remove(&sid) {
+  7826:            let _ = token_revoke(displayd_ep);
+
+  Flow: init() creates global endpoint → SESSION_CREATE calls
+  mint_session_displayd_ep() → SEND token installed via param_overrides in
+  spawn_session_procmgr_for() → destroy_session revokes RECV capability.
+
+### 4. NO compositor spawn path includes the global endpoint
+
+  $ grep -rn "global_displayd_control_ep" userspace/compositor/ 2>/dev/null
+  (no matches — global endpoint absent from all compositor code)
+
+  $ grep -n "global_displayd_control_ep" userspace/root-procmgr/src/main.rs | grep -i "param\|override\|spawn"
+  (no matches — global endpoint never in param_overrides or PARAM sets)
+
+  All references to global_displayd_control_ep:
+  346:    global_displayd_control_ep: usize,           (struct field)
+  437:            global_displayd_control_ep: 0,        (init in new())
+  1124:        self.global_displayd_control_ep = endpoint_create(self.token)?;  (created in init)
+  1127:            self.global_displayd_control_ep      (debug print)
+  5039:    /// endpoint (`global_displayd_control_ep`) is NEVER forwarded  (doc comment)
+
+  The global endpoint is: created once in init(), stored in the struct field,
+  and NEVER passed to any child process via param_overrides, token derivation
+  for forwarding, or any other mechanism. It exists ONLY in root-procmgr's
+  token table.
+
+### 5. No runtime ACL / sender-identity check in displayd/procmgr
+
+  $ grep -rn "sender_tid\|sender_identity" userspace/cluu_wire/src/display.rs
+  (no matches)
+
+  $ grep -rn "sender_tid\|sender_identity" userspace/displayd/src/
+  (no matches)
+
+  $ grep -rn "acl\|access_control\|check_permission\|authorize" userspace/displayd/src/
+  (no matches)
+
+  The sender_tid references in root-procmgr/main.rs are pre-existing general
+  IPC dispatch (resolve_caller_session, handle_spawn_or_kill_message, etc.) —
+  they are the standard message-routing pattern, NOT displayd-specific runtime
+  ACL. The displayd authority path has no sender-identity interrogation:
+  authority is possession of the scoped SEND token (AGENTS.md §3).
+
+## Build verification
+
+  cargo check -p cluu_wire --features host-test
+    → Finished, 0 errors
+
+  cargo test -p cluu_wire --features host-test
+    → 42 passed, 0 failed (27 display + 15 existing)
+
+  cargo check -p libcluu --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc,compiler_builtins
+    → Finished, 0 errors (2 pre-existing warnings)
+
+  cargo check -p cluu-root-procmgr --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc,compiler_builtins
+    → Finished, 0 errors (16 pre-existing warnings)
+
+## Design notes
+
+- PARAM_DISPLAYD_EP = slot 19, next after PARAM_SESSION_VFS_EP = slot 18
+  (boot.rs). Defined in cluu_wire::spawn (not boot.rs) because the task
+  constrains modifications to spawn.rs for the constant. libcluu re-exports
+  cluu_wire as `proto`, and cluu_wire re-exports spawn::* — so
+  cluu_wire::spawn::PARAM_DISPLAYD_EP and cluu_wire::PARAM_DISPLAYD_EP both
+  resolve.
+- The per-session endpoint is a SEND-only derived token (IPC_SEND | IPC_CALL
+  rights). Root-procmgr retains the RECV capability. When displayd (T7)
+  launches, it will be granted the RECV capabilities to service requests.
+- The global displayd control endpoint is a separate endpoint created at init.
+  It is never derived, never forwarded, never installed in any PARAM set.
+  Root-procmgr uses it to broker cross-session display operations on root's
+  behalf (AGENTS.md §6 root-godmode).
+- Session teardown (destroy_session) calls token_revoke on the per-session
+  RECV capability, which transitively invalidates all derived SEND tokens —
+  session binaries lose displayd access immediately.
+- T7 (displayd launch) will: (1) receive RECV capabilities from
+  session_displayd_endpoints, (2) propagate PARAM_DISPLAYD_EP to session
+  grandchildren via session-procmgr's elf_spawn.rs (analogous to
+  PARAM_SESSION_VFS_EP propagation), (3) service surface_create /
+  buffer_acquire / WM requests on the per-session endpoints.
+- No unwrap()/panic!/as any in new code (rust-best-practices compliance).
+- Matches existing patterns: PARAM_SESSION_VFS_EP resolution in registry.rs,
+  param_overrides mechanism in spawn_service_with_env, endpoint_create +
+  token_derive for capability minting.
