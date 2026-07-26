@@ -128,7 +128,9 @@ impl VirtioGpuBackend {
     /// Try to construct a virtio-gpu backend.
     ///
     /// Steps:
-    /// 1. Look up gpudev:main in the registry.
+    /// 1. Check registry cache for gpudev:main (non-blocking — avoids hang
+    ///    when gpudev isn't autostarted; `lookup_service` would block on
+    ///    `subscribe_output` waiting for a grant that never arrives).
     /// 2. Probe with a short-timeout handshake.
     /// 3. Query display info.
     /// 4. Create a 2D resource and attach backing (composition buffer).
@@ -136,7 +138,7 @@ impl VirtioGpuBackend {
     ///
     /// Returns `Err` if any step fails — caller falls back to LinearFbBackend.
     pub fn new() -> Result<Self, &'static str> {
-        let driver_endpoint = match registry::lookup_service("gpudev:main") {
+        let driver_endpoint = match registry::lookup_cached("gpudev:main") {
             Some(ep) => ep,
             None => return Err("displayd: gpudev:main not registered"),
         };
