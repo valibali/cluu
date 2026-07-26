@@ -192,7 +192,7 @@ class QemuController:
             "-device",
             "virtio-blk-pci,drive=userblk,disable-legacy=on,"
             "disable-modern=off,vectors=0",
-            "-display", "none",
+            "-display", cfg.qemu_display,
             "-no-reboot",
             "-no-shutdown",
             "-serial", "null",

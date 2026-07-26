@@ -495,6 +495,22 @@ class Benchprobe: pass
 class L2Doom: pass
 
 
+@cluu_case("l2_baseline_idle_tui", marker_mode="l2_baseline_idle_tui", description="multimedia baseline: idle TUI", tags=["baseline", "multimedia"])
+class L2BaselineIdleTui: pass
+
+
+@cluu_case("l2_baseline_quiet_shell", marker_mode="l2_baseline_quiet_shell", description="multimedia baseline: quiet shell", tags=["baseline", "multimedia"])
+class L2BaselineQuietShell: pass
+
+
+@cluu_case("l2_baseline_doom_windowed", marker_mode="l2_baseline_doom_windowed", description="multimedia baseline: DOOM windowed", tags=["baseline", "multimedia", "doom"])
+class L2BaselineDoomWindowed: pass
+
+
+@cluu_case("l2_baseline_doom_fullscreen", marker_mode="l2_baseline_doom_fullscreen", description="multimedia baseline: DOOM fullscreen", tags=["baseline", "multimedia", "doom"])
+class L2BaselineDoomFullscreen: pass
+
+
 __all__ = [
     "Benchprobe",
     "CFutex",
@@ -552,4 +568,8 @@ __all__ = [
     "MmapProbe",
     "StackProbe",
     "L2Doom",
+    "L2BaselineIdleTui",
+    "L2BaselineQuietShell",
+    "L2BaselineDoomWindowed",
+    "L2BaselineDoomFullscreen",
 ]

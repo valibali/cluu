@@ -16,3 +16,6 @@ serde = { workspace = true }
 [[bin]]
 name = "compositor"
 path = "src/main.rs"
+
+[features]
+bench = []

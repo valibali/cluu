@@ -142,6 +142,9 @@ enum Commands {
         /// Override the host HTTP server port (default: 9876)
         #[arg(long, default_value_t = 9876)]
         port: u16,
+        /// QEMU display backend: gtk (window) or none (headless)
+        #[arg(long, default_value = "gtk")]
+        display: String,
     },
     /// Run all tests
     Test,
@@ -304,11 +307,12 @@ fn main() -> Result<()> {
             pin_core,
             net,
             port,
+            display,
         } => {
             if build {
                 build_pipeline(&profile, ui)?;
             }
-            run_qemu(debug, pin_core, net, port)?;
+            run_qemu(debug, pin_core, net, port, &display)?;
         }
         Commands::Test => {
             run_tests()?;
@@ -1532,6 +1536,13 @@ fn build_userspace(profile: &str) -> Result<()> {
             cmd.args(["--features", "runtime"]);
         }
 
+        // Baseline instrumentation: enable bench probes in the compositor
+        // when CLUU_BENCH=1 is set. Probes are compile-time gated so
+        // non-baseline builds have zero overhead.
+        if *crate_path == "userspace/compositor" && std::env::var("CLUU_BENCH").as_deref() == Ok("1") {
+            cmd.args(["--features", "bench"]);
+        }
+
         let status = cmd.status().context("Failed to run cargo")?;
         if !status.success() {
             bail!("Failed to build {}", crate_name);
@@ -2235,7 +2246,7 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Result<()> {
+fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16, display: &str) -> Result<()> {
     let img_path = project_root().join("target/cluu.img");
     let user_disk = project_root().join("target/userdisk.img");
 
@@ -2344,7 +2355,7 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16) -> Resul
         "-device",
         "usb-mouse,bus=ehci.0",
         "-display",
-        "gtk",
+        display,
         "-no-reboot",
         "-no-shutdown",
     ]);
@@ -3329,6 +3340,29 @@ fn build_doom() -> Result<()> {
     fs::create_dir_all(&cluu_lib).ok();
     fs::copy(&staticlib_src, &staticlib_dst).context("Failed to copy libdoom_cluu.a to sysroot")?;
     println!("  ✓ doom-cluu staticlib built and staged");
+
+    println!("▸ Building sdl2-cluu staticlib...");
+    let mut sdl2_cmd = Command::new("cargo");
+    sdl2_cmd.current_dir(project_root())
+        .args(["build", "-p", "sdl2-cluu", "--target"])
+        .arg(&target_spec)
+        .arg("-Z")
+        .arg("build-std=core,alloc,compiler_builtins");
+    if std::env::var("CLUU_BENCH").as_deref() == Ok("1") {
+        sdl2_cmd.args(["--features", "bench"]);
+    }
+    let status = sdl2_cmd
+        .status()
+        .context("Failed to build sdl2-cluu staticlib")?;
+    if !status.success() {
+        bail!("sdl2-cluu Rust build failed");
+    }
+
+    let sdl2_src = project_root()
+        .join("target/x86_64-cluu-user/debug/libsdl2_cluu.a");
+    let sdl2_dst = cluu_lib.join("libsdl2_cluu.a");
+    fs::copy(&sdl2_src, &sdl2_dst).context("Failed to copy libsdl2_cluu.a to sysroot")?;
+    println!("  ✓ sdl2-cluu staticlib built and staged");
 
     println!("▸ Building DOOM...");
     let status = Command::new("make")

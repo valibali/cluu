@@ -604,10 +604,57 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
                 _TSC,
                 _SHELL_READY,
                 "doom-cluu: DG_Init",
+                "sdl2-cluu: pixel region",
+                "doom-cluu: 1 second of game loop completed",
             ],
             fail_marker="doom-cluu: init failed",
             category="container",
             description="DOOM port: doomgeneric boots and initializes compositor window",
+        ),
+        MarkerModeSpec(
+            name="l2_baseline_idle_tui",
+            required_markers=[
+                _TSC,
+                "compositor: ready",
+            ],
+            category="generic",
+            description="multimedia baseline: idle TUI — compositor up, no shell interaction",
+        ),
+        MarkerModeSpec(
+            name="l2_baseline_quiet_shell",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+            ],
+            category="generic",
+            description="multimedia baseline: quiet shell — logged in, idle prompt",
+        ),
+        MarkerModeSpec(
+            name="l2_baseline_doom_windowed",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+                "doom-cluu: DG_Init",
+                "sdl2-cluu: pixel region",
+                "doom-cluu: 5 seconds of game loop completed",
+            ],
+            fail_marker="doom-cluu: init failed",
+            category="generic",
+            description="multimedia baseline: DOOM windowed via compositor PixelRegion",
+        ),
+        MarkerModeSpec(
+            name="l2_baseline_doom_fullscreen",
+            required_markers=[
+                _TSC,
+                _SHELL_READY,
+                "doom-cluu: DG_Init",
+                "doom-cluu: fullscreen mode requested",
+                "sdl2-cluu: direct FB",
+                "doom-cluu: 5 seconds of game loop completed",
+            ],
+            fail_marker="doom-cluu: init failed",
+            category="generic",
+            description="multimedia baseline: DOOM fullscreen direct framebuffer",
         ),
     ]
 }

@@ -1,0 +1,139 @@
+{
+  "state": "l2_baseline_doom_windowed",
+  "label": "DOOM windowed",
+  "display": "none",
+  "passed": true,
+  "error": null,
+  "n_windows": 3,
+  "windows": [
+    {
+      "index": 0,
+      "duration_s": 45.904,
+      "thread_cpu_pct": {
+        "main": 0.9989856718838167,
+        "other": 0.0,
+        "vcpu": 3.9960806461308076
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 51,
+          "bytes": 51
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 51,
+          "cells": 51
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 51,
+          "bytes": 51,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 51
+        },
+        "BENCH_COMP_BLIT": {
+          "cycles_per_frame": 0
+        },
+        "BENCH_SHIM_PRESENT": {
+          "cycles": 0
+        },
+        "BENCH_SHIM_UPDATE": {
+          "cycles": 0,
+          "bytes": 0,
+          "mode": 0
+        },
+        "BENCH_DOOM_FRAME": {
+          "dt_cycles": 0
+        }
+      }
+    },
+    {
+      "index": 1,
+      "duration_s": 45.904,
+      "thread_cpu_pct": {
+        "main": 0.9989889472787237,
+        "other": 0.0,
+        "vcpu": 3.9960539327525004
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 129,
+          "bytes": 129
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 129,
+          "cells": 129
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 129,
+          "bytes": 129,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 129
+        },
+        "BENCH_COMP_BLIT": {
+          "cycles_per_frame": 1
+        },
+        "BENCH_SHIM_PRESENT": {
+          "cycles": 0
+        },
+        "BENCH_SHIM_UPDATE": {
+          "cycles": 0,
+          "bytes": 0,
+          "mode": 0
+        },
+        "BENCH_DOOM_FRAME": {
+          "dt_cycles": 0
+        }
+      }
+    },
+    {
+      "index": 2,
+      "duration_s": 45.904,
+      "thread_cpu_pct": {
+        "main": 0.9989848146711604,
+        "other": 0.0,
+        "vcpu": 3.996148218750742
+      },
+      "frame_count": 198,
+      "fps": 4.313349599163471,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 333,
+          "bytes": 333
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 134,
+          "cells": 134
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 333,
+          "bytes": 333,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 333
+        },
+        "BENCH_COMP_BLIT": {
+          "cycles_per_frame": 0
+        },
+        "BENCH_SHIM_PRESENT": {
+          "cycles": 200
+        },
+        "BENCH_SHIM_UPDATE": {
+          "cycles": 199,
+          "bytes": 199,
+          "mode": 0
+        },
+        "BENCH_DOOM_FRAME": {
+          "dt_cycles": 198
+        }
+      }
+    }
+  ]
+}

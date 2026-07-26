@@ -235,6 +235,11 @@ class HarnessConfig:
     qemu_extra_args: str = field(default_factory=lambda: _env_str("QEMU_EXTRA_ARGS", ""))
     qemu_gdb: GdbConfig = field(default_factory=GdbConfig)
 
+    # QEMU display backend: "none" (headless, default) or "gtk" (window).
+    # Used for multimedia baseline — GTK backend adds a display thread
+    # whose CPU cost is measured alongside the vCPU thread.
+    qemu_display: str = field(default_factory=lambda: _env_str("CLUU_DISPLAY", "none"))
+
     # Virtio-net NIC: when True, QEMU gets -netdev user + virtio-net-pci
     # (vectors=0 = legacy INTX, matching virtio-blk).
     cluu_net: bool = field(default_factory=lambda: _env_bool("CLUU_NET"))

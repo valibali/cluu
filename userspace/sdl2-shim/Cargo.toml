@@ -1,0 +1,14 @@
+[package]
+name = "sdl2-cluu"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sdl2_cluu"
+crate-type = ["staticlib"]
+
+[dependencies]
+libcluu = { path = "../libcluu", features = ["c-runtime"] }
+
+[features]
+bench = []

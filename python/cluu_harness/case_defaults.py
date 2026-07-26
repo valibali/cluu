@@ -565,6 +565,34 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         run_wait_s=90,
         pre_sendkey_wait_marker="login: window registered",
     ),
+    "l2_baseline_idle_tui": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_baseline_quiet_shell": CaseDefaults(
+        test_command=None,
+        sendkey_sequence=_creds(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=30,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_baseline_doom_windowed": CaseDefaults(
+        test_command="doom -iwad /host/freedoom1.wad",
+        sendkey_sequence=_creds_slow(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
+    "l2_baseline_doom_fullscreen": CaseDefaults(
+        test_command="doom -fullscreen -iwad /host/freedoom1.wad",
+        sendkey_sequence=_creds_slow(),
+        sendkey_sequence_nowait=True,
+        run_wait_s=45,
+        pre_sendkey_wait_marker="login: window registered",
+    ),
 }
 
 

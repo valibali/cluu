@@ -1,0 +1,97 @@
+{
+  "state": "l2_baseline_quiet_shell",
+  "label": "Quiet shell",
+  "display": "none",
+  "passed": true,
+  "error": null,
+  "n_windows": 3,
+  "windows": [
+    {
+      "index": 0,
+      "duration_s": 15.761000000000001,
+      "thread_cpu_pct": {
+        "main": 0.999002075824536,
+        "other": 0.0,
+        "vcpu": 99.890098013239
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 18,
+          "bytes": 18
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 18,
+          "cells": 18
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 18,
+          "bytes": 18,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 18
+        }
+      }
+    },
+    {
+      "index": 1,
+      "duration_s": 15.761000000000001,
+      "thread_cpu_pct": {
+        "main": 0.9989568208775323,
+        "other": 0.0,
+        "vcpu": 3.9957021313667718
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 20,
+          "bytes": 20
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 20,
+          "cells": 20
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 20,
+          "bytes": 20,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 20
+        }
+      }
+    },
+    {
+      "index": 2,
+      "duration_s": 15.761000000000001,
+      "thread_cpu_pct": {
+        "main": 0.9990097695484916,
+        "other": 0.0,
+        "vcpu": 3.9957441689916027
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 27,
+          "bytes": 27
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 27,
+          "cells": 27
+        },
+        "BENCH_COMP_BB2FB_BYTES": {
+          "cycles": 27,
+          "bytes": 27,
+          "rect": 0
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 27
+        }
+      }
+    }
+  ]
+}
