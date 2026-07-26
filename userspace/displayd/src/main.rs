@@ -1,9 +1,14 @@
-//! CLUU display daemon — linear-framebuffer backend service entry point.
+//! CLUU display daemon — virtio-gpu / linear-framebuffer backend service.
 //!
-//! displayd is the sole owner of the framebuffer device. It maps /dev/fb0
-//! WC, owns the composition buffer, dispatches client surface requests
-//! and WM geometry changes, composites on commits/scene changes, and
-//! flushes actual damage to the real framebuffer.
+//! displayd is the sole owner of the display output. At startup it tries
+//! the virtio-gpu backend (via IPC to gpudev:main); if the driver is
+//! absent or not listening, it falls back to the linear-framebuffer
+//! backend (maps /dev/fb0 WC). The composition core, scene, and protocol
+//! modules are backend-agnostic — selection is runtime, not build-time.
+//!
+//! Once a backend is selected, displayd owns the composition buffer,
+//! dispatches client surface requests and WM geometry changes, composites
+//! on commits/scene changes, and flushes actual damage to the backend.
 //!
 //! # Authority model (AGENTS.md §2, §3)
 //!
@@ -27,13 +32,14 @@ extern crate cluu_wire;
 extern crate displayd;
 
 mod linear_fb;
+mod virtio_gpu_backend;
 
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use cluu_wire::display::{
-    DamageList, Error as DisplayError, Rect, SurfaceState,
+    DamageList, Error as DisplayError, OutputInfo, Rect, SurfaceState,
     DISPLAY_OUTPUT_INFO_LABEL, DISPLAY_SURFACE_CREATE_LABEL,
     DISPLAY_BUFFER_ACQUIRE_LABEL, DISPLAY_BUFFER_COMMIT_LABEL,
     DISPLAY_BUFFER_RELEASE_LABEL, DISPLAY_SET_GEOMETRY_LABEL,
@@ -47,8 +53,9 @@ use libcluu::syscall::{self, MAP_FRAME_TOKEN};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error};
 
-use displayd::{Backend, Scene};
+use displayd::{Backend, Scene, Surface};
 use linear_fb::LinearFbBackend;
+use virtio_gpu_backend::VirtioGpuBackend;
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -67,6 +74,59 @@ const MARKER_READY: &str = "DISPLAYD_READY";
 const MARKER_FLUSH: &str = "DISPLAYD_FLUSH";
 const MARKER_SELFTEST_OK: &str = "DISPLAYD_SELFTEST_OK";
 const MARKER_QUOTA_REJECT: &str = "DISPLAYD_QUOTA_REJECT";
+const MARKER_BACKEND: &str = "DISPLAYD_BACKEND";
+
+// ── Backend selection ─────────────────────────────────────────────────
+
+/// Runtime-selected display backend. Tries virtio-gpu first; falls back
+/// to linear-fb if the driver is absent or not listening.
+enum DisplayBackend {
+    Linear(LinearFbBackend),
+    VirtioGpu(VirtioGpuBackend),
+}
+
+impl Backend for DisplayBackend {
+    fn output_info(&self) -> OutputInfo {
+        match self {
+            DisplayBackend::Linear(b) => b.output_info(),
+            DisplayBackend::VirtioGpu(b) => b.output_info(),
+        }
+    }
+
+    fn scanout_buffer_mut(&mut self) -> &mut [u32] {
+        match self {
+            DisplayBackend::Linear(b) => b.scanout_buffer_mut(),
+            DisplayBackend::VirtioGpu(b) => b.scanout_buffer_mut(),
+        }
+    }
+
+    fn flush(&mut self, damage: &DamageList) {
+        match self {
+            DisplayBackend::Linear(b) => b.flush(damage),
+            DisplayBackend::VirtioGpu(b) => b.flush(damage),
+        }
+    }
+
+    fn try_direct_scanout(&mut self, surface: &Surface) -> bool {
+        match self {
+            DisplayBackend::Linear(b) => b.try_direct_scanout(surface),
+            DisplayBackend::VirtioGpu(b) => b.try_direct_scanout(surface),
+        }
+    }
+}
+
+/// Try virtio-gpu first; fall back to linear-fb. Returns the selected
+/// backend and a backend name string for the READY marker.
+fn select_backend() -> Result<(DisplayBackend, &'static str), &'static str> {
+    match VirtioGpuBackend::new() {
+        Ok(b) => Ok((DisplayBackend::VirtioGpu(b), "virtio_gpu")),
+        Err(e) => {
+            let _ = debug_print(e);
+            let fb = linear_fb::map_framebuffer()?;
+            Ok((DisplayBackend::Linear(LinearFbBackend::new(fb)), "linear_fb"))
+        }
+    }
+}
 
 // ── Per-surface tracking ──────────────────────────────────────────────
 
@@ -94,23 +154,22 @@ fn mint_token() -> u64 {
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("displayd: init");
 
-    // 1. Map framebuffer (open /dev/fb0, read header, mmap WC).
-    let fb = match linear_fb::map_framebuffer() {
-        Ok(fb) => fb,
+    // 1. Select backend: try virtio-gpu, fall back to linear-fb.
+    let (mut backend, backend_name) = match select_backend() {
+        Ok((b, name)) => (b, name),
         Err(e) => {
             let _ = debug_print(e);
             return -1;
         }
     };
 
-    // 2. Create backend + scene.
-    let mut backend = LinearFbBackend::new(fb);
+    // 2. Create scene from output info.
     let output = backend.output_info();
     let mut scene = Scene::new(output);
 
     let _ = debug_print(&format!(
-        "displayd: fb {}x{} pitch={}",
-        output.width, output.height, output.pitch
+        "displayd: {} {} {} {}",
+        backend_name, output.width, output.height, output.pitch
     ));
 
     // 3. Create IPC endpoint and register as "displayd:main".
@@ -135,9 +194,10 @@ pub extern "C" fn main() -> i32 {
 
     // 4. READY marker — emitted only after dispatch endpoint can receive.
     let _ = debug_print(&format!(
-        "{} {} {} {} linear_fb",
-        MARKER_READY, output.width, output.height, output.pitch
+        "{} {} {} {} {}",
+        MARKER_READY, output.width, output.height, output.pitch, backend_name
     ));
+    let _ = debug_print(&format!("{} {}", MARKER_BACKEND, backend_name));
 
     // 5. Self-test: checkerboard with partial damage + quota check.
     let surfaces: Vec<TrackedSurface> = Vec::new();
@@ -193,7 +253,7 @@ pub extern "C" fn main() -> i32 {
 /// 4. Destroy surface.
 /// 5. Quota test: create MAX_SURFACES surfaces, verify (MAX_SURFACES+1)th
 ///    is rejected.
-fn run_self_test(scene: &mut Scene, backend: &mut LinearFbBackend) {
+fn run_self_test(scene: &mut Scene, backend: &mut DisplayBackend) {
     const SURFACE_W: u32 = 128;
     const SURFACE_H: u32 = 128;
     const TILE: u32 = 64;
@@ -303,7 +363,7 @@ fn handle_message(
     payload: &[u8],
     _sender_tid: usize,
     scene: &mut Scene,
-    backend: &mut LinearFbBackend,
+    backend: &mut DisplayBackend,
     surfaces: &mut Vec<TrackedSurface>,
     _endpoint: usize,
 ) {
