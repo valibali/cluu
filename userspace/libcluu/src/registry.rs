@@ -127,6 +127,15 @@ pub fn lookup_service(full_name: &str) -> Option<usize> {
         }
     }
 
+    if full_name == "audiod:main" {
+        let info = process_info();
+        let session_audiod_ep =
+            info.params[cluu_wire::spawn::PARAM_AUDIOD_EP] as usize;
+        if session_audiod_ep != 0 {
+            return Some(session_audiod_ep);
+        }
+    }
+
     {
         let state = REGISTRY_STATE.lock();
         if let Some(token) = state.lookup_cache.get(full_name) {
@@ -330,6 +339,15 @@ pub fn subscribe_output(service_name: &str, endpoint_name: &str) -> Result<usize
             info.params[cluu_wire::spawn::PARAM_DISPLAYD_EP] as usize;
         if session_displayd_ep != 0 {
             return Ok(session_displayd_ep);
+        }
+    }
+
+    if service_name == "audiod" && endpoint_name == "main" {
+        let info = process_info();
+        let session_audiod_ep =
+            info.params[cluu_wire::spawn::PARAM_AUDIOD_EP] as usize;
+        if session_audiod_ep != 0 {
+            return Ok(session_audiod_ep);
         }
     }
 

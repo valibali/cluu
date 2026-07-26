@@ -174,7 +174,7 @@ pub fn self_test(
 ) -> Result<()> {
     let stream_id = 0u32;
     let buffer_bytes = 8192u32;
-    let period_bytes = 4096u32;
+    let period_bytes = 2048u32;
     let channels = 2u8;
     let format = proto::PCM_FMT_S16;
     let rate = proto::PCM_RATE_44100;

@@ -67,6 +67,7 @@ struct Driver {
     next_session_id: u32,
     pending_tx: session::PendingTx,
     next_cookie: u64,
+    unregistered: bool,
 }
 
 fn run() -> Result<()> {
@@ -184,6 +185,7 @@ fn run() -> Result<()> {
         next_session_id: 1,
         pending_tx: BTreeMap::new(),
         next_cookie: 1,
+        unregistered: false,
     };
     driver.transport.set_driver_ok()?;
 
@@ -269,6 +271,15 @@ fn run() -> Result<()> {
 
         dispatch_audio(&mut driver, msg, sender_tid);
         driver.drain_queues();
+
+        // After the sole client (audiod) opens a session, unregister from
+        // the registry so no other process can subscribe to "snddev:main".
+        // This makes the driver endpoint capability-unreachable (AGENTS.md §3).
+        if !driver.unregistered && !driver.sessions.is_empty() {
+            let _ = registry::unregister_output("main");
+            driver.unregistered = true;
+            debug_print("virtio-snd: unregistered snddev:main (sole client connected)")?;
+        }
     }
 }
 
@@ -340,16 +351,20 @@ fn dispatch_audio(driver: &mut Driver, msg: &Message, sender_tid: usize) {
             let session_id = msg.words[0] as u32;
             let Driver {
                 transport,
+                vq_tx,
                 vq_control,
                 pool,
                 sessions,
+                pending_tx,
                 ..
             } = driver;
             let _ = session::handle_close(
                 transport,
+                vq_tx,
                 vq_control,
                 pool,
                 sessions,
+                pending_tx,
                 session_id,
             );
         }
@@ -377,7 +392,7 @@ fn dispatch_audio(driver: &mut Driver, msg: &Message, sender_tid: usize) {
 impl Driver {
     fn drain_queues(&mut self) {
         while let Some((cookie, _len)) = self.vq_tx.pop_used() {
-            session::route_completion(&mut self.pending_tx, cookie);
+            session::route_completion(&mut self.pending_tx, &mut self.sessions, cookie);
         }
         while self.vq_control.pop_used().is_some() {}
         while self.vq_event.pop_used().is_some() {}

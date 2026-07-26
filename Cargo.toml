@@ -173,6 +173,7 @@ members = [
     "userspace/cluuamp",
     "userspace/imgview",
     "userspace/displayd",
+    "userspace/audiod",
 
     # Language tooling
     "crates/cluu_lang",
@@ -277,6 +278,7 @@ default-members = [
     "userspace/make",
     "userspace/imgview",
     "userspace/displayd",
+    "userspace/audiod",
 ]
 
 [workspace.package]

@@ -145,6 +145,10 @@ enum Commands {
         /// QEMU display backend: gtk (window) or none (headless)
         #[arg(long, default_value = "gtk")]
         display: String,
+        /// Use virtio-gpu-pci instead of default VGA (adds -vga none
+        /// -device virtio-gpu-pci,max_outputs=1,edid=on)
+        #[arg(long)]
+        virtio_gpu: bool,
     },
     /// Run all tests
     Test,
@@ -311,11 +315,12 @@ fn main() -> Result<()> {
             net,
             port,
             display,
+            virtio_gpu,
         } => {
             if build {
                 build_pipeline(&profile, ui)?;
             }
-            run_qemu(debug, pin_core, net, port, &display)?;
+            run_qemu(debug, pin_core, net, port, &display, virtio_gpu)?;
         }
         Commands::Test => {
             run_tests()?;
@@ -1444,6 +1449,7 @@ fn build_userspace(profile: &str) -> Result<()> {
         "userspace/compositor",
         "userspace/compdemo",
         "userspace/displayd",
+        "userspace/audiod",
         "userspace/console",
         "userspace/kbd",
         "userspace/tty",
@@ -2265,7 +2271,14 @@ fn create_user_block_image(_profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16, display: &str) -> Result<()> {
+fn run_qemu(
+    debug: bool,
+    pin_core: Option<usize>,
+    net: bool,
+    port: u16,
+    display: &str,
+    virtio_gpu: bool,
+) -> Result<()> {
     let img_path = project_root().join("target/cluu.img");
     let user_disk = project_root().join("target/userdisk.img");
 
@@ -2378,6 +2391,15 @@ fn run_qemu(debug: bool, pin_core: Option<usize>, net: bool, port: u16, display:
         "-no-reboot",
         "-no-shutdown",
     ]);
+
+    if virtio_gpu {
+        cmd.args([
+            "-vga",
+            "none",
+            "-device",
+            "virtio-gpu-pci,max_outputs=1,edid=on",
+        ]);
+    }
 
     if debug {
         println!("▸ Starting QEMU in DEBUG mode...");

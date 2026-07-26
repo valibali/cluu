@@ -1,0 +1,23 @@
+[package]
+name = "cluu-audiod"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU audio daemon — sole virtio-snd client, per-session stream mixer."
+authors = ["CLUU Team", "Balazs Valkony"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+cluu_wire = { path = "../cluu_wire", default-features = false }
+
+[lib]
+name = "audiod"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "audiod"
+path = "src/main.rs"
+
+[features]
+default = []
+host-test = []

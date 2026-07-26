@@ -349,6 +349,16 @@ struct ProcessManager {
     /// given to session-procmgr; root-procmgr retains the RECV capability.
     /// Revoked on session teardown.
     session_displayd_endpoints: BTreeMap<u32, usize>,
+    /// Global audiod control endpoint. Sole holder is root-procmgr
+    /// (AGENTS.md §6 root-godmode). NEVER forwarded to any client or
+    /// descendant. Used to broker cross-session audio operations on root's
+    /// behalf. audiod services this endpoint for global control.
+    global_audiod_control_ep: usize,
+    /// Per-session scoped audiod endpoints installed via PARAM_AUDIOD_EP
+    /// at session spawn. Keyed by session_id. The SEND-only derived token is
+    /// given to session-procmgr; root-procmgr retains the RECV capability.
+    /// Revoked on session teardown.
+    session_audiod_endpoints: BTreeMap<u32, usize>,
     /// Persistent shared-ring region for VFS bulk reads. Allocated once on
     /// first `load_from_vfs_ring` and reused for every subsequent call so
     /// the VFS-side grant survives across loads.
@@ -436,6 +446,8 @@ impl ProcessManager {
             session_service_tokens: BTreeMap::new(),
             global_displayd_control_ep: 0,
             session_displayd_endpoints: BTreeMap::new(),
+            global_audiod_control_ep: 0,
+            session_audiod_endpoints: BTreeMap::new(),
             login_attempts: BTreeMap::new(),
             pipes: Vec::new(),
             pg_table: PgTable::new(),
@@ -1125,6 +1137,12 @@ impl ProcessManager {
         let _ = debug_print(&format!(
             "procmgr: global displayd control endpoint created ep={}",
             self.global_displayd_control_ep
+        ));
+
+        self.global_audiod_control_ep = endpoint_create(self.token)?;
+        let _ = debug_print(&format!(
+            "procmgr: global audiod control endpoint created ep={}",
+            self.global_audiod_control_ep
         ));
 
         // Request tty:N main for all VTs (non-blocking); grants arrive via registry events.
@@ -5071,6 +5089,37 @@ impl ProcessManager {
         Some(send_tok)
     }
 
+    fn mint_session_audiod_ep(&mut self, session_id: u32) -> Option<usize> {
+        let ep = match endpoint_create(self.token) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: audiod endpoint_create FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                return None;
+            }
+        };
+        let send_rights = Rights::IPC_SEND.bits() as usize;
+        let send_tok = match token_derive(ep, send_rights | (Rights::IPC_CALL.bits() as usize), u64::MAX) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&format!(
+                    "procmgr: audiod token_derive FAILED sid={} {:?}",
+                    session_id & 0xFF, e
+                ));
+                let _ = token_revoke(ep);
+                return None;
+            }
+        };
+        self.session_audiod_endpoints.insert(session_id, ep);
+        let _ = debug_print(&format!(
+            "procmgr: session audiod endpoint minted sid={} recv_ep={} send_tok={}",
+            session_id & 0xFF, ep, send_tok
+        ));
+        Some(send_tok)
+    }
+
     /// Spawn a `session-procmgr` instance for the given session.
     ///
     /// Serialises a `procmgr_common::wire::SessionEnvelope` and passes it to
@@ -5086,6 +5135,7 @@ impl ProcessManager {
         profile_name: &str,
         session_token: u64,
         displayd_send_tok: usize,
+        audiod_send_tok: usize,
     ) {
         use procmgr_common::wire::SessionEnvelope;
 
@@ -5161,8 +5211,9 @@ impl ProcessManager {
         let saved_view_mgr = self.view_mgr_token;
         self.view_mgr_token = scoped_view_mgr;
 
-        let param_overrides: [(usize, u64); 1] = [
+        let param_overrides: [(usize, u64); 2] = [
             (cluu_wire::spawn::PARAM_DISPLAYD_EP, displayd_send_tok as u64),
+            (cluu_wire::spawn::PARAM_AUDIOD_EP, audiod_send_tok as u64),
         ];
 
         let spawn_result = self.spawn_service_with_env(
@@ -7466,6 +7517,7 @@ impl ProcessManager {
 
         let profile_name = rec.profile_name.clone();
         let displayd_send_tok = self.mint_session_displayd_ep(session_id).unwrap_or(0);
+        let audiod_send_tok = self.mint_session_audiod_ep(session_id).unwrap_or(0);
 
         // Spawn session-procmgr for this session.  Serialise a minimal
         // SessionEnvelope and pass it to the child via argv bytes.
@@ -7477,6 +7529,7 @@ impl ProcessManager {
             &profile_name,
             token,
             displayd_send_tok,
+            audiod_send_tok,
         );
         self.spawn_session_vfs_for(session_id, &req.user_name);
 
@@ -7827,6 +7880,13 @@ impl ProcessManager {
             let _ = debug_print(&format!(
                 "procmgr: session displayd endpoint revoked sid={} ep={}",
                 sid & 0xFF, displayd_ep
+            ));
+        }
+        if let Some(audiod_ep) = self.session_audiod_endpoints.remove(&sid) {
+            let _ = token_revoke(audiod_ep);
+            let _ = debug_print(&format!(
+                "procmgr: session audiod endpoint revoked sid={} ep={}",
+                sid & 0xFF, audiod_ep
             ));
         }
         let event = cluu_wire::session::SessionEndedEvent { session_id: sid };

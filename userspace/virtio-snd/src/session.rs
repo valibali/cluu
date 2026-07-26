@@ -27,9 +27,9 @@ use libcluu::syscall::virt_to_phys;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error, Result};
 
-pub const PERIOD_BYTES: usize = 4096;
-pub const BUFFER_BYTES: u32 = 32768;
-const MAX_SESSIONS: usize = 8;
+pub const PERIOD_BYTES: usize = 2048;
+pub const BUFFER_BYTES: u32 = 8192;
+const MAX_SESSIONS: usize = 1;
 const SELF_TEST_PERIODS: usize = 16;
 const SELF_TEST_SESSION: u32 = 0xFFFF_FFFF;
 
@@ -47,11 +47,12 @@ pub struct AudioSession {
     pub xfer_regions: Vec<DmaRegion>,
     pub status_regions: Vec<DmaRegion>,
     pub started: bool,
+    pub slot_in_flight: [bool; RING_SLOTS],
 }
 
-/// Cookie → (session_id, period_id, completion_endpoint). Populated on
+/// Cookie → (session_id, period_id, completion_endpoint, page_index). Populated on
 /// submit, consumed when the TX used ring yields the cookie.
-pub type PendingTx = BTreeMap<u64, (u32, u64, usize)>;
+pub type PendingTx = BTreeMap<u64, (u32, u64, usize, usize)>;
 
 pub fn handle_open_session(
     transport: &mut impl Transport,
@@ -132,6 +133,7 @@ pub fn handle_open_session(
             xfer_regions,
             status_regions,
             started: false,
+            slot_in_flight: [false; RING_SLOTS],
         },
     );
 
@@ -169,6 +171,9 @@ pub fn handle_submit_pcm(
     }
     if page_index >= RING_SLOTS {
         return Err(Error::InvalidArgument);
+    }
+    if session.slot_in_flight[page_index] {
+        return Err(Error::Busy);
     }
 
     let pcm_va = session.grant_target_va + page_index * PERIOD_BYTES;
@@ -208,7 +213,8 @@ pub fn handle_submit_pcm(
 
     let cookie = *next_cookie;
     *next_cookie = next_cookie.wrapping_add(1);
-    pending.insert(cookie, (session_id, period_id, session.completion_endpoint));
+    pending.insert(cookie, (session_id, period_id, session.completion_endpoint, page_index));
+    session.slot_in_flight[page_index] = true;
     vq_tx.submit(chain, cookie);
     transport.notify(proto::VQ_TX as u16);
 
@@ -223,26 +229,69 @@ pub fn handle_submit_pcm(
 
 pub fn handle_close(
     transport: &mut impl Transport,
+    vq_tx: &mut Virtqueue,
     vq_ctrl: &mut Virtqueue,
     pool: &mut DmaPool,
     sessions: &mut BTreeMap<u32, AudioSession>,
+    pending: &mut PendingTx,
     session_id: u32,
 ) -> Result<()> {
     let session = sessions.remove(&session_id).ok_or(Error::InvalidArgument)?;
+
+    // Drain in-flight TX submissions before stop+release (safe close).
+    let mut spins = 0u32;
+    loop {
+        let mut any = false;
+        while let Some((cookie, _len)) = vq_tx.pop_used() {
+            route_completion(pending, sessions, cookie);
+            any = true;
+        }
+        if !any && session.slot_in_flight.iter().all(|&f| !f) {
+            break;
+        }
+        let _ = transport.isr_status();
+        spins = spins.wrapping_add(1);
+        if spins % 1024 == 0 {
+            let _ = libcluu::syscall::yield_cpu();
+        }
+        if spins > 2_000_000 {
+            debug_print("virtio-snd: close drain timeout")?;
+            break;
+        }
+    }
+
     let _ = crate::control::pcm_stop(transport, vq_ctrl, pool, session.stream_id);
     let _ = crate::control::pcm_release(transport, vq_ctrl, pool, session.stream_id);
     Ok(())
 }
 
-pub fn route_completion(pending: &mut PendingTx, cookie: u64) {
-    if let Some((sid, pid, comp_ep)) = pending.remove(&cookie) {
-        if sid != SELF_TEST_SESSION && comp_ep != 0 {
-            let msg = Message::new(
-                AUDIO_COMPLETE,
-                [pid as usize, proto::S_OK as usize, 0, 0, 0, 0],
-                2,
-            );
-            let _ = libcluu::syscall::ipc_send(comp_ep, msg.as_bytes());
+pub fn route_completion(
+    pending: &mut PendingTx,
+    sessions: &mut BTreeMap<u32, AudioSession>,
+    cookie: u64,
+) {
+    if let Some((sid, pid, comp_ep, page_index)) = pending.remove(&cookie) {
+        if sid != SELF_TEST_SESSION {
+            if let Some(session) = sessions.get_mut(&sid) {
+                let status = if page_index < session.status_regions.len() {
+                    let region = &session.status_regions[page_index];
+                    let s = unsafe {
+                        core::ptr::read_volatile(region.virt as *const proto::PcmStatus)
+                    };
+                    s.status
+                } else {
+                    proto::S_OK
+                };
+                session.slot_in_flight[page_index] = false;
+                if comp_ep != 0 {
+                    let msg = Message::new(
+                        AUDIO_COMPLETE,
+                        [pid as usize, status as usize, 0, 0, 0, 0],
+                        2,
+                    );
+                    let _ = libcluu::syscall::ipc_send(comp_ep, msg.as_bytes());
+                }
+            }
         }
     }
 }
@@ -314,6 +363,7 @@ pub fn self_test(
             xfer_regions,
             status_regions,
             started: true,
+            slot_in_flight: [false; RING_SLOTS],
         },
     );
 
@@ -337,7 +387,7 @@ pub fn self_test(
     let mut spins = 0u32;
     while completed < SELF_TEST_PERIODS {
         while let Some((cookie, _len)) = vq_tx.pop_used() {
-            route_completion(pending, cookie);
+            route_completion(pending, &mut sessions, cookie);
             completed += 1;
         }
         if completed >= SELF_TEST_PERIODS {

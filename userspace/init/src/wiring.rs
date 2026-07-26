@@ -14,6 +14,19 @@
 //! (T6 — see `userspace/root-procmgr/src/main.rs:mint_session_displayd_ep`).
 //! init does not need a ServiceKind::Displayd because procmgr handles the
 //! autostart.
+//!
+//! # audiod boot path (T17)
+//!
+//! audiod is started by root-procmgr via `/etc/system.toml` (same pattern
+//! as displayd) — NOT by init's SERVICE_LIST. audiod subscribes to
+//! "snddev:main" (virtio-snd) as the sole client, then registers
+//! "audiod:main" so session binaries can resolve it via `PARAM_AUDIOD_EP`
+//! (installed by root-procmgr at SESSION_CREATE — see
+//! `userspace/root-procmgr/src/main.rs:mint_session_audiod_ep`). The
+//! virtio-snd driver unregisters "snddev:main" after audiod connects,
+//! making the driver endpoint capability-unreachable to apps (AGENTS.md §3).
+//! init does not need a ServiceKind::Audiod because procmgr handles the
+//! autostart.
 
 use alloc::format;
 use libcluu::boot::{

@@ -1,0 +1,6 @@
+FROM minimal
+PROFILE ipc vfs registry device
+MOUNT /tmp inherit
+BUILD "cargo build --manifest-path userspace/audiod/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/audiod.elf /bin/audiod
+ENTRYPOINT /bin/audiod
+RESTART always

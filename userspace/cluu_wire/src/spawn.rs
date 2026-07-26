@@ -22,6 +22,18 @@ pub const PROCMGR_SPAWN_UNIFIED_LABEL: u32 = 50;
 /// §6). No runtime ACL — authority is possession of the scoped endpoint.
 pub const PARAM_DISPLAYD_EP: usize = 19;
 
+/// ProcessInfo.params slot carrying the session-scoped audiod endpoint.
+///
+/// Installed at session spawn by root-procmgr (the sole holder of the global
+/// audiod control endpoint). Session binaries resolve `audiod:main` via
+/// this parameter — `subscribe_output("audiod", "main")` returns the
+/// session-scoped endpoint, NOT a global one. Analogous to
+/// `PARAM_DISPLAYD_EP` (slot 19) and `PARAM_SESSION_VFS_EP` (slot 18).
+/// The global audiod control endpoint never appears in any client or
+/// descendant envelope (AGENTS.md §2, §3, §5, §6). No runtime ACL —
+/// authority is possession of the scoped endpoint.
+pub const PARAM_AUDIOD_EP: usize = 20;
+
 /// One spawn call's payload. Postcard-serialized into the IPC payload buffer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpawnEnvelope {

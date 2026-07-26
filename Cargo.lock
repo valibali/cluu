@@ -266,6 +266,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluu-audiod"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+]
+
+[[package]]
 name = "cluu-awk"
 version = "0.1.0"
 dependencies = [
@@ -587,6 +595,7 @@ dependencies = [
 name = "cluu-imgview"
 version = "0.1.0"
 dependencies = [
+ "cluu_wire",
  "libcluu",
  "zune-core",
  "zune-jpeg",
@@ -2858,6 +2867,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdl2-cluu"
 version = "0.1.0"
 dependencies = [
+ "cluu_wire",
  "libcluu",
 ]
 
