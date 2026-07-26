@@ -1,0 +1,7 @@
+FROM minimal
+PROFILE ipc vfs registry device
+MOUNT /tmp inherit
+DEVICE framebuffer
+BUILD "cargo build --manifest-path userspace/displayd/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/displayd.elf /bin/displayd
+ENTRYPOINT /bin/displayd
+RESTART always

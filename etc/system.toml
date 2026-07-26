@@ -27,4 +27,7 @@ image = "vtmgr"
 image = "inputd"
 
 [[service]]
+image = "displayd"
+
+[[service]]
 image = "compositor"

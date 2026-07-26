@@ -1,0 +1,1923 @@
+[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+Booting OS...
+ * Locate initrd in Option ROMs
+ * Locate initrd in \BOOTBOOT\INITRD
+ * Gzip compressed initrd @3DBB7000 5741057 bytes
+ * Initrd loaded @3BFCC000 29270528 bytes
+ * Environment @3E3D1000 59 bytes
+ * Screen 1920 x 1080, scanline 7680, fb @80000000 8294400 bytes, type 1 ARGB
+ * System tables
+ * System time 2026-07-26 21:11:27 GMT+0:00 
+ * tar sys/core
+ * Parsing ELF64 @3CF00E00
+ * fb          @FFFFFFFFFC000000
+ * bootboot    @FFFFFFFFFFE00000
+ * environment @FFFFFFFFFFE01000
+ * Entry point @FFFFFFFFFFE02924, text @3DF81000 1769472 bytes
+ * Stack size  8192 bytes per core
+ * SMP numcores 1
+ * Pagetables PML4 @3DF5A000
+ * Memory Map @3E162000 7536 bytes try #1
+[INFO]  Logger initialized (IRQ-safe, no allocation)
+[INFO]  Log level: INFO
+[INFO]  === Kernel Boot Started ===
+[INFO]  Loading GDT...
+[INFO]  Setting segment registers...
+[INFO]  Loading TSS...
+[INFO]  GDT initialized successfully
+[INFO]  Remapping 8259 PIC...
+[INFO]  PIC remapped to vectors 32-47
+[INFO]  PIC initialized (all IRQs masked)
+[INFO]  Setting up IDT handlers...
+[INFO]  Interrupts disabled
+[INFO]  IDT loaded successfully
+[INFO]  IDT initialized successfully
+[INFO]  ps2: initializing aux (mouse) port
+[INFO]  ps2: aux port initialized, mouse streaming enabled
+[INFO]    SMEP enabled (CR4 bit 20)
+[INFO]    SMAP enabled (CR4 bit 21)
+[INFO]    IBPB supported (CPUID.7.0:EDX[26])
+[INFO]    STIBP supported (CPUID.7.0:EDX[27])
+[INFO]    STIBP set in IA32_SPEC_CTRL
+[INFO]    SysV ABI preservation check passed (RBX/RBP/R12-R14)
+[INFO]  Initializing syscall support...
+[INFO]    EFER.SCE enabled (SYSCALL/SYSRET instructions active)
+[INFO]  Syscall support initialized
+[INFO]  ipc direct rendezvous=1
+[INFO]  ipc register fast path=1
+[INFO]  ========================================
+[INFO]  Memory Management Initialization
+[INFO]  ========================================
+[INFO]  Step 1: Querying boot information...
+[INFO]  Step 2: Initializing physmap...
+[INFO]  Physmap configuration:
+[INFO]  Step 3: Creating page tables with physmap...
+[INFO]  Initializing Physical Memory Manager (phase 1: bitmap)...
+[INFO]  Step 4: Switching to new page tables...
+[INFO]  Step 5: Activating physmap...
+[INFO]  Physmap activated - now using physmap for physical memory access
+[INFO]  Step 6: Programming PAT MSR...
+[INFO]  [BOOT] PAT programmed: ok
+[INFO]  Step 7: Building buddy allocator free lists...
+[INFO]  PMM phase 2: building buddy free lists...
+[INFO]  PMM buddy init: free_frames=252868
+[INFO]  ========================================
+[INFO]  Memory Management Ready:
+[INFO]    [✓] Own page tables active
+[INFO]    [✓] Physmap accessible
+[INFO]    [✓] Bootloader mappings discarded
+[INFO]  ========================================
+[INFO]  Initializing kernel heap...
+[INFO]  Kernel heap initialized successfully
+[WARN]  Large heap allocation requested
+[WARN]    Size: 1571856
+[WARN]    Align: 2
+[WARN]    Heap free: 33554432
+[WARN]    Heap used: 0
+[WARN]    Caller RIP: 0x0xffffffffffe2cf9b
+[INFO]  FRAME_TABLE: initialised with max_managed_frame=261976
+[INFO]  [FRAME_TABLE] phase-1 init done
+[INFO]  Cryptographic subsystem initialized
+[INFO]  Token system initialized
+[    5.696] [INFO]  TSC calibrated
+[    5.696] [INFO]  tsc_hz=2995286020
+[    5.706] [INFO]  APIC timer enabled
+[    5.707] [INFO]  ========================================
+[    5.707] [INFO]  Bootstrap: Creating init thread
+[    5.707] [INFO]  ========================================
+[    5.722] [INFO]  Boot manifest verified for sys/init
+[    5.724] [INFO]  ELF: Successfully loaded
+[    5.727] [INFO]  boot-grant: root token handle=
+[    5.728] [INFO]  1
+[    5.728] [INFO]  boot-grant: clock token handle=
+[    5.728] [INFO]  2
+[    5.729] [INFO]  boot-grant: view_mgr token handle=
+[    5.729] [INFO]  3
+[    5.729] [INFO]  boot-grant: device_region token handle=
+[    5.730] [INFO]  4
+[    5.730] [INFO]  
+[    5.730] [INFO]  Creating init thread...
+[    5.730] [INFO]    ThreadID: 
+[    5.731] [INFO]  1
+[    5.731] [INFO]    Entry:    0x
+[    5.731] [INFO]  0x400000
+[    5.731] [INFO]    Stack:    0x
+[    5.732] [INFO]  0x7ff00000
+[    5.732] [INFO]  
+[    5.732] [INFO]  Init thread created successfully!
+[    5.732] [INFO]  Scheduler mode: INITMODE (cooperative)
+[    5.733] [INFO]  ========================================
+[    5.733] [INFO]  telemetry snapshot: 
+[    5.734] [INFO]  post-bootstrap
+[    5.734] [INFO]    tokens_created=4
+[    5.734] [INFO]    tokens_revoked=0
+[    5.734] [INFO]    ipc_recv_would_block=0
+[    5.735] [INFO]    ipc_recv_timeout=0
+[    5.735] [INFO]    ipc_recv_wait_events=0
+[    5.735] [INFO]    ipc_recv_wait_avg_ms=0
+[    5.735] [INFO]    ipc_recv_wait_p95_ms=0
+[    5.736] [INFO]    ipc_recv_wait_p99_ms=0
+[    5.736] [INFO]    ipc_recv_wait_max_ms=0
+[    5.736] [INFO]    ipc_recv_scan_events=0
+[    5.737] [INFO]    ipc_recv_scan_avg_steps_x100=0
+[    5.737] [INFO]    ipc_recv_scan_max_steps=0
+[    5.737] [INFO]    ipc_stale_waiters=0
+[    5.738] [INFO]    ipc_direct_deliveries=0
+[    5.738] [INFO]    ipc_queue_bytes_current=0
+[    5.738] [INFO]    ipc_queue_bytes_peak=0
+[    5.739] [INFO]    ipc_queue_messages_current=0
+[    5.739] [INFO]    ipc_queue_messages_peak=0
+[    5.739] [INFO]    boot_token_grants=3
+[    5.740] [INFO]    thread_suspend_calls=0
+[    5.740] [INFO]    thread_suspend_success=0
+[    5.740] [INFO]    thread_resume_calls=0
+[    5.741] [INFO]    thread_resume_success=0
+[    5.741] [INFO]    call_reply_map_insert_fail=0
+[    5.741] [INFO]    token_audit_next_seq=5
+[    5.742] [INFO]    token_audit_stored=4
+[    5.742] [INFO]    token_audit_dropped=0
+[    5.742] [INFO]    resources_threads_total=1
+[    5.743] [INFO]    resources_threads_live=1
+[    5.743] [INFO]    resources_spaces=0
+[    5.743] [INFO]    resources_endpoints=0
+[    5.744] [INFO]    resources_tokens=4
+[    5.744] [INFO]    resources_tracked_frames=0
+[    5.744] [INFO]    resources_mapped_frames=0
+[    5.745] [INFO]    resources_pmm_used_frames=8801
+[    5.745] [INFO]    resources_pmm_total_frames=253033
+[    5.746] [INFO]    pending_wake_overflow=0
+[    5.746] [INFO]    deferred_fault_overflow=0
+[    5.747] [INFO]  CLUU Microkernel v0.1.0
+[    5.747] [INFO]  ========================================
+[    5.748] [INFO]  ========================================
+[    5.749] [INFO]  Starting scheduler and launching init thread
+[    5.749] [INFO]  
+[    5.749] [INFO]  Starting scheduler...
+[    5.750] [INFO]  Jumping to first thread: 
+[    5.750] [INFO]  1
+[    5.750] [WARN]    stack_ptr=0xfffffffffff89000
+[    5.751] [INFO]  Entering userspace...
+[    5.751] [INFO]  Entry RIP=0x400000
+[    5.751] [INFO]  Entry RSP=0x7feffff8
+[    5.751] [INFO]  Entry CS=0x33
+[    5.752] [INFO]  Entry SS=0x2b
+[    5.752] [INFO]  [USER] init: bootstrapping critical services
+[    5.753] [INFO]  [USER] init: boot manifest parsed
+[    5.753] [INFO]  [USER] init: launching registry
+[    5.754] [INFO]  [USER] init: parsed registry entry
+[    5.770] [INFO]  [USER] init: registry ready (16092us)
+[    5.770] [INFO]  [USER] init: launching timeserver
+[    5.771] [INFO]  [USER] init: parsed timeserver entry
+[    5.780] [INFO]  [USER] init: timeserver ready (10125us)
+[    5.781] [INFO]  [USER] init: launching devmgr
+[    5.781] [INFO]  [USER] init: parsed devmgr entry
+[    5.792] [INFO]  [USER] init: devmgr ready (10961us)
+[    5.792] [INFO]  [USER] init: root-procmgr token 51
+[    5.793] [INFO]  [USER] init: launching root-procmgr
+[    5.793] [INFO]  [USER] init: parsed root-procmgr entry
+[    5.870] [WARN]  Large heap allocation requested
+[    5.870] [WARN]    Size: 1991811
+[    5.871] [WARN]    Align: 1
+[    5.871] [WARN]    Heap free: 31153040
+[    5.871] [WARN]    Heap used: 2401392
+[    5.871] [WARN]    Caller RIP: 0x0xffffffffffe2d66a
+[    5.912] [INFO]  [USER] init: root-procmgr ready (119243us)
+[    5.912] [INFO]  [USER] init: launching vfs
+[    5.912] [INFO]  [USER] init: parsed vfs entry
+[    5.978] [WARN]  Large heap allocation requested
+[    5.978] [WARN]    Size: 1819605
+[    5.978] [WARN]    Align: 1
+[    5.979] [WARN]    Heap free: 29161224
+[    5.979] [WARN]    Heap used: 4393208
+[    5.979] [WARN]    Caller RIP: 0x0xffffffffffe2d66a
+[    6.013] [INFO]  [USER] init: vfs ready (101277us)
+[    6.014] [INFO]  [USER] init: launching drivermgr
+[    6.014] [INFO]  [USER] init: parsed drivermgr entry
+[    6.064] [INFO]  [USER] init: drivermgr ready (49621us)
+[    6.064] [INFO]  [USER] init: launching drivermon
+[    6.064] [INFO]  [USER] init: parsed drivermon entry
+[    6.076] [INFO]  [USER] init: drivermon ready (11662us)
+[    6.076] [INFO]  [USER] init: skipping virtio-blk (spawn mode — drivermgr will spawn)
+[    6.077] [INFO]  [USER] init: launching netd
+[    6.077] [INFO]  [USER] init: parsed netd entry
+[    6.108] [INFO]  [USER] init: netd ready (31657us)
+[    6.109] [INFO]  [USER] init: launching tpmd
+[    6.109] [INFO]  [USER] init: parsed tpmd entry
+[    6.118] [INFO]  [USER] init: tpmd ready (9538us)
+[    6.119] [INFO]  [USER] init: all critical services created; monitoring primordials
+[    6.122] [INFO]  [USER] vfs: starting...
+[    6.122] [INFO]  [USER] vfs: registering...
+[    6.123] [INFO]  [USER] registry: ready
+[    6.124] [INFO]  [USER] registry: SUBSCRIBE tpmd:main sender_tid=1 reply_ep=115 → no entry, pending
+[    6.125] [INFO]  [USER] registry: admin_tid=5
+[    6.125] [INFO]  [USER] registry: registered root-procmgr:stdin sender_tid=5
+[    6.126] [INFO]  [USER] registry: registered root-procmgr:stdout sender_tid=5
+[    6.126] [INFO]  [USER] registry: registered root-procmgr:stderr sender_tid=5
+[    6.127] [INFO]  [USER] registry: registered root-procmgr:stdlog sender_tid=5
+[    6.127] [INFO]  [USER] registry: registered root-procmgr:spawn sender_tid=5
+[    6.128] [INFO]  [USER] registry: registered vfs:stdin sender_tid=6
+[    6.128] [INFO]  [USER] registry: registered vfs:stdout sender_tid=6
+[    6.129] [INFO]  [USER] registry: registered vfs:stderr sender_tid=6
+[    6.129] [INFO]  [USER] registry: registered vfs:stdlog sender_tid=6
+[    6.130] [INFO]  [USER] registry: registered vfs:main sender_tid=6
+[    6.130] [INFO]  [USER] registry: registered registry:stdin sender_tid=2
+[    6.131] [INFO]  [USER] registry: registered registry:stdout sender_tid=2
+[    6.132] [INFO]  [USER] registry: registered registry:stderr sender_tid=2
+[    6.132] [INFO]  [USER] registry: registered registry:stdlog sender_tid=2
+[    6.133] [INFO]  [USER] vfs: waiting for services...
+[    6.137] [INFO]  [USER] netd: started
+[    6.138] [INFO]  [USER] tpmd: starting
+[    6.138] [INFO]  [USER] tpmd: no TPM device found, running in stub mode
+[    6.139] [INFO]  [USER] registry: registered root-procmgr:session sender_tid=5
+[    6.140] [INFO]  [USER] registry: registered drivermgr:main sender_tid=7
+[    6.140] [INFO]  [USER] registry: registered drivermon:main sender_tid=8
+[    6.141] [INFO]  [USER] registry: registered devmgr:main sender_tid=4
+[    6.141] [INFO]  [USER] registry: registered timeserver:main sender_tid=3
+[    6.142] [INFO]  [USER] registry: registered netd:main sender_tid=9
+[    6.142] [INFO]  [USER] registry: registered tpmd:main sender_tid=10
+[    6.143] [INFO]  [USER] drivermgr: ready
+[    6.144] [INFO]  [USER] drivermgr: found /pci/00:00.0 vendor=8086 device=1237
+[    6.144] [INFO]  [USER] drivermgr: found /pci/00:01.0 vendor=8086 device=7000
+[    6.145] [INFO]  [USER] drivermgr: found /pci/00:02.0 vendor=1234 device=1111
+[    6.146] [INFO]  [USER] drivermgr: found /pci/00:03.0 vendor=8086 device=100e
+[    6.146] [INFO]  [USER] drivermgr: found /pci/00:04.0 vendor=1af4 device=1042
+[    6.190] [INFO]  [USER] drivermgr: PCI scan complete, 5 devices
+[    6.191] [INFO]  [USER] acpi: scanning for RSDP...
+[    6.209] [INFO]  [USER] acpi: RSDP found at 3fb7e000 revision 0
+[    6.210] [INFO]  [USER] acpi: RSDT sig=RSDT len=56
+[    6.210] [INFO]  [USER] acpi: RSDT 5 entries
+[    6.211] [INFO]  [USER] acpi: RSDT[0] phys=0x3fb79000
+[    6.212] [INFO]  [USER] drivermgr: ACPI RSDP at 0x3fb7e000, FADT pm1a=0xb000
+[    6.212] [INFO]  [USER] drivermgr: ACPI MCFG not present (ok for minimal QEMU)
+[    6.213] [INFO]  [USER] drivermgr: DSDT read 8663 bytes, parsing for PNP devices
+[    6.214] [INFO]  [USER] acpi: RSDT[0] phys=0x3fb79000
+[    6.214] [INFO]  [USER] acpi: RSDT[1] phys=0x3fb78000
+[    6.215] [INFO]  [USER] acpi: RSDT[2] phys=0x3fb77000
+[    6.215] [INFO]  [USER] acpi: RSDT[3] phys=0x3fb76000
+[    6.216] [INFO]  [USER] acpi: RSDT[4] phys=0x3fb75000
+[    6.216] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0A03 hid=PNP0A03 io_ports=0 irq=None
+[    6.217] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0C0F hid=PNP0C0F io_ports=0 irq=None
+[    6.217] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0C0F hid=PNP0C0F io_ports=0 irq=None
+[    6.218] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0C0F hid=PNP0C0F io_ports=0 irq=None
+[    6.219] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0C0F hid=PNP0C0F io_ports=0 irq=None
+[    6.219] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0C0F hid=PNP0C0F io_ports=0 irq=None
+[    6.220] [INFO]  [USER] drivermgr: ACPI device /acpi/ACPI0006 hid=ACPI0006 io_ports=0 irq=None
+[    6.221] [INFO]  [USER] drivermgr: ACPI device /acpi/ACPI0010 hid=ACPI0010 io_ports=1 irq=None
+[    6.221] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0A06 hid=PNP0A06 io_ports=1 irq=None
+[    6.222] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0A06 hid=PNP0A06 io_ports=1 irq=None
+[    6.222] [INFO]  [USER] drivermgr: ACPI device /acpi/QEMU0002 hid=QEMU0002 io_ports=1 irq=None
+[    6.223] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0303 hid=PNP0303 io_ports=2 irq=Some(1)
+[    6.224] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0F13 hid=PNP0F13 io_ports=0 irq=Some(12)
+[    6.225] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0700 hid=PNP0700 io_ports=2 irq=Some(6)
+[    6.226] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0400 hid=PNP0400 io_ports=1 irq=Some(7)
+[    6.227] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0501 hid=PNP0501 io_ports=1 irq=Some(3)
+[    6.228] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0501 hid=PNP0501 io_ports=1 irq=Some(4)
+[    6.229] [INFO]  [USER] drivermgr: ACPI device /acpi/PNP0B00 hid=PNP0B00 io_ports=1 irq=Some(8)
+[    6.229] [INFO]  [USER] drivermgr: ACPI PNP scan complete, 18 devices published
+[    6.232] [INFO]  [USER] drivermgr: phase 1 — 7 initrd bind rules (mode=Spawn)
+[    6.233] [INFO]  [USER] devmgr: ready
+[    6.233] [INFO]  [USER] timeserver: ready
+[    6.234] [INFO]  [USER] netd: registered as netd:main
+[    6.234] [INFO]  [USER] tpmd: registered, entering IPC loop
+[    6.235] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=115
+[    6.689] [INFO]  [USER] registry: registered root-procmgr:main sender_tid=5
+[    6.690] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=7 reply_ep=120 → forward grant_ep=116
+[    6.691] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    6.691] [INFO]  [USER] registry: registered drivermon:notify sender_tid=8
+[    6.692] [INFO]  [USER] procmgr: global displayd control endpoint created ep=131
+[    6.693] [INFO]  [USER] procmgr: requested tty:0..3/main subscriptions
+[    6.693] [INFO]  [USER] =========================================
+[    6.694] [INFO]  [USER]   Process Manager Starting
+[    6.694] [INFO]  [USER] =========================================
+[    6.695] [INFO]  [USER] Derived procmgr token handle
+[    6.696] [INFO]  [USER]   Handle: 51
+[    6.696] [INFO]  [USER] procmgr: requested vfs/mounted subscription
+[    6.697] [INFO]  ========================================
+[    6.697] [INFO]  All critical processes initialized
+[    6.698] [INFO]  Switching to NORMALMODE (preemptive)
+[    6.698] [INFO]  ========================================
+[    6.699] [INFO]  [USER] procmgr: entering run loop (exit_ep=6 spawn_ep=117)
+[    6.699] [INFO]  [USER] registry: SUBSCRIBE tty:0:main sender_tid=5 reply_ep=116 → no entry, pending
+[    6.700] [INFO]  [USER] registry: SUBSCRIBE tty:1:main sender_tid=5 reply_ep=116 → no entry, pending
+[    6.701] [INFO]  [USER] registry: SUBSCRIBE tty:2:main sender_tid=5 reply_ep=116 → no entry, pending
+[    6.702] [INFO]  [USER] registry: SUBSCRIBE tty:3:main sender_tid=5 reply_ep=116 → no entry, pending
+[    6.702] [INFO]  [USER] registry: SUBSCRIBE vfs:mounted sender_tid=5 reply_ep=116 → no entry, pending
+[    6.703] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=120
+[    6.704] [INFO]  [USER] registry: registered drivermon:fault sender_tid=8
+[    6.705] [INFO]  [USER] drivermon: ready
+[    6.705] [INFO]  [USER] drivermon: notify endpoint ready
+[    6.706] [INFO]  [USER] drivermon: fault endpoint ready
+[    6.706] [INFO]  [USER] registry: SUBSCRIBE drivermon:main sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    6.707] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:main grant_ep=123
+[    6.708] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=120
+[    6.709] [INFO]  [USER] registry: SUBSCRIBE drivermon:notify sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    6.710] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:notify grant_ep=123
+[    6.710] [INFO]  [USER] registry-client: handle_grant_request endpoint=notify requester=120
+[    6.711] [INFO]  [USER] registry: SUBSCRIBE drivermon:fault sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    6.712] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:fault grant_ep=123
+[    6.713] [INFO]  [USER] registry-client: handle_grant_request endpoint=fault requester=120
+[    6.714] [INFO]  [USER] drivermgr: device /acpi/ACPI0006 no matching driver
+[    6.714] [INFO]  [USER] drivermgr: device /acpi/ACPI0010 no matching driver
+[    6.715] [INFO]  [USER] drivermgr: device /acpi/PNP0303 matched driver kbd (priority 100)
+[    6.716] [INFO]  [USER] procmgr: service spawn path='sys/kbd.elf' pri=100 mode=2
+[    6.720] [INFO]  [USER] drivermgr: spawned kbd for /acpi/PNP0303 (initrd=sys/kbd.elf) pid=2
+[    6.721] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=5 reply_ep=116 → forward grant_ep=118
+[    6.722] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    6.724] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=116
+[    6.725] [INFO]  [USER] procmgr: vfs_endpoint=148
+[    6.725] [INFO]  [USER] procmgr: service 'sys/kbd.elf' spawned pid=2 cookie=1
+[    6.726] [INFO]  [USER] procmgr: registered exit_notify pid=2 cookie=1
+[    6.727] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=6 reply_ep=118 → forward grant_ep=116
+[    6.729] [INFO]  [USER] kbd: ready
+[    6.729] [INFO]  [USER] kbd: irq attached
+[    6.730] [INFO]  [USER] procmgr: set_fault_ep pid=2 cookie=1 thread_token=147
+[    6.730] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    6.731] [INFO]  [USER] drivermgr: registered kbd (pid=2) with drivermon
+[    6.732] [INFO]  [USER] drivermgr: device /acpi/PNP0400 no matching driver
+[    6.733] [INFO]  [USER] drivermgr: device /acpi/PNP0501 no matching driver
+[    6.734] [INFO]  [USER] drivermgr: device /acpi/PNP0700 no matching driver
+[    6.734] [INFO]  [USER] drivermgr: device /acpi/PNP0A03 no matching driver
+[    6.735] [INFO]  [USER] drivermgr: device /acpi/PNP0A06 no matching driver
+[    6.735] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=118
+[    6.737] [INFO]  [USER] registry: registered kbd:stdin sender_tid=11
+[    6.737] [INFO]  [USER] registry: registered kbd:stdout sender_tid=11
+[    6.738] [INFO]  [USER] registry: registered kbd:stderr sender_tid=11
+[    6.738] [INFO]  [USER] registry: registered kbd:stdlog sender_tid=11
+[    6.739] [INFO]  [USER] registry: SUBSCRIBE netdev:main sender_tid=9 reply_ep=126 → no entry, pending
+[    6.740] [INFO]  [USER] drivermon: REGISTER pid=2
+[    6.740] [INFO]  [USER] drivermgr: device /acpi/PNP0B00 no matching driver
+[    6.741] [INFO]  [USER] drivermgr: device /acpi/PNP0C0F no matching driver
+[    6.741] [INFO]  [USER] drivermgr: device /acpi/PNP0F13 matched driver mouse (priority 100)
+[    6.742] [INFO]  [USER] procmgr: service spawn path='sys/mouse.elf' pri=100 mode=2
+[    6.743] [INFO]  [USER] vfs: setup_mounts start
+[    6.744] [INFO]  [USER] vfs: initrd mounted
+[    6.744] [INFO]  [USER] registry: SUBSCRIBE inputd:input sender_tid=11 reply_ep=149 → no entry, pending
+[    6.745] [INFO]  [USER] registry: SUBSCRIBE vtmgr:control sender_tid=11 reply_ep=149 → no entry, pending
+[    6.746] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=11 reply_ep=149 → forward grant_ep=116
+[    6.747] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    6.749] [INFO]  [USER] procmgr: service 'sys/mouse.elf' spawned pid=3 cookie=2
+[    6.750] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=149
+[    6.750] [INFO]  [USER] registry: SUBSCRIBE drivermgr:main sender_tid=8 reply_ep=123 → forward grant_ep=120
+[    6.752] [INFO]  [USER] mouse: ready
+[    6.752] [INFO]  [USER] mouse: irq12 attached
+[    6.753] [INFO]  [USER] drivermgr: spawned mouse for /acpi/PNP0F13 (initrd=sys/mouse.elf) pid=3
+[    6.753] [INFO]  [USER] procmgr: registered exit_notify pid=3 cookie=2
+[    6.754] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermgr:main grant_ep=120
+[    6.755] [INFO]  [USER] registry: SUBSCRIBE blkdev:main sender_tid=6 reply_ep=118 → no entry, pending
+[    6.755] [INFO]  [USER] kbd: procmgr spawn subscribed
+[    6.756] [INFO]  [USER] procmgr: set_fault_ep pid=3 cookie=2 thread_token=162
+[    6.757] [INFO]  [USER] registry: registered mouse:stdin sender_tid=12
+[    6.757] [INFO]  [USER] registry: registered mouse:stdout sender_tid=12
+[    6.758] [INFO]  [USER] registry: registered mouse:stderr sender_tid=12
+[    6.758] [INFO]  [USER] registry: registered mouse:stdlog sender_tid=12
+[    6.759] [INFO]  [USER] drivermgr: registered mouse (pid=3) with drivermon
+[    6.760] [INFO]  [USER] drivermgr: device /acpi/QEMU0002 no matching driver
+[    6.761] [INFO]  [USER] drivermgr: device /pci/00:00.0 no matching driver
+[    6.761] [INFO]  [USER] drivermgr: device /pci/00:01.0 no matching driver
+[    6.762] [INFO]  [USER] drivermgr: device /pci/00:02.0 no matching driver
+[    6.762] [INFO]  [USER] drivermgr: device /pci/00:03.0 no matching driver
+[    6.763] [INFO]  [USER] drivermgr: device /pci/00:04.0 matched driver virtio-blk (priority 100)
+[    6.764] [INFO]  [USER] registry: SUBSCRIBE inputd:input sender_tid=12 reply_ep=164 → no entry, pending
+[    6.765] [INFO]  [USER] procmgr: service spawn path='sys/virtio-blk.elf' pri=100 mode=2
+[    6.767] [INFO]  [USER] procmgr: service 'sys/virtio-blk.elf' spawned pid=4 cookie=3
+[    6.769] [INFO]  [USER] virtio-blk: starting
+[    6.769] [INFO]  [USER] virtio-blk: pci_token=175 space=171
+[    6.770] [INFO]  [USER] virtio-blk: init from params BDF=00:04.0
+[    6.770] [INFO]  [USER] virtio-core/pci: init from params BDF=00:04.0
+[    6.771] [INFO]  [USER] drivermgr: spawned virtio-blk for /pci/00:04.0 (initrd=sys/virtio-blk.elf) pid=4
+[    6.772] [INFO]  [USER] procmgr: registered exit_notify pid=4 cookie=3
+[    6.773] [INFO]  [USER] virtio-blk: found PCI device PciDevice { bus: 0, device: 4, function: 0, vendor_id: 6900, device_id: 4162, bar0: 0, bar0_size: 0, is_io_bar: false, common_cfg_offset: 0, common_cfg_bar: 4, notify_cfg_offset: 12288, notify_cfg_bar: 4, notify_off_multiplier: 4, device_cfg_offset: 8192, device_cfg_bar: 4, isr_cfg_offset: 4096, isr_cfg_bar: 4, cap_bar_phys: 34359738368, cap_bar_size: 16384, is_modern: true }
+[    6.776] [INFO]  [USER] procmgr: set_fault_ep pid=4 cookie=3 thread_token=177
+[    6.777] [INFO]  [USER] virtio-blk: PCI command=0x0007 status=0x0010
+[    6.778] [INFO]  [USER] virtio-blk: capacity_sectors=2097152
+[    6.778] [INFO]  [USER] virtio-core: q0 dev_max=256 desc=0x35bb3000 (back=0x35bb3000) avail=0x35bb5000 used=0x35bb5204 qe=1 qmv=0xffff qno=0
+[    6.779] [INFO]  [USER] drivermgr: registered virtio-blk (pid=4) with drivermon
+[    6.780] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=123
+[    6.781] [INFO]  [USER] registry: SUBSCRIBE vfs:mounted sender_tid=7 reply_ep=120 → no entry, pending
+[    6.782] [INFO]  [USER] drivermon: REGISTER pid=3
+[    6.782] [INFO]  [USER] drivermon: REGISTER pid=4
+[    6.788] [INFO]  [USER] virtio-blk: PCI Interrupt Line = 11
+[    6.789] [INFO]  [USER] virtio-blk: IRQ attached (endpoint=179 irq=11)
+[    6.790] [INFO]  [USER] virtio-blk: virtio-core stack initialized (2097152 sectors, 1073741824 bytes)
+[    6.791] [INFO]  [USER] registry: registered blkdev:main sender_tid=13
+[    6.791] [INFO]  [USER] virtio-blk: registered as blkdev:main
+[    6.796] [INFO]  [USER] virtio-blk: ext2 filesystem mounted
+[    6.796] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=118
+[    6.797] [INFO]  [USER] vfs: mounted / (blkdev) from system.toml
+[    6.798] [INFO]  [USER] vfs: system.toml mount /host (hostfs) — pending (optional)
+[    6.798] [INFO]  [USER] vfs: mounted /proc (procfs)
+[    6.799] [INFO]  [USER] registry: SUBSCRIBE devmgr:main sender_tid=13 reply_ep=180 → forward grant_ep=124
+[    6.800] [INFO]  [USER] registry: SUBSCRIBE forward OK devmgr:main grant_ep=124
+[    6.800] [INFO]  [USER] registry: SUBSCRIBE hostfs:main sender_tid=6 reply_ep=118 → no entry, pending
+[    6.801] [INFO]  [USER] registry: SUBSCRIBE drivermgr:main sender_tid=6 reply_ep=118 → forward grant_ep=120
+[    6.802] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermgr:main grant_ep=120
+[    6.803] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=180
+[    6.805] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=118
+[    6.806] [INFO]  [USER] vfs: mounted /proc/devices (devices_procfs)
+[    6.806] [INFO]  [USER] vfs: mounted /dev (devfs)
+[    6.807] [INFO]  [USER] devmgr: registered block device
+[    6.807] [INFO]  [USER] registry: registered vfs:mounted sender_tid=6
+[    6.808] [INFO]  [USER] vfs: published 'mounted' signal
+[    6.813] [INFO]  [USER] virtio-blk: registered with devmgr (2097152 sectors, status=0)
+[    6.814] [INFO]  [USER] vfs: grant buffer space_map_range ok
+[    6.814] [INFO]  [USER] vfs: grant buffer mapped base=0x60000000 size=4194304
+[    6.938] [INFO]  [USER] vfs: cache buffer space_map_range ok
+[    6.938] [INFO]  [USER] vfs: cache buffer mapped base=0x64000000 size=134217728
+[    6.939] [INFO]  [USER] vfs: ring pool space_map_range ok
+[    6.940] [INFO]  [USER] vfs: ring pool mapped base=0x74000000 size=262144
+[    6.941] [INFO]  [USER] vfs: bounce pool space_map_range ok
+[    6.942] [INFO]  [USER] vfs: bounce pool mapped base=0x78000000 size=1048576
+[    6.942] [INFO]  [USER] vfs: mounted /dev/input (devreg)
+[    6.996] [INFO]  [USER] vfs: cache_fill inode=221 size=115568 base=0x64000000
+[    7.001] [INFO]  [USER] vfs: cache_fill inode=226 size=117720 base=0x6401d000
+[    7.010] [INFO]  [USER] vfs: cache_fill inode=259 size=146624 base=0x6403a000
+[    7.018] [INFO]  [USER] vfs: cache_fill inode=271 size=283552 base=0x6405e000
+[    7.023] [INFO]  [USER] vfs: cache_fill inode=276 size=170272 base=0x640a4000
+[    7.031] [INFO]  [USER] vfs: cache_fill inode=286 size=312096 base=0x640ce000
+[    7.036] [INFO]  [USER] vfs: cache_fill inode=291 size=241912 base=0x6411b000
+[    7.044] [INFO]  [USER] vfs: cache_fill inode=313 size=147104 base=0x64157000
+[    7.052] [INFO]  [USER] vfs: cache_fill inode=330 size=156168 base=0x6417b000
+[    7.058] [INFO]  [USER] vfs: cache_fill inode=335 size=122976 base=0x641a2000
+[    7.068] [INFO]  [USER] vfs: cache_fill inode=378 size=117720 base=0x641c1000
+[    7.077] [INFO]  [USER] vfs: cache_fill inode=400 size=138336 base=0x641de000
+[    7.082] [INFO]  [USER] vfs: cache_fill inode=410 size=264248 base=0x64200000
+[    7.087] [INFO]  [USER] vfs: cache_fill inode=415 size=123112 base=0x64241000
+[    7.099] [INFO]  [USER] vfs: cache_fill inode=456 size=139000 base=0x64260000
+[    7.109] [INFO]  [USER] vfs: cache_fill inode=480 size=115488 base=0x64282000
+[    7.114] [INFO]  [USER] vfs: cache_fill inode=485 size=103280 base=0x6429f000
+[    7.119] [INFO]  [USER] vfs: cache_fill inode=495 size=177984 base=0x642b9000
+[    7.125] [INFO]  [USER] vfs: cache_fill inode=500 size=142560 base=0x642e5000
+[    7.134] [INFO]  [USER] vfs: cache_fill inode=505 size=353528 base=0x64308000
+[    7.139] [INFO]  [USER] vfs: cache_fill inode=517 size=193584 base=0x6435f000
+[    7.145] [INFO]  [USER] vfs: cache_fill inode=532 size=49824 base=0x6438f000
+[    7.155] [INFO]  [USER] vfs: cache_fill inode=552 size=61664 base=0x6439c000
+[    7.159] [INFO]  [USER] vfs: cache_fill inode=557 size=122856 base=0x643ac000
+[    7.189] [INFO]  [USER] vfs: cache_fill inode=672 size=115872 base=0x643ca000
+[    7.195] [INFO]  [USER] vfs: cache_fill inode=684 size=154176 base=0x643e7000
+[    7.201] [INFO]  [USER] vfs: cache_fill inode=694 size=103280 base=0x6440d000
+[    7.213] [INFO]  [USER] vfs: cache_fill inode=726 size=123432 base=0x64427000
+[    7.220] [INFO]  [USER] vfs: cache_fill inode=743 size=45728 base=0x64446000
+[    7.674] [INFO]  [USER] vfs: cache_fill inode=748 size=7393936 base=0x64452000
+[    7.680] [INFO]  [USER] vfs: cache_fill inode=753 size=123648 base=0x64b60000
+[    7.685] [INFO]  [USER] vfs: cache_fill inode=758 size=123056 base=0x64b7f000
+[    7.705] [INFO]  [USER] vfs: cache_fill inode=802 size=45728 base=0x64b9e000
+[    7.712] [INFO]  [USER] vfs: cache_fill inode=807 size=279352 base=0x64baa000
+[    7.740] [INFO]  [USER] vfs: cache_fill inode=878 size=122688 base=0x64bef000
+[    7.748] [INFO]  [USER] vfs: cache_fill inode=883 size=147616 base=0x64c0d000
+[    7.764] [INFO]  [USER] vfs: cache_fill inode=912 size=146616 base=0x64c32000
+[    7.771] [INFO]  [USER] vfs: cache_fill inode=917 size=95088 base=0x64c56000
+[    7.779] [INFO]  [USER] vfs: cache_fill inode=922 size=213664 base=0x64c6e000
+[    7.791] [INFO]  [USER] vfs: cache_fill inode=939 size=117872 base=0x64ca3000
+[    7.802] [INFO]  [USER] vfs: cache_fill inode=951 size=157632 base=0x64cc0000
+[    7.817] [INFO]  [USER] vfs: cache_fill inode=978 size=127600 base=0x64ce7000
+[    7.839] [INFO]  [USER] vfs: cache_fill inode=1017 size=142680 base=0x64d07000
+[    7.854] [INFO]  [USER] vfs: cache_fill inode=1034 size=193584 base=0x64d2a000
+[    7.861] [INFO]  [USER] vfs: cache_fill inode=1039 size=123224 base=0x64d5a000
+[    7.871] [INFO]  [USER] vfs: cache_fill inode=1044 size=127520 base=0x64d79000
+[    7.878] [INFO]  [USER] vfs: cache_fill inode=1049 size=142736 base=0x64d99000
+[    7.933] [INFO]  [USER] vfs: cache_fill inode=1096 size=554888 base=0x64dbc000
+[    7.937] [INFO]  [USER] vfs: cache_fill inode=1097 size=115656 base=0x64e44000
+[    7.953] [INFO]  [USER] vfs: cache_fill inode=1107 size=105600 base=0x64e61000
+[    7.965] [INFO]  [USER] vfs: cache_fill inode=1122 size=142664 base=0x64e7b000
+[    7.976] [INFO]  [USER] vfs: cache_fill inode=1132 size=123952 base=0x64e9e000
+[    7.979] [INFO]  [USER] vfs: preloaded 52 binaries from PRELOAD-marked containers
+[    7.979] [INFO]  [USER] vfs: ready
+[    7.979] [INFO]  [USER] vfs: /host (hostfs) — pending (optional)
+[    7.980] [INFO]  [USER] registry-client: handle_grant_request endpoint=mounted requester=116
+[    7.981] [INFO]  [USER] registry-client: handle_grant_request endpoint=mounted requester=120
+[    7.982] [INFO]  [USER] registry: SUBSCRIBE tty:0:main sender_tid=6 reply_ep=118 → no entry, pending
+[    7.983] [INFO]  [USER] registry: SUBSCRIBE tty:1:main sender_tid=6 reply_ep=118 → no entry, pending
+[    7.984] [INFO]  [USER] registry: SUBSCRIBE tty:2:main sender_tid=6 reply_ep=118 → no entry, pending
+[    7.984] [INFO]  [USER] procmgr: VFS mounted signal received (token=186)
+[    7.985] [INFO]  [USER] procmgr: reading /etc/system.toml
+[    7.986] [INFO]  [USER] procmgr: load_from_vfs path=/etc/system.toml
+[    7.986] [INFO]  [USER] vfs: open '/etc/system.toml' client=5
+[    7.987] [INFO]  [USER] registry: SUBSCRIBE tty:3:main sender_tid=6 reply_ep=118 → no entry, pending
+[    7.988] [INFO]  [USER] registry: SUBSCRIBE hostfs:main sender_tid=6 reply_ep=118 → no entry, pending
+[    7.989] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=7 reply_ep=120 → forward grant_ep=118
+[    7.990] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    7.992] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=120
+[    7.992] [INFO]  [USER] procmgr: load_from_vfs_ring fd=4 size=656
+[    7.993] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=7 reply_ep=120 → forward grant_ep=118
+[    7.994] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    7.995] [INFO]  [USER] vfs: cache_fill inode=197 size=656 base=0x64ebd000
+[    7.996] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=120
+[    7.997] [INFO]  [USER] procmgr: system.toml 5 service(s)
+[    7.998] [INFO]  [USER] procmgr: system.toml: start console
+[    7.998] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/console/manifest.toml
+[    7.999] [INFO]  [USER] vfs: open '/var/images/console/manifest.toml' client=5
+[    8.001] [INFO]  [USER] procmgr: load_from_vfs_ring fd=5 size=327
+[    8.063] [INFO]  [USER] vfs: cache_fill inode=293 size=327 base=0x64ebe000
+[    8.120] [INFO]  [USER] vfs: open '/var/images/console/bin/console' client=5
+[    8.123] [INFO]  [USER] vfs: open '/var/images/acpiprobe/manifest.toml' client=7
+[    8.124] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/console/bin/console fd=6
+[    8.126] [INFO]  [USER] vfs: handle_map_elf START fd=6 target_space=193 cache_entries=54
+[    8.127] [INFO]  [USER] vfs: map_elf inode=291 cache_base=0x6411b000 cache_len=241912 target_space=193
+[    8.128] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=25 data_ptr=0x6411c000 flags=0x80d file_sz=100965 share_phys=true
+[    8.129] [INFO]  [USER] vfs: map_cached_seg vaddr=0x419000 pages=27 data_ptr=0x64135000 flags=0x809 file_sz=107136 share_phys=true
+[    8.130] [INFO]  [USER] vfs: map_cached_seg vaddr=0x434000 pages=276 data_ptr=0x64150000 flags=0xb file_sz=160 share_phys=false
+[    8.131] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x435000 bss_pages=275
+[    8.132] [INFO]  [USER] vfs: map_elf OK inode=291 entry=0x400000 target_space=193
+[    8.133] [INFO]  [USER] procmgr: autostart 'console' started pid=5 cid=1
+[    8.134] [INFO]  [USER] procmgr: system.toml: start vtmgr
+[    8.135] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/vtmgr/manifest.toml
+[    8.136] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=14 reply_ep=205 → forward grant_ep=118
+[    8.137] [INFO]  [USER] vfs: cache_fill inode=213 size=198 base=0x64ebf000
+[    8.137] [INFO]  [USER] vfs: open '/var/images/vtmgr/manifest.toml' client=5
+[    8.138] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.141] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=205
+[    8.142] [INFO]  [USER] procmgr: load_from_vfs_ring fd=7 size=291
+[    8.143] [INFO]  [USER] vfs: open '/dev/fb0' client=14
+[    8.143] [INFO]  [USER] vfs: open '/var/images/argvprobe/manifest.toml' client=7
+[    8.146] [INFO]  [USER] vfs: cache_fill inode=1109 size=291 base=0x64ec0000
+[    8.147] [INFO]  [USER] vfs: read_grant device client=14 fd=4 device_type=Discriminant(6)
+[    8.147] [INFO]  [USER] vfs: read_grant device done client=14 fd=4 result=0
+[    8.148] [INFO]  [USER] vfs: cache_fill inode=218 size=198 base=0x64ec1000
+[    8.149] [INFO]  [USER] vfs: read_grant device client=14 fd=4 device_type=Discriminant(6)
+[    8.150] [INFO]  [USER] vfs: read_grant device done client=14 fd=4 result=0
+[    8.153] [INFO]  [USER] vfs: open '/var/images/vtmgr/bin/vtmgr' client=5
+[    8.156] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/vtmgr/bin/vtmgr fd=8
+[    8.157] [INFO]  [USER] console: /dev/fb0 mapped
+[    8.163] [INFO]  [USER] drivermgr: warning: read /var/images/argvprobe/manifest.toml failed: InvalidArgument
+[    8.164] [INFO]  [USER] vfs: open '/var/images/awk/manifest.toml' client=7
+[    8.166] [INFO]  [USER] console: using double buffering
+[    8.167] [INFO]  [USER] registry: registered console:0:stdin sender_tid=14
+[    8.168] [INFO]  [USER] registry: registered console:0:stdout sender_tid=14
+[    8.169] [INFO]  [USER] registry: registered console:0:stderr sender_tid=14
+[    8.169] [INFO]  [USER] registry: registered console:0:stdlog sender_tid=14
+[    8.170] [INFO]  [USER] registry: registered console:0:vt:0 sender_tid=14
+[    8.171] [INFO]  [USER] registry: registered console:0:vt:1 sender_tid=14
+[    8.172] [INFO]  [USER] registry: registered console:0:vt:2 sender_tid=14
+[    8.174] [INFO]  [USER] vfs: handle_map_elf START fd=8 target_space=210 cache_entries=57
+[    8.174] [INFO]  [USER] vfs: map_elf inode=1107 cache_base=0x64e61000 cache_len=105600 target_space=210
+[    8.175] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=17 data_ptr=0x64e62000 flags=0x80d file_sz=67509 share_phys=true
+[    8.176] [INFO]  [USER] vfs: map_cached_seg vaddr=0x411000 pages=3 data_ptr=0x64e73000 flags=0x809 file_sz=8264 share_phys=true
+[    8.177] [INFO]  [USER] vfs: map_cached_seg vaddr=0x414000 pages=275 data_ptr=0x64e76000 flags=0xb file_sz=32 share_phys=false
+[    8.178] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x415000 bss_pages=274
+[    8.179] [INFO]  [USER] vfs: map_elf OK inode=1107 entry=0x400000 target_space=210
+[    8.180] [INFO]  [USER] registry: registered console:0:vt:3 sender_tid=14
+[    8.181] [INFO]  [USER] procmgr: autostart 'vtmgr' started pid=6 cid=2
+[    8.182] [INFO]  [USER] procmgr: system.toml: start inputd
+[    8.183] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/inputd/manifest.toml
+[    8.183] [INFO]  [USER] registry: registered console:0:write sender_tid=14
+[    8.184] [INFO]  [USER] vfs: cache_fill inode=223 size=201 base=0x64ec2000
+[    8.185] [INFO]  [USER] vfs: open '/var/images/inputd/manifest.toml' client=5
+[    8.186] [INFO]  [USER] registry: registered vtmgr:stdin sender_tid=15
+[    8.187] [INFO]  [USER] registry: registered vtmgr:stdout sender_tid=15
+[    8.187] [INFO]  [USER] registry: registered vtmgr:stderr sender_tid=15
+[    8.188] [INFO]  [USER] registry: registered vtmgr:stdlog sender_tid=15
+[    8.188] [INFO]  [USER] registry: registered vtmgr:control sender_tid=15
+[    8.189] [INFO]  [USER] registry: registered console:0:control sender_tid=14
+[    8.190] [INFO]  [USER] console: instance 0 ready
+[    8.190] [INFO]  [USER] registry: registered vtmgr:input sender_tid=15
+[    8.194] [INFO]  [USER] vtmgr: ready active_vt=4 compositor_vt=4
+[    8.195] [INFO]  [USER] registry: SUBSCRIBE tty:0:main sender_tid=14 reply_ep=211 → no entry, pending
+[    8.196] [INFO]  [USER] procmgr: load_from_vfs_ring fd=9 size=277
+[    8.197] [INFO]  [USER] registry-client: handle_grant_request endpoint=control requester=149
+[    8.198] [INFO]  [USER] vfs: open '/var/images/basename/manifest.toml' client=7
+[    8.198] [INFO]  [USER] registry: SUBSCRIBE console:0:control sender_tid=15 reply_ep=227 → forward grant_ep=211
+[    8.199] [INFO]  [USER] registry: SUBSCRIBE forward OK console:0:control grant_ep=211
+[    8.200] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=15 reply_ep=227 → forward grant_ep=116
+[    8.201] [INFO]  [USER] registry-client: handle_grant_request endpoint=control requester=227
+[    8.202] [INFO]  [USER] kbd: vtmgr:control subscribed
+[    8.202] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    8.203] [INFO]  [USER] registry: SUBSCRIBE compositor:control sender_tid=15 reply_ep=227 → no entry, pending
+[    8.204] [INFO]  [USER] registry: SUBSCRIBE compositor:input sender_tid=15 reply_ep=227 → no entry, pending
+[    8.207] [INFO]  [USER] vtmgr: console control subscribed
+[    8.207] [INFO]  [USER] vtmgr: boot CONSOLE_DEACTIVATE(0) sent
+[    8.208] [INFO]  [USER] vtmgr: router target None -> Compositor
+[    8.208] [INFO]  [USER] registry: SUBSCRIBE tty:0:main sender_tid=15 reply_ep=227 → no entry, pending
+[    8.209] [INFO]  [USER] registry: SUBSCRIBE tty:1:main sender_tid=15 reply_ep=227 → no entry, pending
+[    8.210] [INFO]  [USER] registry: SUBSCRIBE tty:2:main sender_tid=15 reply_ep=227 → no entry, pending
+[    8.211] [INFO]  [USER] registry: SUBSCRIBE tty:3:main sender_tid=15 reply_ep=227 → no entry, pending
+[    8.212] [INFO]  [USER] registry: SUBSCRIBE tty:4:main sender_tid=15 reply_ep=227 → no entry, pending
+[    8.213] [INFO]  [USER] vfs: cache_fill inode=534 size=277 base=0x64ec3000
+[    8.214] [INFO]  [USER] vfs: cache_fill inode=228 size=211 base=0x64ec4000
+[    8.215] [INFO]  [USER] vfs: open '/var/images/inputd/bin/inputd' client=5
+[    8.218] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/inputd/bin/inputd fd=10
+[    8.218] [INFO]  [USER] vfs: handle_map_elf START fd=10 target_space=235 cache_entries=60
+[    8.219] [INFO]  [USER] vfs: map_elf inode=532 cache_base=0x6438f000 cache_len=49824 target_space=235
+[    8.220] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=9 data_ptr=0x64390000 flags=0x80d file_sz=35589 share_phys=true
+[    8.222] [INFO]  [USER] vfs: map_cached_seg vaddr=0x409000 pages=2 data_ptr=0x64399000 flags=0x809 file_sz=5836 share_phys=true
+[    8.223] [INFO]  [USER] vfs: map_cached_seg vaddr=0x40b000 pages=275 data_ptr=0x6439b000 flags=0xb file_sz=32 share_phys=false
+[    8.224] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x40c000 bss_pages=274
+[    8.224] [INFO]  [USER] vfs: map_elf OK inode=532 entry=0x400000 target_space=235
+[    8.225] [INFO]  [USER] vfs: open '/var/images/benchprobe/manifest.toml' client=7
+[    8.226] [INFO]  [USER] procmgr: autostart 'inputd' started pid=7 cid=3
+[    8.227] [INFO]  [USER] procmgr: system.toml: start displayd
+[    8.227] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/displayd/manifest.toml
+[    8.230] [INFO]  [USER] vfs: open '/var/images/displayd/manifest.toml' client=5
+[    8.231] [INFO]  [USER] registry: registered inputd:stdin sender_tid=16
+[    8.231] [INFO]  [USER] registry: registered inputd:stdout sender_tid=16
+[    8.232] [INFO]  [USER] registry: registered inputd:stderr sender_tid=16
+[    8.235] [INFO]  [USER] procmgr: load_from_vfs_ring fd=11 size=345
+[    8.236] [INFO]  [USER] registry: registered inputd:stdlog sender_tid=16
+[    8.237] [INFO]  [USER] vfs: cache_fill inode=241 size=190 base=0x64ec5000
+[    8.238] [INFO]  [USER] registry: registered inputd:input sender_tid=16
+[    8.238] [INFO]  [USER] inputd: ready
+[    8.239] [INFO]  [USER] vfs: cache_fill inode=385 size=345 base=0x64ec6000
+[    8.240] [INFO]  [USER] registry-client: handle_grant_request endpoint=input requester=149
+[    8.241] [INFO]  [USER] vfs: open '/var/images/blkprobe/manifest.toml' client=7
+[    8.241] [INFO]  [USER] registry: SUBSCRIBE vtmgr:input sender_tid=16 reply_ep=247 → forward grant_ep=227
+[    8.242] [INFO]  [USER] registry: SUBSCRIBE forward OK vtmgr:input grant_ep=227
+[    8.243] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=16 reply_ep=247 → forward grant_ep=118
+[    8.243] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.244] [INFO]  [USER] registry-client: handle_grant_request endpoint=input requester=164
+[    8.247] [INFO]  [USER] vfs: open '/var/images/displayd/bin/displayd' client=5
+[    8.247] [INFO]  [USER] registry-client: handle_grant_request endpoint=input requester=247
+[    8.248] [INFO]  [USER] kbd: inputd:input subscribed
+[    8.249] [INFO]  [USER] mouse: inputd:input subscribed
+[    8.252] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=247
+[    8.252] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/displayd/bin/displayd fd=12
+[    8.253] [INFO]  [USER] inputd: vtmgr:input subscribed
+[    8.254] [INFO]  [USER] inputd: vfs:main subscribed
+[    8.254] [INFO]  [USER] inputd: registered /dev/input/* with VFS
+[    8.255] [INFO]  [USER] vfs: cache_fill inode=246 size=196 base=0x64ec7000
+[    8.256] [INFO]  [USER] vfs: handle_map_elf START fd=12 target_space=252 cache_entries=63
+[    8.257] [INFO]  [USER] vfs: cache_fill inode=383 size=115504 base=0x64ec8000
+[    8.258] [INFO]  [USER] vfs: map_elf inode=383 cache_base=0x64ec8000 cache_len=115504 target_space=252
+[    8.258] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=24 data_ptr=0x64ec9000 flags=0x80d file_sz=97605 share_phys=true
+[    8.259] [INFO]  [USER] vfs: map_cached_seg vaddr=0x418000 pages=3 data_ptr=0x64ee1000 flags=0x809 file_sz=10876 share_phys=true
+[    8.260] [INFO]  [USER] vfs: map_cached_seg vaddr=0x41b000 pages=276 data_ptr=0x64ee4000 flags=0xb file_sz=176 share_phys=false
+[    8.261] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x41c000 bss_pages=275
+[    8.262] [INFO]  [USER] vfs: map_elf OK inode=383 entry=0x400000 target_space=252
+[    8.263] [INFO]  [USER] vfs: registered dev /dev/input/kbd (kind=15, ep=233)
+[    8.263] [INFO]  [USER] vfs: registered dev /dev/input/mouse (kind=17, ep=233)
+[    8.264] [INFO]  [USER] drivermgr: warning: read /var/images/blkprobe/manifest.toml failed: InvalidArgument
+[    8.265] [INFO]  [USER] procmgr: autostart 'displayd' started pid=8 cid=4
+[    8.266] [INFO]  [USER] procmgr: system.toml: start compositor
+[    8.267] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.267] [INFO]  [USER] vfs: open '/var/images/calc/manifest.toml' client=7
+[    8.269] [INFO]  [USER] displayd: init
+[    8.271] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.272] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=17 reply_ep=265 → forward grant_ep=118
+[    8.275] [INFO]  [USER] procmgr: load_from_vfs_ring fd=13 size=335
+[    8.275] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.276] [INFO]  [USER] vfs: cache_fill inode=251 size=176 base=0x64ee5000
+[    8.277] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=265
+[    8.278] [INFO]  [USER] vfs: cache_fill inode=288 size=335 base=0x64ee6000
+[    8.279] [INFO]  [USER] vfs: open '/dev/fb0' client=17
+[    8.279] [INFO]  [USER] vfs: read_grant device client=17 fd=4 device_type=Discriminant(6)
+[    8.280] [INFO]  [USER] vfs: read_grant device done client=17 fd=4 result=0
+[    8.281] [INFO]  [USER] vfs: open '/var/images/cascadeprobe/manifest.toml' client=7
+[    8.283] [INFO]  [USER] vfs: open '/var/images/compositor/bin/compositor' client=5
+[    8.286] [INFO]  [USER] vfs: read_grant device client=17 fd=4 device_type=Discriminant(6)
+[    8.287] [INFO]  [USER] vfs: read_grant device done client=17 fd=4 result=0
+[    8.288] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.290] [INFO]  [USER] vfs: cache_fill inode=256 size=204 base=0x64ee7000
+[    8.291] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=270 cache_entries=67
+[    8.292] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=270
+[    8.301] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.302] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.302] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.303] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.304] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=270
+[    8.305] [INFO]  [USER] displayd: fb 1920x1080 pitch=7680
+[    8.307] [INFO]  [USER] procmgr: autostart 'compositor' started pid=9 cid=5
+[    8.307] [INFO]  [USER] procmgr: system.toml service start complete
+[    8.308] [INFO]  [USER] procmgr: load_from_vfs path=/etc/envelopes.toml
+[    8.308] [INFO]  [USER] registry: registered displayd:main sender_tid=17
+[    8.310] [INFO]  [USER] compositor: init
+[    8.310] [INFO]  [USER] DISPLAYD_READY 1920 1080 7680 linear_fb
+[    8.311] [INFO]  [USER] displayd: self-test start
+[    8.311] [INFO]  [USER] DISPLAYD_FLUSH 128 128
+[    8.312] [INFO]  [USER] DISPLAYD_FLUSH 64 64
+[    8.312] [INFO]  [USER] DISPLAYD_FLUSH 128 128
+[    8.313] [INFO]  [USER] vfs: open '/var/images/cat/manifest.toml' client=7
+[    8.313] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=18 reply_ep=284 → forward grant_ep=118
+[    8.314] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.315] [INFO]  [USER] DISPLAYD_QUOTA_REJECT 9
+[    8.315] [INFO]  [USER] DISPLAYD_SELFTEST_OK
+[    8.317] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=284
+[    8.318] [INFO]  [USER] vfs: open '/etc/envelopes.toml' client=5
+[    8.320] [INFO]  [USER] procmgr: load_from_vfs_ring fd=15 size=3360
+[    8.320] [INFO]  [USER] vfs: cache_fill inode=261 size=201 base=0x64ee8000
+[    8.321] [INFO]  [USER] compositor: init failed
+[    8.322] [INFO]  [USER] userspace: exiting with error
+[    8.322] [INFO]  [USER] vfs: cache_fill inode=189 size=3360 base=0x64ee9000
+[    8.323] [INFO]  [USER] vfs: open '/var/images/cfmismatch/manifest.toml' client=7
+[    8.325] [INFO]  [USER] procmgr: loaded 4 envelope(s)
+[    8.325] [INFO]  [USER] procmgr: load_from_vfs path=/etc/users.toml
+[    8.328] [INFO]  [USER] vfs: open '/etc/users.toml' client=5
+[    8.329] [INFO]  [USER] procmgr: load_from_vfs_ring fd=16 size=1030
+[    8.330] [INFO]  [USER] vfs: cache_fill inode=268 size=252 base=0x64eea000
+[    8.331] [INFO]  [USER] vfs: cache_fill inode=198 size=1030 base=0x64eeb000
+[    8.332] [INFO]  [USER] vfs: open '/var/images/cluuamp/manifest.toml' client=7
+[    8.333] [INFO]  [USER] procmgr: loaded 4 user record(s)
+[    8.333] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=227
+[    8.334] [INFO]  [USER] registry: SUBSCRIBE blkdev:main sender_tid=5 reply_ep=116 → forward grant_ep=180
+[    8.335] [INFO]  [USER] registry: SUBSCRIBE forward OK blkdev:main grant_ep=180
+[    8.336] [INFO]  [USER] vtmgr: procmgr spawn subscribed
+[    8.336] [INFO]  [USER] vtmgr: requested vt:0 container
+[    8.339] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=116
+[    8.340] [INFO]  [USER] vfs: set_view cleared client=18
+[    8.341] [INFO]  resource delta: 
+[    8.341] [INFO]  thread_destroy
+[    8.342] [INFO]    sample_seq=1
+[    8.342] [INFO]    delta_threads_live=15
+[    8.342] [INFO]    delta_spaces=17
+[    8.343] [INFO]    delta_endpoints=120
+[    8.343] [INFO]    delta_tokens=283
+[    8.343] [INFO]    delta_tracked_frames=1056
+[    8.344] [INFO]    delta_mapped_frames=2115
+[    8.344] [INFO]    delta_pmm_used_frames=67396
+[    8.344] [INFO]    ipc_wait_events=669
+[    8.345] [INFO]    ipc_wait_avg_ms=0
+[    8.345] [INFO]    ipc_wait_p95_ms=4
+[    8.345] [INFO]    ipc_wait_p99_ms=4
+[    8.346] [INFO]    ipc_wait_max_ms=0
+[    8.346] [INFO]    ipc_scan_events=790
+[    8.346] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.347] [INFO]    ipc_scan_max_steps=6
+[    8.347] [INFO]    ipc_stale_waiters=551
+[    8.347] [INFO]    ipc_direct_deliveries=656
+[    8.348] [INFO]    ipc_queue_bytes_current=275
+[    8.348] [INFO]    ipc_queue_bytes_peak=1345
+[    8.348] [INFO]    ipc_queue_messages_current=4
+[    8.349] [INFO]    ipc_queue_messages_peak=16
+[    8.349] [INFO]    thread_suspend_calls=0
+[    8.349] [INFO]    thread_suspend_success=0
+[    8.350] [INFO]    thread_resume_calls=9
+[    8.350] [INFO]    thread_resume_success=9
+[    8.352] [INFO]  resource delta: 
+[    8.353] [INFO]  space_destroy
+[    8.353] [INFO]    sample_seq=2
+[    8.353] [INFO]    delta_threads_live=15
+[    8.353] [INFO]    delta_spaces=16
+[    8.354] [INFO]    delta_endpoints=120
+[    8.354] [INFO]    delta_tokens=283
+[    8.354] [INFO]    delta_tracked_frames=1057
+[    8.354] [INFO]    delta_mapped_frames=2117
+[    8.355] [INFO]    delta_pmm_used_frames=67303
+[    8.355] [INFO]    ipc_wait_events=669
+[    8.355] [INFO]    ipc_wait_avg_ms=0
+[    8.356] [INFO]    ipc_wait_p95_ms=4
+[    8.356] [INFO]    ipc_wait_p99_ms=4
+[    8.356] [INFO]    ipc_wait_max_ms=0
+[    8.357] [INFO]    ipc_scan_events=790
+[    8.357] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.358] [INFO]    ipc_scan_max_steps=6
+[    8.358] [INFO]    ipc_stale_waiters=551
+[    8.358] [INFO]    ipc_direct_deliveries=656
+[    8.359] [INFO]    ipc_queue_bytes_current=275
+[    8.359] [INFO]    ipc_queue_bytes_peak=1345
+[    8.359] [INFO]    ipc_queue_messages_current=4
+[    8.360] [INFO]    ipc_queue_messages_peak=16
+[    8.360] [INFO]    thread_suspend_calls=0
+[    8.360] [INFO]    thread_suspend_success=0
+[    8.361] [INFO]    thread_resume_calls=9
+[    8.361] [INFO]    thread_resume_success=9
+[    8.362] [INFO]  [USER] vfs: cache_fill inode=273 size=324 base=0x64eec000
+[    8.363] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #1)
+[    8.363] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.364] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.367] [INFO]  [USER] vfs: open '/var/images/cluuterm/manifest.toml' client=7
+[    8.367] [INFO]  [USER] procmgr: load_from_vfs_ring fd=17 size=335
+[    8.370] [INFO]  [USER] vfs: cache_fill inode=278 size=220 base=0x64eed000
+[    8.371] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.371] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=292 cache_entries=73
+[    8.372] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=292
+[    8.373] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.375] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.376] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.377] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.378] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=292
+[    8.380] [INFO]  [USER] procmgr: 'compositor' restarted as pid 10 (container 5)
+[    8.381] [INFO]  [USER] compositor: init
+[    8.381] [INFO]  [USER] procmgr: container run 'vt'
+[    8.382] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/vt/manifest.toml
+[    8.383] [INFO]  [USER] vfs: open '/var/images/compdemo/manifest.toml' client=7
+[    8.384] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=19 reply_ep=304 → forward grant_ep=118
+[    8.384] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.387] [INFO]  [USER] vfs: open '/var/images/vt/manifest.toml' client=5
+[    8.389] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=304
+[    8.390] [INFO]  [USER] procmgr: load_from_vfs_ring fd=18 size=266
+[    8.391] [INFO]  [USER] vfs: cache_fill inode=283 size=177 base=0x64eee000
+[    8.392] [INFO]  [USER] compositor: init failed
+[    8.392] [INFO]  [USER] userspace: exiting with error
+[    8.393] [INFO]  [USER] vfs: cache_fill inode=1099 size=266 base=0x64eef000
+[    8.393] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=7
+[    8.394] [INFO]  [USER] procmgr: container 'vt' param slots: ["tty_instance"]
+[    8.395] [INFO]  [USER] registry: SUBSCRIBE devmgr:main sender_tid=5 reply_ep=116 → forward grant_ep=124
+[    8.396] [INFO]  [USER] registry: SUBSCRIBE forward OK devmgr:main grant_ep=124
+[    8.399] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=116
+[    8.400] [INFO]  [USER] vfs: open '/var/images/console/manifest.toml' client=7
+[    8.403] [INFO]  [USER] vfs: open '/var/images/vt/bin/tty' client=5
+[    8.407] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/vt/bin/tty fd=19
+[    8.407] [INFO]  [USER] vfs: handle_map_elf START fd=19 target_space=311 cache_entries=75
+[    8.408] [INFO]  [USER] vfs: map_elf inode=1097 cache_base=0x64e44000 cache_len=115656 target_space=311
+[    8.409] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=19 data_ptr=0x64e45000 flags=0x80d file_sz=75765 share_phys=true
+[    8.410] [INFO]  [USER] vfs: map_cached_seg vaddr=0x413000 pages=3 data_ptr=0x64e58000 flags=0x809 file_sz=9564 share_phys=true
+[    8.411] [INFO]  [USER] vfs: map_cached_seg vaddr=0x416000 pages=275 data_ptr=0x64e5b000 flags=0xb file_sz=32 share_phys=false
+[    8.412] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x417000 bss_pages=274
+[    8.413] [INFO]  [USER] vfs: map_elf OK inode=1097 entry=0x400000 target_space=311
+[    8.414] [INFO]  [USER] procmgr: container 'vt' started pid=11 cid=6
+[    8.415] [INFO]  resource delta: 
+[    8.416] [INFO]  thread_destroy
+[    8.416] [INFO]    sample_seq=3
+[    8.416] [INFO]    delta_threads_live=16
+[    8.417] [INFO]    delta_spaces=18
+[    8.417] [INFO]    delta_endpoints=131
+[    8.417] [INFO]    delta_tokens=310
+[    8.418] [INFO]    delta_tracked_frames=1057
+[    8.418] [INFO]    delta_mapped_frames=2117
+[    8.418] [INFO]    delta_pmm_used_frames=67442
+[    8.419] [INFO]    ipc_wait_events=699
+[    8.419] [INFO]    ipc_wait_avg_ms=0
+[    8.419] [INFO]    ipc_wait_p95_ms=4
+[    8.420] [INFO]    ipc_wait_p99_ms=4
+[    8.420] [INFO]    ipc_wait_max_ms=0
+[    8.420] [INFO]    ipc_scan_events=822
+[    8.420] [INFO]    ipc_scan_avg_steps_x100=196
+[    8.421] [INFO]    ipc_scan_max_steps=6
+[    8.421] [INFO]    ipc_stale_waiters=563
+[    8.421] [INFO]    ipc_direct_deliveries=685
+[    8.422] [INFO]    ipc_queue_bytes_current=262
+[    8.422] [INFO]    ipc_queue_bytes_peak=1345
+[    8.422] [INFO]    ipc_queue_messages_current=4
+[    8.423] [INFO]    ipc_queue_messages_peak=16
+[    8.423] [INFO]    thread_suspend_calls=0
+[    8.423] [INFO]    thread_suspend_success=0
+[    8.424] [INFO]    thread_resume_calls=11
+[    8.424] [INFO]    thread_resume_success=11
+[    8.428] [INFO]  resource delta: 
+[    8.428] [INFO]  space_destroy
+[    8.429] [INFO]    sample_seq=4
+[    8.429] [INFO]    delta_threads_live=16
+[    8.429] [INFO]    delta_spaces=17
+[    8.429] [INFO]    delta_endpoints=133
+[    8.430] [INFO]    delta_tokens=312
+[    8.430] [INFO]    delta_tracked_frames=1058
+[    8.430] [INFO]    delta_mapped_frames=2118
+[    8.431] [INFO]    delta_pmm_used_frames=67415
+[    8.431] [INFO]    ipc_wait_events=699
+[    8.432] [INFO]    ipc_wait_avg_ms=0
+[    8.432] [INFO]    ipc_wait_p95_ms=4
+[    8.432] [INFO]    ipc_wait_p99_ms=4
+[    8.432] [INFO]    ipc_wait_max_ms=0
+[    8.433] [INFO]    ipc_scan_events=822
+[    8.433] [INFO]    ipc_scan_avg_steps_x100=196
+[    8.433] [INFO]    ipc_scan_max_steps=6
+[    8.434] [INFO]    ipc_stale_waiters=563
+[    8.434] [INFO]    ipc_direct_deliveries=686
+[    8.434] [INFO]    ipc_queue_bytes_current=644
+[    8.434] [INFO]    ipc_queue_bytes_peak=1345
+[    8.435] [INFO]    ipc_queue_messages_current=9
+[    8.435] [INFO]    ipc_queue_messages_peak=16
+[    8.436] [INFO]    thread_suspend_calls=0
+[    8.436] [INFO]    thread_suspend_success=0
+[    8.436] [INFO]    thread_resume_calls=11
+[    8.436] [INFO]    thread_resume_success=11
+[    8.437] [INFO]  [USER] vfs: set_view cleared client=19
+[    8.438] [INFO]  [USER] vfs: open '/var/images/console_blit_bench/manifest.toml' client=7
+[    8.438] [INFO]  [USER] registry: registered tty:0:stdin sender_tid=20
+[    8.439] [INFO]  [USER] registry: registered tty:0:stdout sender_tid=20
+[    8.439] [INFO]  [USER] registry: registered tty:0:stderr sender_tid=20
+[    8.440] [INFO]  [USER] registry: registered tty:0:stdlog sender_tid=20
+[    8.443] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #2)
+[    8.444] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.445] [INFO]  [USER] registry: registered tty:0:main sender_tid=20
+[    8.445] [INFO]  [USER] tty: endpoint 323 registry 324
+[    8.446] [INFO]  [USER] tty: ready
+[    8.446] [INFO]  [USER] vfs: cache_fill inode=298 size=197 base=0x64ef0000
+[    8.447] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.448] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=116
+[    8.448] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=118
+[    8.449] [INFO]  [USER] registry: SUBSCRIBE console:0:vt:0 sender_tid=20 reply_ep=324 → forward grant_ep=211
+[    8.450] [INFO]  [USER] registry: SUBSCRIBE forward OK console:0:vt:0 grant_ep=211
+[    8.451] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=20 reply_ep=324 → forward grant_ep=116
+[    8.451] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    8.452] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:main sender_tid=20 reply_ep=324 → forward grant_ep=116
+[    8.453] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=211
+[    8.454] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=227
+[    8.456] [INFO]  [USER] vfs: tty:0 main endpoint=326
+[    8.457] [INFO]  [USER] procmgr: load_from_vfs_ring fd=20 size=335
+[    8.457] [INFO]  [USER] vfs: open '/var/images/containerprobe/manifest.toml' client=7
+[    8.458] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:main grant_ep=116
+[    8.459] [INFO]  [USER] registry-client: handle_grant_request endpoint=vt:0 requester=324
+[    8.460] [INFO]  [USER] console: tty subscribed for credit refills
+[    8.460] [INFO]  [USER] vtmgr: tty:0 main subscribed
+[    8.463] [INFO]  [USER] tty: console subscribed
+[    8.463] [INFO]  [USER] tty:0: showing login prompt
+[    8.464] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.465] [INFO]  [USER] vfs: cache_fill inode=305 size=196 base=0x64ef1000
+[    8.466] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=333 cache_entries=77
+[    8.466] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=333
+[    8.467] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.468] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.469] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.470] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.471] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=333
+[    8.473] [INFO]  [USER] procmgr: 'compositor' restarted as pid 12 (container 5)
+[    8.473] [INFO]  [USER] procmgr: tty:0 main granted 325
+[    8.474] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=324
+[    8.475] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=324
+[    8.475] [INFO]  [USER] vfs: open '/var/images/cowfork/manifest.toml' client=7
+[    8.476] [INFO]  [USER] compositor: init
+[    8.477] [INFO]  [USER] tty: procmgr spawn subscribed
+[    8.477] [INFO]  [USER] tty: procmgr main subscribed
+[    8.479] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=21 reply_ep=347 → forward grant_ep=118
+[    8.480] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.481] [INFO]  [USER] vfs: cache_fill inode=310 size=194 base=0x64ef2000
+[    8.482] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=347
+[    8.483] [INFO]  [USER] vfs: open '/var/images/cp/manifest.toml' client=7
+[    8.483] [INFO]  [USER] compositor: init failed
+[    8.484] [INFO]  [USER] userspace: exiting with error
+[    8.484] [INFO]  resource delta: 
+[    8.485] [INFO]  thread_destroy
+[    8.485] [INFO]    sample_seq=5
+[    8.485] [INFO]    delta_threads_live=16
+[    8.486] [INFO]    delta_spaces=18
+[    8.486] [INFO]    delta_endpoints=139
+[    8.486] [INFO]    delta_tokens=330
+[    8.486] [INFO]    delta_tracked_frames=1058
+[    8.487] [INFO]    delta_mapped_frames=2118
+[    8.487] [INFO]    delta_pmm_used_frames=67522
+[    8.488] [INFO]    ipc_wait_events=724
+[    8.488] [INFO]    ipc_wait_avg_ms=0
+[    8.489] [INFO]    ipc_wait_p95_ms=4
+[    8.489] [INFO]    ipc_wait_p99_ms=4
+[    8.489] [INFO]    ipc_wait_max_ms=0
+[    8.490] [INFO]    ipc_scan_events=867
+[    8.490] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.490] [INFO]    ipc_scan_max_steps=6
+[    8.491] [INFO]    ipc_stale_waiters=572
+[    8.491] [INFO]    ipc_direct_deliveries=708
+[    8.492] [INFO]    ipc_queue_bytes_current=318
+[    8.492] [INFO]    ipc_queue_bytes_peak=1345
+[    8.493] [INFO]    ipc_queue_messages_current=5
+[    8.493] [INFO]    ipc_queue_messages_peak=16
+[    8.494] [INFO]    thread_suspend_calls=0
+[    8.494] [INFO]    thread_suspend_success=0
+[    8.494] [INFO]    thread_resume_calls=12
+[    8.495] [INFO]    thread_resume_success=12
+[    8.499] [INFO]  resource delta: 
+[    8.499] [INFO]  space_destroy
+[    8.499] [INFO]    sample_seq=6
+[    8.500] [INFO]    delta_threads_live=16
+[    8.500] [INFO]    delta_spaces=17
+[    8.500] [INFO]    delta_endpoints=139
+[    8.500] [INFO]    delta_tokens=330
+[    8.501] [INFO]    delta_tracked_frames=1059
+[    8.501] [INFO]    delta_mapped_frames=2119
+[    8.501] [INFO]    delta_pmm_used_frames=67428
+[    8.502] [INFO]    ipc_wait_events=724
+[    8.502] [INFO]    ipc_wait_avg_ms=0
+[    8.502] [INFO]    ipc_wait_p95_ms=4
+[    8.503] [INFO]    ipc_wait_p99_ms=4
+[    8.503] [INFO]    ipc_wait_max_ms=0
+[    8.503] [INFO]    ipc_scan_events=867
+[    8.504] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.504] [INFO]    ipc_scan_max_steps=6
+[    8.505] [INFO]    ipc_stale_waiters=573
+[    8.505] [INFO]    ipc_direct_deliveries=708
+[    8.506] [INFO]    ipc_queue_bytes_current=374
+[    8.506] [INFO]    ipc_queue_bytes_peak=1345
+[    8.507] [INFO]    ipc_queue_messages_current=6
+[    8.507] [INFO]    ipc_queue_messages_peak=16
+[    8.508] [INFO]    thread_suspend_calls=0
+[    8.508] [INFO]    thread_suspend_success=0
+[    8.509] [INFO]    thread_resume_calls=12
+[    8.509] [INFO]    thread_resume_success=12
+[    8.510] [INFO]  [USER] vfs: set_view cleared client=21
+[    8.511] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #3)
+[    8.512] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.513] [INFO]  [USER] vfs: cache_fill inode=315 size=199 base=0x64ef3000
+[    8.513] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.517] [INFO]  [USER] procmgr: load_from_vfs_ring fd=21 size=335
+[    8.518] [INFO]  [USER] vfs: open '/var/images/cpuburn/manifest.toml' client=7
+[    8.523] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.524] [INFO]  [USER] vfs: cache_fill inode=322 size=175 base=0x64ef4000
+[    8.525] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=353 cache_entries=80
+[    8.526] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=353
+[    8.527] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.528] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.530] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.531] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.531] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=353
+[    8.532] [INFO]  [USER] procmgr: 'compositor' restarted as pid 13 (container 5)
+[    8.533] [INFO]  [USER] compositor: init
+[    8.534] [INFO]  [USER] vfs: open '/var/images/curl/manifest.toml' client=7
+[    8.534] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=22 reply_ep=362 → forward grant_ep=118
+[    8.535] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.538] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=362
+[    8.540] [INFO]  [USER] vfs: cache_fill inode=327 size=195 base=0x64ef5000
+[    8.541] [INFO]  [USER] compositor: init failed
+[    8.541] [INFO]  [USER] userspace: exiting with error
+[    8.543] [INFO]  resource delta: 
+[    8.543] [INFO]  thread_destroy
+[    8.544] [INFO]    sample_seq=7
+[    8.544] [INFO]    delta_threads_live=16
+[    8.544] [INFO]    delta_spaces=18
+[    8.545] [INFO]    delta_endpoints=142
+[    8.545] [INFO]    delta_tokens=338
+[    8.545] [INFO]    delta_tracked_frames=1059
+[    8.546] [INFO]    delta_mapped_frames=2119
+[    8.546] [INFO]    delta_pmm_used_frames=67522
+[    8.547] [INFO]    ipc_wait_events=742
+[    8.547] [INFO]    ipc_wait_avg_ms=0
+[    8.547] [INFO]    ipc_wait_p95_ms=4
+[    8.548] [INFO]    ipc_wait_p99_ms=4
+[    8.548] [INFO]    ipc_wait_max_ms=0
+[    8.548] [INFO]    ipc_scan_events=887
+[    8.548] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.549] [INFO]    ipc_scan_max_steps=6
+[    8.549] [INFO]    ipc_stale_waiters=580
+[    8.549] [INFO]    ipc_direct_deliveries=725
+[    8.550] [INFO]    ipc_queue_bytes_current=262
+[    8.550] [INFO]    ipc_queue_bytes_peak=1345
+[    8.551] [INFO]    ipc_queue_messages_current=4
+[    8.551] [INFO]    ipc_queue_messages_peak=16
+[    8.551] [INFO]    thread_suspend_calls=0
+[    8.552] [INFO]    thread_suspend_success=0
+[    8.552] [INFO]    thread_resume_calls=13
+[    8.552] [INFO]    thread_resume_success=13
+[    8.553] [INFO]  [USER] vfs: open '/var/images/cut/manifest.toml' client=7
+[    8.557] [INFO]  resource delta: 
+[    8.557] [INFO]  space_destroy
+[    8.558] [INFO]    sample_seq=8
+[    8.558] [INFO]    delta_threads_live=16
+[    8.558] [INFO]    delta_spaces=17
+[    8.559] [INFO]    delta_endpoints=142
+[    8.559] [INFO]    delta_tokens=338
+[    8.559] [INFO]    delta_tracked_frames=1060
+[    8.560] [INFO]    delta_mapped_frames=2120
+[    8.560] [INFO]    delta_pmm_used_frames=67428
+[    8.561] [INFO]    ipc_wait_events=742
+[    8.561] [INFO]    ipc_wait_avg_ms=0
+[    8.561] [INFO]    ipc_wait_p95_ms=4
+[    8.562] [INFO]    ipc_wait_p99_ms=4
+[    8.562] [INFO]    ipc_wait_max_ms=0
+[    8.562] [INFO]    ipc_scan_events=887
+[    8.562] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.563] [INFO]    ipc_scan_max_steps=6
+[    8.563] [INFO]    ipc_stale_waiters=580
+[    8.563] [INFO]    ipc_direct_deliveries=725
+[    8.564] [INFO]    ipc_queue_bytes_current=346
+[    8.564] [INFO]    ipc_queue_bytes_peak=1345
+[    8.565] [INFO]    ipc_queue_messages_current=5
+[    8.565] [INFO]    ipc_queue_messages_peak=16
+[    8.565] [INFO]    thread_suspend_calls=0
+[    8.566] [INFO]    thread_suspend_success=0
+[    8.566] [INFO]    thread_resume_calls=13
+[    8.566] [INFO]    thread_resume_success=13
+[    8.568] [INFO]  [USER] vfs: set_view cleared client=22
+[    8.569] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #4)
+[    8.570] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.571] [INFO]  [USER] vfs: cache_fill inode=332 size=201 base=0x64ef6000
+[    8.572] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.574] [INFO]  [USER] procmgr: load_from_vfs_ring fd=22 size=335
+[    8.575] [INFO]  [USER] vfs: open '/var/images/date/manifest.toml' client=7
+[    8.578] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.579] [INFO]  [USER] vfs: cache_fill inode=337 size=203 base=0x64ef7000
+[    8.580] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=368 cache_entries=83
+[    8.580] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=368
+[    8.581] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.582] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.583] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.584] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.585] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=368
+[    8.586] [INFO]  [USER] procmgr: 'compositor' restarted as pid 14 (container 5)
+[    8.587] [INFO]  [USER] compositor: init
+[    8.587] [INFO]  [USER] vfs: open '/var/images/denyprobe/manifest.toml' client=7
+[    8.588] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=23 reply_ep=377 → forward grant_ep=118
+[    8.589] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.592] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=377
+[    8.593] [INFO]  [USER] compositor: init failed
+[    8.593] [INFO]  [USER] userspace: exiting with error
+[    8.594] [INFO]  resource delta: 
+[    8.594] [INFO]  thread_destroy
+[    8.595] [INFO]    sample_seq=9
+[    8.595] [INFO]    delta_threads_live=16
+[    8.595] [INFO]    delta_spaces=18
+[    8.596] [INFO]    delta_endpoints=145
+[    8.596] [INFO]    delta_tokens=346
+[    8.596] [INFO]    delta_tracked_frames=1060
+[    8.597] [INFO]    delta_mapped_frames=2120
+[    8.597] [INFO]    delta_pmm_used_frames=67522
+[    8.597] [INFO]    ipc_wait_events=755
+[    8.598] [INFO]    ipc_wait_avg_ms=0
+[    8.598] [INFO]    ipc_wait_p95_ms=4
+[    8.598] [INFO]    ipc_wait_p99_ms=4
+[    8.599] [INFO]    ipc_wait_max_ms=0
+[    8.599] [INFO]    ipc_scan_events=908
+[    8.599] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.599] [INFO]    ipc_scan_max_steps=6
+[    8.600] [INFO]    ipc_stale_waiters=587
+[    8.600] [INFO]    ipc_direct_deliveries=737
+[    8.600] [INFO]    ipc_queue_bytes_current=318
+[    8.601] [INFO]    ipc_queue_bytes_peak=1345
+[    8.601] [INFO]    ipc_queue_messages_current=5
+[    8.602] [INFO]    ipc_queue_messages_peak=16
+[    8.602] [INFO]    thread_suspend_calls=0
+[    8.603] [INFO]    thread_suspend_success=0
+[    8.603] [INFO]    thread_resume_calls=14
+[    8.603] [INFO]    thread_resume_success=14
+[    8.604] [INFO]  [USER] vfs: cache_fill inode=344 size=216 base=0x64ef8000
+[    8.607] [INFO]  resource delta: 
+[    8.608] [INFO]  space_destroy
+[    8.608] [INFO]    sample_seq=10
+[    8.608] [INFO]    delta_threads_live=16
+[    8.608] [INFO]    delta_spaces=17
+[    8.609] [INFO]    delta_endpoints=145
+[    8.609] [INFO]    delta_tokens=346
+[    8.609] [INFO]    delta_tracked_frames=1060
+[    8.610] [INFO]    delta_mapped_frames=2120
+[    8.610] [INFO]    delta_pmm_used_frames=67428
+[    8.611] [INFO]    ipc_wait_events=756
+[    8.611] [INFO]    ipc_wait_avg_ms=0
+[    8.611] [INFO]    ipc_wait_p95_ms=4
+[    8.612] [INFO]    ipc_wait_p99_ms=4
+[    8.612] [INFO]    ipc_wait_max_ms=0
+[    8.612] [INFO]    ipc_scan_events=910
+[    8.613] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.613] [INFO]    ipc_scan_max_steps=6
+[    8.613] [INFO]    ipc_stale_waiters=588
+[    8.613] [INFO]    ipc_direct_deliveries=737
+[    8.614] [INFO]    ipc_queue_bytes_current=262
+[    8.614] [INFO]    ipc_queue_bytes_peak=1345
+[    8.614] [INFO]    ipc_queue_messages_current=4
+[    8.615] [INFO]    ipc_queue_messages_peak=16
+[    8.615] [INFO]    thread_suspend_calls=0
+[    8.615] [INFO]    thread_suspend_success=0
+[    8.616] [INFO]    thread_resume_calls=14
+[    8.616] [INFO]    thread_resume_success=14
+[    8.616] [INFO]  [USER] vfs: set_view cleared client=23
+[    8.617] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #5)
+[    8.618] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.618] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.621] [INFO]  [USER] vfs: open '/var/images/detachprobe/manifest.toml' client=7
+[    8.622] [INFO]  [USER] procmgr: load_from_vfs_ring fd=23 size=335
+[    8.625] [INFO]  [USER] vfs: cache_fill inode=349 size=202 base=0x64ef9000
+[    8.626] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.627] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=383 cache_entries=85
+[    8.628] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=383
+[    8.628] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.629] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.630] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.631] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.632] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=383
+[    8.633] [INFO]  [USER] procmgr: 'compositor' restarted as pid 15 (container 5)
+[    8.634] [INFO]  [USER] vfs: open '/var/images/devfb0_probe/manifest.toml' client=7
+[    8.635] [INFO]  [USER] compositor: init
+[    8.635] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=24 reply_ep=392 → forward grant_ep=118
+[    8.636] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.639] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=392
+[    8.640] [INFO]  [USER] vfs: cache_fill inode=356 size=195 base=0x64efa000
+[    8.641] [INFO]  [USER] compositor: init failed
+[    8.641] [INFO]  [USER] userspace: exiting with error
+[    8.642] [INFO]  resource delta: 
+[    8.642] [INFO]  thread_destroy
+[    8.643] [INFO]    sample_seq=11
+[    8.643] [INFO]    delta_threads_live=16
+[    8.643] [INFO]    delta_spaces=18
+[    8.643] [INFO]    delta_endpoints=148
+[    8.644] [INFO]    delta_tokens=354
+[    8.644] [INFO]    delta_tracked_frames=1060
+[    8.644] [INFO]    delta_mapped_frames=2120
+[    8.645] [INFO]    delta_pmm_used_frames=67522
+[    8.645] [INFO]    ipc_wait_events=771
+[    8.646] [INFO]    ipc_wait_avg_ms=0
+[    8.646] [INFO]    ipc_wait_p95_ms=4
+[    8.647] [INFO]    ipc_wait_p99_ms=4
+[    8.647] [INFO]    ipc_wait_max_ms=0
+[    8.647] [INFO]    ipc_scan_events=926
+[    8.648] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.648] [INFO]    ipc_scan_max_steps=6
+[    8.648] [INFO]    ipc_stale_waiters=594
+[    8.649] [INFO]    ipc_direct_deliveries=752
+[    8.649] [INFO]    ipc_queue_bytes_current=262
+[    8.649] [INFO]    ipc_queue_bytes_peak=1345
+[    8.650] [INFO]    ipc_queue_messages_current=4
+[    8.650] [INFO]    ipc_queue_messages_peak=16
+[    8.650] [INFO]    thread_suspend_calls=0
+[    8.651] [INFO]    thread_suspend_success=0
+[    8.651] [INFO]    thread_resume_calls=15
+[    8.651] [INFO]    thread_resume_success=15
+[    8.652] [INFO]  [USER] vfs: set_view cleared client=24
+[    8.655] [INFO]  resource delta: 
+[    8.655] [INFO]  space_destroy
+[    8.655] [INFO]    sample_seq=12
+[    8.656] [INFO]    delta_threads_live=16
+[    8.656] [INFO]    delta_spaces=17
+[    8.656] [INFO]    delta_endpoints=148
+[    8.657] [INFO]    delta_tokens=354
+[    8.657] [INFO]    delta_tracked_frames=1061
+[    8.657] [INFO]    delta_mapped_frames=2121
+[    8.658] [INFO]    delta_pmm_used_frames=67428
+[    8.658] [INFO]    ipc_wait_events=772
+[    8.658] [INFO]    ipc_wait_avg_ms=0
+[    8.659] [INFO]    ipc_wait_p95_ms=4
+[    8.659] [INFO]    ipc_wait_p99_ms=4
+[    8.659] [INFO]    ipc_wait_max_ms=0
+[    8.659] [INFO]    ipc_scan_events=927
+[    8.660] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.660] [INFO]    ipc_scan_max_steps=6
+[    8.660] [INFO]    ipc_stale_waiters=594
+[    8.661] [INFO]    ipc_direct_deliveries=753
+[    8.661] [INFO]    ipc_queue_bytes_current=206
+[    8.661] [INFO]    ipc_queue_bytes_peak=1345
+[    8.662] [INFO]    ipc_queue_messages_current=3
+[    8.662] [INFO]    ipc_queue_messages_peak=16
+[    8.662] [INFO]    thread_suspend_calls=0
+[    8.663] [INFO]    thread_suspend_success=0
+[    8.663] [INFO]    thread_resume_calls=15
+[    8.664] [INFO]    thread_resume_success=15
+[    8.664] [INFO]  [USER] vfs: open '/var/images/devicereq/manifest.toml' client=7
+[    8.665] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #6)
+[    8.666] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.668] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.671] [INFO]  [USER] procmgr: load_from_vfs_ring fd=24 size=335
+[    8.672] [INFO]  [USER] vfs: cache_fill inode=363 size=192 base=0x64efb000
+[    8.672] [INFO]  [USER] vfs: open '/var/images/devprobe/manifest.toml' client=7
+[    8.673] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.676] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=398 cache_entries=87
+[    8.676] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=398
+[    8.677] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.678] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.680] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.681] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.681] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=398
+[    8.683] [INFO]  [USER] procmgr: 'compositor' restarted as pid 16 (container 5)
+[    8.683] [INFO]  [USER] compositor: init
+[    8.684] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=25 reply_ep=407 → forward grant_ep=118
+[    8.685] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.686] [INFO]  [USER] vfs: cache_fill inode=370 size=194 base=0x64efc000
+[    8.686] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=407
+[    8.687] [INFO]  [USER] vfs: open '/var/images/diff/manifest.toml' client=7
+[    8.688] [INFO]  [USER] compositor: init failed
+[    8.688] [INFO]  [USER] userspace: exiting with error
+[    8.691] [INFO]  resource delta: 
+[    8.692] [INFO]  thread_destroy
+[    8.692] [INFO]    sample_seq=13
+[    8.693] [INFO]    delta_threads_live=16
+[    8.693] [INFO]    delta_spaces=18
+[    8.693] [INFO]    delta_endpoints=151
+[    8.694] [INFO]    delta_tokens=362
+[    8.694] [INFO]    delta_tracked_frames=1061
+[    8.694] [INFO]    delta_mapped_frames=2121
+[    8.695] [INFO]    delta_pmm_used_frames=67522
+[    8.695] [INFO]    ipc_wait_events=788
+[    8.695] [INFO]    ipc_wait_avg_ms=0
+[    8.696] [INFO]    ipc_wait_p95_ms=4
+[    8.696] [INFO]    ipc_wait_p99_ms=4
+[    8.696] [INFO]    ipc_wait_max_ms=0
+[    8.697] [INFO]    ipc_scan_events=943
+[    8.697] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.697] [INFO]    ipc_scan_max_steps=6
+[    8.698] [INFO]    ipc_stale_waiters=601
+[    8.698] [INFO]    ipc_direct_deliveries=768
+[    8.698] [INFO]    ipc_queue_bytes_current=318
+[    8.699] [INFO]    ipc_queue_bytes_peak=1345
+[    8.699] [INFO]    ipc_queue_messages_current=5
+[    8.699] [INFO]    ipc_queue_messages_peak=16
+[    8.700] [INFO]    thread_suspend_calls=0
+[    8.700] [INFO]    thread_suspend_success=0
+[    8.700] [INFO]    thread_resume_calls=16
+[    8.701] [INFO]    thread_resume_success=16
+[    8.703] [INFO]  resource delta: 
+[    8.704] [INFO]  space_destroy
+[    8.704] [INFO]    sample_seq=14
+[    8.704] [INFO]    delta_threads_live=16
+[    8.705] [INFO]    delta_spaces=17
+[    8.705] [INFO]    delta_endpoints=151
+[    8.705] [INFO]    delta_tokens=362
+[    8.705] [INFO]    delta_tracked_frames=1061
+[    8.706] [INFO]    delta_mapped_frames=2121
+[    8.706] [INFO]    delta_pmm_used_frames=67428
+[    8.707] [INFO]    ipc_wait_events=788
+[    8.707] [INFO]    ipc_wait_avg_ms=0
+[    8.707] [INFO]    ipc_wait_p95_ms=4
+[    8.707] [INFO]    ipc_wait_p99_ms=4
+[    8.708] [INFO]    ipc_wait_max_ms=0
+[    8.708] [INFO]    ipc_scan_events=943
+[    8.708] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.709] [INFO]    ipc_scan_max_steps=6
+[    8.709] [INFO]    ipc_stale_waiters=601
+[    8.709] [INFO]    ipc_direct_deliveries=768
+[    8.710] [INFO]    ipc_queue_bytes_current=390
+[    8.710] [INFO]    ipc_queue_bytes_peak=1345
+[    8.710] [INFO]    ipc_queue_messages_current=6
+[    8.711] [INFO]    ipc_queue_messages_peak=16
+[    8.711] [INFO]    thread_suspend_calls=0
+[    8.712] [INFO]    thread_suspend_success=0
+[    8.712] [INFO]    thread_resume_calls=16
+[    8.712] [INFO]    thread_resume_success=16
+[    8.713] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #7)
+[    8.714] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.715] [INFO]  [USER] vfs: cache_fill inode=375 size=176 base=0x64efd000
+[    8.715] [INFO]  [USER] vfs: set_view cleared client=25
+[    8.716] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.718] [INFO]  [USER] procmgr: load_from_vfs_ring fd=25 size=335
+[    8.719] [INFO]  [USER] vfs: open '/var/images/dirname/manifest.toml' client=7
+[    8.722] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.723] [INFO]  [USER] vfs: cache_fill inode=380 size=209 base=0x64efe000
+[    8.724] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=413 cache_entries=90
+[    8.725] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=413
+[    8.725] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.726] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.727] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.729] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.729] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=413
+[    8.730] [INFO]  [USER] procmgr: 'compositor' restarted as pid 17 (container 5)
+[    8.731] [INFO]  [USER] compositor: init
+[    8.732] [INFO]  [USER] vfs: open '/var/images/displayd/manifest.toml' client=7
+[    8.733] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=26 reply_ep=422 → forward grant_ep=118
+[    8.733] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.736] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=422
+[    8.737] [INFO]  [USER] compositor: init failed
+[    8.738] [INFO]  [USER] userspace: exiting with error
+[    8.739] [INFO]  resource delta: 
+[    8.739] [INFO]  thread_destroy
+[    8.739] [INFO]    sample_seq=15
+[    8.740] [INFO]    delta_threads_live=16
+[    8.740] [INFO]    delta_spaces=18
+[    8.740] [INFO]    delta_endpoints=154
+[    8.741] [INFO]    delta_tokens=370
+[    8.741] [INFO]    delta_tracked_frames=1061
+[    8.741] [INFO]    delta_mapped_frames=2121
+[    8.742] [INFO]    delta_pmm_used_frames=67522
+[    8.742] [INFO]    ipc_wait_events=802
+[    8.742] [INFO]    ipc_wait_avg_ms=0
+[    8.743] [INFO]    ipc_wait_p95_ms=4
+[    8.743] [INFO]    ipc_wait_p99_ms=4
+[    8.743] [INFO]    ipc_wait_max_ms=0
+[    8.744] [INFO]    ipc_scan_events=962
+[    8.744] [INFO]    ipc_scan_avg_steps_x100=196
+[    8.744] [INFO]    ipc_scan_max_steps=6
+[    8.745] [INFO]    ipc_stale_waiters=607
+[    8.745] [INFO]    ipc_direct_deliveries=781
+[    8.745] [INFO]    ipc_queue_bytes_current=318
+[    8.746] [INFO]    ipc_queue_bytes_peak=1345
+[    8.746] [INFO]    ipc_queue_messages_current=5
+[    8.746] [INFO]    ipc_queue_messages_peak=16
+[    8.747] [INFO]    thread_suspend_calls=0
+[    8.747] [INFO]    thread_suspend_success=0
+[    8.747] [INFO]    thread_resume_calls=17
+[    8.748] [INFO]    thread_resume_success=17
+[    8.748] [INFO]  [USER] vfs: open '/var/images/doom/manifest.toml' client=7
+[    8.751] [INFO]  resource delta: 
+[    8.751] [INFO]  space_destroy
+[    8.752] [INFO]    sample_seq=16
+[    8.752] [INFO]    delta_threads_live=16
+[    8.752] [INFO]    delta_spaces=17
+[    8.752] [INFO]    delta_endpoints=154
+[    8.753] [INFO]    delta_tokens=370
+[    8.753] [INFO]    delta_tracked_frames=1061
+[    8.754] [INFO]    delta_mapped_frames=2121
+[    8.754] [INFO]    delta_pmm_used_frames=67428
+[    8.755] [INFO]    ipc_wait_events=802
+[    8.755] [INFO]    ipc_wait_avg_ms=0
+[    8.756] [INFO]    ipc_wait_p95_ms=4
+[    8.756] [INFO]    ipc_wait_p99_ms=4
+[    8.756] [INFO]    ipc_wait_max_ms=0
+[    8.756] [INFO]    ipc_scan_events=962
+[    8.757] [INFO]    ipc_scan_avg_steps_x100=196
+[    8.757] [INFO]    ipc_scan_max_steps=6
+[    8.757] [INFO]    ipc_stale_waiters=607
+[    8.758] [INFO]    ipc_direct_deliveries=781
+[    8.758] [INFO]    ipc_queue_bytes_current=403
+[    8.758] [INFO]    ipc_queue_bytes_peak=1345
+[    8.759] [INFO]    ipc_queue_messages_current=6
+[    8.759] [INFO]    ipc_queue_messages_peak=16
+[    8.759] [INFO]    thread_suspend_calls=0
+[    8.760] [INFO]    thread_suspend_success=0
+[    8.760] [INFO]    thread_resume_calls=17
+[    8.760] [INFO]    thread_resume_success=17
+[    8.761] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #8)
+[    8.762] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.764] [INFO]  [USER] vfs: set_view cleared client=26
+[    8.765] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.767] [INFO]  [USER] procmgr: load_from_vfs_ring fd=26 size=335
+[    8.768] [INFO]  [USER] vfs: cache_fill inode=390 size=301 base=0x64eff000
+[    8.769] [INFO]  [USER] vfs: open '/var/images/dtachprobe/manifest.toml' client=7
+[    8.772] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.774] [INFO]  [USER] vfs: cache_fill inode=397 size=181 base=0x64f00000
+[    8.774] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=428 cache_entries=92
+[    8.775] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=428
+[    8.776] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.777] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.778] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.779] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.779] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=428
+[    8.780] [INFO]  [USER] procmgr: 'compositor' restarted as pid 18 (container 5)
+[    8.781] [INFO]  [USER] compositor: init
+[    8.782] [INFO]  [USER] vfs: open '/var/images/du/manifest.toml' client=7
+[    8.783] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=27 reply_ep=437 → forward grant_ep=118
+[    8.784] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.788] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=437
+[    8.789] [INFO]  [USER] compositor: init failed
+[    8.789] [INFO]  [USER] userspace: exiting with error
+[    8.790] [INFO]  [USER] vfs: cache_fill inode=402 size=199 base=0x64f01000
+[    8.791] [INFO]  resource delta: 
+[    8.791] [INFO]  thread_destroy
+[    8.791] [INFO]    sample_seq=17
+[    8.792] [INFO]    delta_threads_live=16
+[    8.792] [INFO]    delta_spaces=18
+[    8.792] [INFO]    delta_endpoints=157
+[    8.793] [INFO]    delta_tokens=378
+[    8.793] [INFO]    delta_tracked_frames=1061
+[    8.793] [INFO]    delta_mapped_frames=2121
+[    8.794] [INFO]    delta_pmm_used_frames=67524
+[    8.794] [INFO]    ipc_wait_events=819
+[    8.794] [INFO]    ipc_wait_avg_ms=0
+[    8.795] [INFO]    ipc_wait_p95_ms=4
+[    8.795] [INFO]    ipc_wait_p99_ms=4
+[    8.795] [INFO]    ipc_wait_max_ms=0
+[    8.796] [INFO]    ipc_scan_events=982
+[    8.796] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.796] [INFO]    ipc_scan_max_steps=6
+[    8.797] [INFO]    ipc_stale_waiters=615
+[    8.797] [INFO]    ipc_direct_deliveries=797
+[    8.797] [INFO]    ipc_queue_bytes_current=318
+[    8.798] [INFO]    ipc_queue_bytes_peak=1345
+[    8.798] [INFO]    ipc_queue_messages_current=5
+[    8.798] [INFO]    ipc_queue_messages_peak=16
+[    8.799] [INFO]    thread_suspend_calls=0
+[    8.799] [INFO]    thread_suspend_success=0
+[    8.800] [INFO]    thread_resume_calls=18
+[    8.800] [INFO]    thread_resume_success=18
+[    8.803] [INFO]  resource delta: 
+[    8.804] [INFO]  space_destroy
+[    8.804] [INFO]    sample_seq=18
+[    8.804] [INFO]    delta_threads_live=16
+[    8.804] [INFO]    delta_spaces=17
+[    8.805] [INFO]    delta_endpoints=157
+[    8.805] [INFO]    delta_tokens=378
+[    8.805] [INFO]    delta_tracked_frames=1061
+[    8.806] [INFO]    delta_mapped_frames=2121
+[    8.806] [INFO]    delta_pmm_used_frames=67430
+[    8.807] [INFO]    ipc_wait_events=819
+[    8.807] [INFO]    ipc_wait_avg_ms=0
+[    8.807] [INFO]    ipc_wait_p95_ms=4
+[    8.807] [INFO]    ipc_wait_p99_ms=4
+[    8.808] [INFO]    ipc_wait_max_ms=0
+[    8.808] [INFO]    ipc_scan_events=982
+[    8.808] [INFO]    ipc_scan_avg_steps_x100=195
+[    8.809] [INFO]    ipc_scan_max_steps=6
+[    8.809] [INFO]    ipc_stale_waiters=615
+[    8.809] [INFO]    ipc_direct_deliveries=797
+[    8.810] [INFO]    ipc_queue_bytes_current=318
+[    8.810] [INFO]    ipc_queue_bytes_peak=1345
+[    8.810] [INFO]    ipc_queue_messages_current=5
+[    8.811] [INFO]    ipc_queue_messages_peak=16
+[    8.811] [INFO]    thread_suspend_calls=0
+[    8.811] [INFO]    thread_suspend_success=0
+[    8.812] [INFO]    thread_resume_calls=18
+[    8.812] [INFO]    thread_resume_success=18
+[    8.813] [INFO]  [USER] vfs: set_view cleared client=27
+[    8.813] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #9)
+[    8.814] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.815] [INFO]  [USER] vfs: open '/var/images/dynprobe/manifest.toml' client=7
+[    8.817] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.820] [INFO]  [USER] procmgr: load_from_vfs_ring fd=27 size=335
+[    8.821] [INFO]  [USER] vfs: cache_fill inode=407 size=246 base=0x64f02000
+[    8.822] [INFO]  [USER] vfs: open '/var/images/edit/manifest.toml' client=7
+[    8.823] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.825] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=443 cache_entries=94
+[    8.826] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=443
+[    8.827] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.828] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.829] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.830] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.831] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=443
+[    8.832] [INFO]  [USER] procmgr: 'compositor' restarted as pid 19 (container 5)
+[    8.832] [INFO]  [USER] compositor: init
+[    8.833] [INFO]  [USER] vfs: cache_fill inode=412 size=212 base=0x64f03000
+[    8.834] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=28 reply_ep=452 → forward grant_ep=118
+[    8.835] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.835] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=452
+[    8.836] [INFO]  [USER] vfs: open '/var/images/env/manifest.toml' client=7
+[    8.839] [INFO]  [USER] compositor: init failed
+[    8.839] [INFO]  [USER] userspace: exiting with error
+[    8.840] [INFO]  resource delta: 
+[    8.840] [INFO]  thread_destroy
+[    8.840] [INFO]    sample_seq=19
+[    8.841] [INFO]    delta_threads_live=16
+[    8.841] [INFO]    delta_spaces=18
+[    8.841] [INFO]    delta_endpoints=160
+[    8.842] [INFO]    delta_tokens=386
+[    8.842] [INFO]    delta_tracked_frames=1061
+[    8.842] [INFO]    delta_mapped_frames=2121
+[    8.843] [INFO]    delta_pmm_used_frames=67524
+[    8.843] [INFO]    ipc_wait_events=835
+[    8.843] [INFO]    ipc_wait_avg_ms=0
+[    8.844] [INFO]    ipc_wait_p95_ms=4
+[    8.844] [INFO]    ipc_wait_p99_ms=4
+[    8.844] [INFO]    ipc_wait_max_ms=0
+[    8.845] [INFO]    ipc_scan_events=1001
+[    8.845] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.845] [INFO]    ipc_scan_max_steps=6
+[    8.846] [INFO]    ipc_stale_waiters=622
+[    8.846] [INFO]    ipc_direct_deliveries=812
+[    8.846] [INFO]    ipc_queue_bytes_current=318
+[    8.847] [INFO]    ipc_queue_bytes_peak=1345
+[    8.847] [INFO]    ipc_queue_messages_current=5
+[    8.848] [INFO]    ipc_queue_messages_peak=16
+[    8.848] [INFO]    thread_suspend_calls=0
+[    8.848] [INFO]    thread_suspend_success=0
+[    8.849] [INFO]    thread_resume_calls=19
+[    8.849] [INFO]    thread_resume_success=19
+[    8.852] [INFO]  resource delta: 
+[    8.852] [INFO]  space_destroy
+[    8.852] [INFO]    sample_seq=20
+[    8.853] [INFO]    delta_threads_live=16
+[    8.853] [INFO]    delta_spaces=17
+[    8.853] [INFO]    delta_endpoints=160
+[    8.853] [INFO]    delta_tokens=386
+[    8.854] [INFO]    delta_tracked_frames=1061
+[    8.854] [INFO]    delta_mapped_frames=2121
+[    8.854] [INFO]    delta_pmm_used_frames=67430
+[    8.855] [INFO]    ipc_wait_events=835
+[    8.855] [INFO]    ipc_wait_avg_ms=0
+[    8.855] [INFO]    ipc_wait_p95_ms=4
+[    8.856] [INFO]    ipc_wait_p99_ms=4
+[    8.856] [INFO]    ipc_wait_max_ms=0
+[    8.856] [INFO]    ipc_scan_events=1001
+[    8.857] [INFO]    ipc_scan_avg_steps_x100=194
+[    8.857] [INFO]    ipc_scan_max_steps=6
+[    8.857] [INFO]    ipc_stale_waiters=622
+[    8.858] [INFO]    ipc_direct_deliveries=812
+[    8.858] [INFO]    ipc_queue_bytes_current=390
+[    8.859] [INFO]    ipc_queue_bytes_peak=1345
+[    8.859] [INFO]    ipc_queue_messages_current=6
+[    8.859] [INFO]    ipc_queue_messages_peak=16
+[    8.860] [INFO]    thread_suspend_calls=0
+[    8.860] [INFO]    thread_suspend_success=0
+[    8.860] [INFO]    thread_resume_calls=19
+[    8.861] [INFO]    thread_resume_success=19
+[    8.861] [INFO]  [USER] vfs: cache_fill inode=417 size=201 base=0x64f04000
+[    8.862] [INFO]  [USER] vfs: set_view cleared client=28
+[    8.863] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #10)
+[    8.864] [INFO]  [USER] procmgr: load_from_vfs path=/var/images/compositor/manifest.toml
+[    8.865] [INFO]  [USER] vfs: open '/var/images/compositor/manifest.toml' client=5
+[    8.868] [INFO]  [USER] vfs: open '/var/images/envprobe/manifest.toml' client=7
+[    8.868] [INFO]  [USER] procmgr: load_from_vfs_ring fd=28 size=335
+[    8.871] [INFO]  [USER] vfs: cache_fill inode=424 size=177 base=0x64f05000
+[    8.872] [INFO]  [USER] procmgr: map_elf attempt path=/var/images/compositor/bin/compositor fd=14
+[    8.873] [INFO]  [USER] vfs: handle_map_elf START fd=14 target_space=458 cache_entries=97
+[    8.873] [INFO]  [USER] vfs: map_elf inode=286 cache_base=0x640ce000 cache_len=312096 target_space=458
+[    8.874] [INFO]  [USER] vfs: map_cached_seg vaddr=0x400000 pages=32 data_ptr=0x640cf000 flags=0x80d file_sz=130917 share_phys=true
+[    8.875] [INFO]  [USER] vfs: map_cached_seg vaddr=0x420000 pages=43 data_ptr=0x640ef000 flags=0x809 file_sz=175636 share_phys=true
+[    8.876] [INFO]  [USER] vfs: map_cached_seg vaddr=0x44b000 pages=276 data_ptr=0x6411a000 flags=0xb file_sz=160 share_phys=false
+[    8.877] [INFO]  [USER] vfs: map_cached_seg BSS_DEMAND vaddr=0x44c000 bss_pages=275
+[    8.878] [INFO]  [USER] vfs: map_elf OK inode=286 entry=0x400000 target_space=458
+[    8.879] [INFO]  [USER] procmgr: 'compositor' restarted as pid 20 (container 5)
+[    8.880] [INFO]  [USER] compositor: init
+[    8.881] [INFO]  [USER] registry: SUBSCRIBE vfs:main sender_tid=29 reply_ep=467 → forward grant_ep=118
+[    8.882] [INFO]  [USER] registry: SUBSCRIBE forward OK vfs:main grant_ep=118
+[    8.883] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=467
+[    8.883] [INFO]  [USER] vfs: open '/var/images/errnoprobe/manifest.toml' client=7
+[    8.886] [INFO]  [USER] compositor: init failed
+[    8.886] [INFO]  [USER] userspace: exiting with error
+[    8.887] [INFO]  resource delta: 
+[    8.887] [INFO]  thread_destroy
+[    8.888] [INFO]    sample_seq=21
+[    8.888] [INFO]    delta_threads_live=16
+[    8.888] [INFO]    delta_spaces=18
+[    8.889] [INFO]    delta_endpoints=163
+[    8.889] [INFO]    delta_tokens=394
+[    8.889] [INFO]    delta_tracked_frames=1061
+[    8.889] [INFO]    delta_mapped_frames=2121
+[    8.890] [INFO]    delta_pmm_used_frames=67524
+[    8.890] [INFO]    ipc_wait_events=850
+[    8.891] [INFO]    ipc_wait_avg_ms=0
+[    8.891] [INFO]    ipc_wait_p95_ms=4
+[    8.891] [INFO]    ipc_wait_p99_ms=4
+[    8.891] [INFO]    ipc_wait_max_ms=0
+[    8.892] [INFO]    ipc_scan_events=1017
+[    8.892] [INFO]    ipc_scan_avg_steps_x100=193
+[    8.892] [INFO]    ipc_scan_max_steps=6
+[    8.893] [INFO]    ipc_stale_waiters=628
+[    8.893] [INFO]    ipc_direct_deliveries=826
+[    8.893] [INFO]    ipc_queue_bytes_current=318
+[    8.894] [INFO]    ipc_queue_bytes_peak=1345
+[    8.894] [INFO]    ipc_queue_messages_current=5
+[    8.894] [INFO]    ipc_queue_messages_peak=16
+[    8.895] [INFO]    thread_suspend_calls=0
+[    8.895] [INFO]    thread_suspend_success=0
+[    8.896] [INFO]    thread_resume_calls=20
+[    8.896] [INFO]    thread_resume_success=20
+[    8.899] [INFO]  resource delta: 
+[    8.899] [INFO]  space_destroy
+[    8.899] [INFO]    sample_seq=22
+[    8.899] [INFO]    delta_threads_live=16
+[    8.900] [INFO]    delta_spaces=17
+[    8.900] [INFO]    delta_endpoints=163
+[    8.900] [INFO]    delta_tokens=394
+[    8.901] [INFO]    delta_tracked_frames=1062
+[    8.901] [INFO]    delta_mapped_frames=2122
+[    8.901] [INFO]    delta_pmm_used_frames=67430
+[    8.902] [INFO]    ipc_wait_events=850
+[    8.902] [INFO]    ipc_wait_avg_ms=0
+[    8.902] [INFO]    ipc_wait_p95_ms=4
+[    8.902] [INFO]    ipc_wait_p99_ms=4
+[    8.903] [INFO]    ipc_wait_max_ms=0
+[    8.903] [INFO]    ipc_scan_events=1017
+[    8.903] [INFO]    ipc_scan_avg_steps_x100=193
+[    8.904] [INFO]    ipc_scan_max_steps=6
+[    8.904] [INFO]    ipc_stale_waiters=628
+[    8.904] [INFO]    ipc_direct_deliveries=826
+[    8.905] [INFO]    ipc_queue_bytes_current=390
+[    8.905] [INFO]    ipc_queue_bytes_peak=1345
+[    8.905] [INFO]    ipc_queue_messages_current=6
+[    8.906] [INFO]    ipc_queue_messages_peak=16
+[    8.906] [INFO]    thread_suspend_calls=0
+[    8.906] [INFO]    thread_suspend_success=0
+[    8.907] [INFO]    thread_resume_calls=20
+[    8.907] [INFO]    thread_resume_success=20
+[    8.908] [INFO]  [USER] vfs: cache_fill inode=431 size=181 base=0x64f06000
+[    8.909] [INFO]  [USER] vfs: set_view cleared client=29
+[    8.909] [INFO]  [USER] procmgr: restarting 'compositor' (exit code -1, restart #11)
+[    8.910] [INFO]  [USER] procmgr: safety valve for 'compositor', deferring 1s (restart #11)
+[    8.911] [INFO]  [USER] vfs: open '/var/images/escalateprobe/manifest.toml' client=7
+[    8.914] [INFO]  [USER] vfs: cache_fill inode=436 size=206 base=0x64f07000
+[    8.916] [INFO]  [USER] vfs: open '/var/images/ext2io/manifest.toml' client=7
+[    8.918] [INFO]  [USER] vfs: cache_fill inode=441 size=192 base=0x64f08000
+[    8.919] [INFO]  [USER] vfs: open '/var/images/fbprobe/manifest.toml' client=7
+[    8.922] [INFO]  [USER] vfs: cache_fill inode=448 size=185 base=0x64f09000
+[    8.923] [INFO]  [USER] vfs: open '/var/images/feed/manifest.toml' client=7
+[    8.925] [INFO]  [USER] vfs: cache_fill inode=453 size=183 base=0x64f0a000
+[    8.926] [INFO]  [USER] vfs: open '/var/images/find/manifest.toml' client=7
+[    8.929] [INFO]  [USER] vfs: cache_fill inode=458 size=203 base=0x64f0b000
+[    8.930] [INFO]  [USER] vfs: open '/var/images/fm/manifest.toml' client=7
+[    8.933] [INFO]  [USER] vfs: cache_fill inode=463 size=172 base=0x64f0c000
+[    8.933] [INFO]  [USER] vfs: open '/var/images/futexprobe/manifest.toml' client=7
+[    8.936] [INFO]  [USER] vfs: cache_fill inode=470 size=181 base=0x64f0d000
+[    8.937] [INFO]  [USER] vfs: open '/var/images/futexrace/manifest.toml' client=7
+[    8.940] [INFO]  [USER] vfs: cache_fill inode=477 size=188 base=0x64f0e000
+[    8.941] [INFO]  [USER] vfs: open '/var/images/getty/manifest.toml' client=7
+[    8.944] [INFO]  [USER] vfs: cache_fill inode=482 size=244 base=0x64f0f000
+[    8.945] [INFO]  [USER] vfs: open '/var/images/git/manifest.toml' client=7
+[    8.948] [INFO]  [USER] vfs: cache_fill inode=487 size=201 base=0x64f10000
+[    8.949] [INFO]  [USER] vfs: open '/var/images/glow/manifest.toml' client=7
+[    8.952] [INFO]  [USER] vfs: cache_fill inode=492 size=176 base=0x64f11000
+[    8.952] [INFO]  [USER] vfs: open '/var/images/grep/manifest.toml' client=7
+[    8.955] [INFO]  [USER] vfs: cache_fill inode=497 size=203 base=0x64f12000
+[    8.956] [INFO]  [USER] vfs: open '/var/images/head/manifest.toml' client=7
+[    8.959] [INFO]  [USER] vfs: cache_fill inode=502 size=203 base=0x64f13000
+[    8.960] [INFO]  [USER] vfs: open '/var/images/hello/manifest.toml' client=7
+[    8.962] [INFO]  [USER] vfs: cache_fill inode=509 size=193 base=0x64f14000
+[    8.963] [INFO]  [USER] vfs: open '/var/images/hexdump/manifest.toml' client=7
+[    8.966] [INFO]  [USER] vfs: cache_fill inode=514 size=182 base=0x64f15000
+[    8.967] [INFO]  [USER] vfs: open '/var/images/htop/manifest.toml' client=7
+[    8.970] [INFO]  [USER] vfs: cache_fill inode=519 size=212 base=0x64f16000
+[    8.971] [INFO]  [USER] vfs: open '/var/images/httpd/manifest.toml' client=7
+[    8.974] [INFO]  [USER] vfs: cache_fill inode=524 size=185 base=0x64f17000
+[    8.975] [INFO]  [USER] vfs: open '/var/images/imgview/manifest.toml' client=7
+[    8.978] [INFO]  [USER] vfs: cache_fill inode=529 size=245 base=0x64f18000
+[    8.979] [INFO]  [USER] vfs: open '/var/images/inputd/manifest.toml' client=7
+[    8.982] [INFO]  [USER] vfs: open '/var/images/irc/manifest.toml' client=7
+[    8.984] [INFO]  [USER] vfs: cache_fill inode=539 size=181 base=0x64f19000
+[    8.985] [INFO]  [USER] vfs: open '/var/images/jobchurn/manifest.toml' client=7
+[    8.990] [INFO]  [USER] vfs: cache_fill inode=544 size=196 base=0x64f1a000
+[    8.991] [INFO]  [USER] vfs: open '/var/images/jobmix/manifest.toml' client=7
+[    8.994] [INFO]  [USER] vfs: cache_fill inode=549 size=192 base=0x64f1b000
+[    8.994] [INFO]  [USER] vfs: open '/var/images/kbd/manifest.toml' client=7
+[    8.997] [INFO]  [USER] vfs: cache_fill inode=554 size=460 base=0x64f1c000
+[    8.998] [INFO]  [USER] vfs: open '/var/images/kill/manifest.toml' client=7
+[    9.001] [INFO]  [USER] vfs: cache_fill inode=559 size=203 base=0x64f1d000
+[    9.002] [INFO]  [USER] vfs: open '/var/images/killdeny/manifest.toml' client=7
+[    9.009] [INFO]  [USER] vfs: cache_fill inode=564 size=196 base=0x64f1e000
+[    9.011] [INFO]  [USER] vfs: open '/var/images/l2_dns_basic/manifest.toml' client=7
+[    9.016] [INFO]  [USER] vfs: cache_fill inode=569 size=211 base=0x64f1f000
+[    9.017] [INFO]  [USER] vfs: open '/var/images/l2_net_denied/manifest.toml' client=7
+[    9.022] [INFO]  [USER] vfs: cache_fill inode=574 size=194 base=0x64f20000
+[    9.023] [INFO]  [USER] vfs: open '/var/images/l2_pts_cross_session_isolation/manifest.toml' client=7
+[    9.031] [INFO]  [USER] vfs: cache_fill inode=579 size=240 base=0x64f21000
+[    9.032] [INFO]  [USER] vfs: open '/var/images/l2_pts_listing/manifest.toml' client=7
+[    9.037] [INFO]  [USER] vfs: cache_fill inode=584 size=208 base=0x64f22000
+[    9.038] [INFO]  [USER] vfs: open '/var/images/l2_pts_service_death_hangup/manifest.toml' client=7
+[    9.043] [INFO]  [USER] vfs: cache_fill inode=589 size=234 base=0x64f23000
+[    9.044] [INFO]  [USER] vfs: open '/var/images/l2_sigint_delivered/manifest.toml' client=7
+[    9.047] [INFO]  [USER] vfs: cache_fill inode=594 size=218 base=0x64f24000
+[    9.048] [INFO]  [USER] vfs: open '/var/images/l2_sigtstp_delivered/manifest.toml' client=7
+[    9.051] [INFO]  [USER] vfs: cache_fill inode=599 size=220 base=0x64f25000
+[    9.052] [INFO]  [USER] vfs: open '/var/images/l2_sigttin_background_read/manifest.toml' client=7
+[    9.056] [INFO]  [USER] vfs: cache_fill inode=604 size=232 base=0x64f26000
+[    9.057] [INFO]  [USER] vfs: open '/var/images/l2_sigwinch_delivered/manifest.toml' client=7
+[    9.060] [INFO]  [USER] vfs: cache_fill inode=609 size=222 base=0x64f27000
+[    9.061] [INFO]  [USER] vfs: open '/var/images/l2_socket_basic/manifest.toml' client=7
+[    9.063] [INFO]  [USER] vfs: cache_fill inode=614 size=217 base=0x64f28000
+[    9.064] [INFO]  [USER] vfs: open '/var/images/l2_tcgetattr_default/manifest.toml' client=7
+[    9.068] [INFO]  [USER] vfs: cache_fill inode=619 size=220 base=0x64f29000
+[    9.069] [INFO]  [USER] vfs: open '/var/images/l2_term_env_cluuterm/manifest.toml' client=7
+[    9.074] [INFO]  [USER] vfs: cache_fill inode=624 size=220 base=0x64f2a000
+[    9.075] [INFO]  [USER] vfs: open '/var/images/l3_compositor_receives_session_ended/manifest.toml' client=7
+[    9.078] [INFO]  [USER] vfs: cache_fill inode=629 size=252 base=0x64f2b000
+[    9.078] [INFO]  [USER] vfs: open '/var/images/l3_getty_auth_spawns_shell/manifest.toml' client=7
+[    9.082] [INFO]  [USER] vfs: cache_fill inode=634 size=232 base=0x64f2c000
+[    9.082] [INFO]  [USER] vfs: open '/var/images/l3_session_create_destroy/manifest.toml' client=7
+[    9.086] [INFO]  [USER] vfs: cache_fill inode=639 size=230 base=0x64f2d000
+[    9.087] [INFO]  [USER] vfs: open '/var/images/l3_session_derive_narrow/manifest.toml' client=7
+[    9.090] [INFO]  [USER] vfs: cache_fill inode=644 size=228 base=0x64f2e000
+[    9.091] [INFO]  [USER] vfs: open '/var/images/l3_session_end_removes_pts/manifest.toml' client=7
+[    9.094] [INFO]  [USER] vfs: cache_fill inode=649 size=232 base=0x64f2f000
+[    9.095] [INFO]  [USER] vfs: open '/var/images/l3_session_leader_exit_cascades/manifest.toml' client=7
+[    9.098] [INFO]  [USER] vfs: cache_fill inode=654 size=242 base=0x64f30000
+[    9.099] [INFO]  [USER] vfs: open '/var/images/l3_session_query/manifest.toml' client=7
+[    9.103] [INFO]  [USER] vfs: cache_fill inode=659 size=212 base=0x64f31000
+[    9.104] [INFO]  [USER] vfs: open '/var/images/l3_session_set_leader_monotone/manifest.toml' client=7
+[    9.107] [INFO]  [USER] vfs: cache_fill inode=664 size=240 base=0x64f32000
+[    9.108] [INFO]  [USER] vfs: open '/var/images/libtui-demo/manifest.toml' client=7
+[    9.111] [INFO]  [USER] vfs: cache_fill inode=669 size=211 base=0x64f33000
+[    9.112] [INFO]  [USER] vfs: open '/var/images/login/manifest.toml' client=7
+[    9.115] [INFO]  [USER] vfs: cache_fill inode=674 size=243 base=0x64f34000
+[    9.115] [INFO]  [USER] vfs: open '/var/images/looper/manifest.toml' client=7
+[    9.119] [INFO]  [USER] vfs: cache_fill inode=681 size=173 base=0x64f35000
+[    9.120] [INFO]  [USER] vfs: open '/var/images/ls/manifest.toml' client=7
+[    9.123] [INFO]  [USER] vfs: cache_fill inode=686 size=199 base=0x64f36000
+[    9.124] [INFO]  [USER] vfs: open '/var/images/mail/manifest.toml' client=7
+[    9.127] [INFO]  [USER] vfs: cache_fill inode=691 size=183 base=0x64f37000
+[    9.128] [INFO]  [USER] vfs: open '/var/images/make/manifest.toml' client=7
+[    9.131] [INFO]  [USER] vfs: cache_fill inode=696 size=203 base=0x64f38000
+[    9.132] [INFO]  [USER] vfs: open '/var/images/mapcopyfail/manifest.toml' client=7
+[    9.135] [INFO]  [USER] vfs: cache_fill inode=701 size=202 base=0x64f39000
+[    9.136] [INFO]  [USER] vfs: open '/var/images/maperror/manifest.toml' client=7
+[    9.139] [INFO]  [USER] vfs: cache_fill inode=706 size=196 base=0x64f3a000
+[    9.140] [INFO]  [USER] vfs: open '/var/images/mapfail/manifest.toml' client=7
+[    9.143] [INFO]  [USER] vfs: cache_fill inode=711 size=194 base=0x64f3b000
+[    9.144] [INFO]  [USER] vfs: open '/var/images/micropython/manifest.toml' client=7
+[    9.147] [INFO]  [USER] vfs: cache_fill inode=716 size=183 base=0x64f3c000
+[    9.148] [INFO]  [USER] vfs: open '/var/images/minimal/manifest.toml' client=7
+[    9.152] [INFO]  [USER] vfs: cache_fill inode=723 size=175 base=0x64f3d000
+[    9.153] [INFO]  [USER] vfs: open '/var/images/mkdir/manifest.toml' client=7
+[    9.156] [INFO]  [USER] vfs: cache_fill inode=728 size=205 base=0x64f3e000
+[    9.156] [INFO]  [USER] vfs: open '/var/images/mmapprobe/manifest.toml' client=7
+[    9.159] [INFO]  [USER] vfs: cache_fill inode=735 size=186 base=0x64f3f000
+[    9.160] [INFO]  [USER] vfs: open '/var/images/mountprobe/manifest.toml' client=7
+[    9.163] [INFO]  [USER] vfs: cache_fill inode=740 size=262 base=0x64f40000
+[    9.164] [INFO]  [USER] vfs: open '/var/images/mouse/manifest.toml' client=7
+[    9.168] [INFO]  [USER] vfs: cache_fill inode=745 size=466 base=0x64f41000
+[    9.169] [INFO]  [USER] vfs: open '/var/images/mp/manifest.toml' client=7
+[    9.173] [INFO]  [USER] vfs: cache_fill inode=750 size=253 base=0x64f42000
+[    9.174] [INFO]  [USER] vfs: open '/var/images/mp3player/manifest.toml' client=7
+[    9.177] [INFO]  [USER] vfs: cache_fill inode=755 size=328 base=0x64f43000
+[    9.178] [INFO]  [USER] vfs: open '/var/images/mv/manifest.toml' client=7
+[    9.181] [INFO]  [USER] vfs: cache_fill inode=760 size=199 base=0x64f44000
+[    9.182] [INFO]  [USER] vfs: open '/var/images/nestprobe/manifest.toml' client=7
+[    9.186] [INFO]  [USER] vfs: cache_fill inode=765 size=198 base=0x64f45000
+[    9.187] [INFO]  [USER] vfs: open '/var/images/noop/manifest.toml' client=7
+[    9.190] [INFO]  [USER] vfs: cache_fill inode=772 size=169 base=0x64f46000
+[    9.191] [INFO]  [USER] vfs: open '/var/images/notes/manifest.toml' client=7
+[    9.194] [INFO]  [USER] vfs: cache_fill inode=777 size=178 base=0x64f47000
+[    9.195] [INFO]  [USER] vfs: open '/var/images/ntp/manifest.toml' client=7
+[    9.198] [INFO]  [USER] vfs: cache_fill inode=782 size=181 base=0x64f48000
+[    9.198] [INFO]  [USER] vfs: open '/var/images/ownerdeny/manifest.toml' client=7
+[    9.201] [INFO]  [USER] vfs: cache_fill inode=787 size=198 base=0x64f49000
+[    9.202] [INFO]  [USER] vfs: open '/var/images/ownerprobe/manifest.toml' client=7
+[    9.206] [INFO]  [USER] vfs: cache_fill inode=794 size=188 base=0x64f4a000
+[    9.207] [INFO]  [USER] vfs: open '/var/images/pager/manifest.toml' client=7
+[    9.210] [INFO]  [USER] vfs: cache_fill inode=799 size=178 base=0x64f4b000
+[    9.211] [INFO]  [USER] vfs: open '/var/images/ping/manifest.toml' client=7
+[    9.214] [INFO]  [USER] vfs: cache_fill inode=804 size=265 base=0x64f4c000
+[    9.215] [INFO]  [USER] vfs: open '/var/images/pipecat/manifest.toml' client=7
+[    9.218] [INFO]  [USER] vfs: cache_fill inode=811 size=197 base=0x64f4d000
+[    9.219] [INFO]  [USER] vfs: open '/var/images/pipeprobe/manifest.toml' client=7
+[    9.223] [INFO]  [USER] vfs: cache_fill inode=818 size=186 base=0x64f4e000
+[    9.224] [INFO]  [USER] vfs: open '/var/images/pkg/manifest.toml' client=7
+[    9.227] [INFO]  [USER] vfs: cache_fill inode=823 size=174 base=0x64f4f000
+[    9.228] [INFO]  [USER] vfs: open '/var/images/pm_bootstrap_two_pmgr/manifest.toml' client=7
+[    9.233] [INFO]  [USER] vfs: cache_fill inode=828 size=222 base=0x64f50000
+[    9.233] [INFO]  [USER] vfs: open '/var/images/pm_cap_revoke_stale/manifest.toml' client=7
+[    9.238] [INFO]  [USER] vfs: cache_fill inode=833 size=218 base=0x64f51000
+[    9.239] [INFO]  [USER] vfs: open '/var/images/pm_cross_session_no_leak/manifest.toml' client=7
+[    9.243] [INFO]  [USER] vfs: cache_fill inode=838 size=228 base=0x64f52000
+[    9.243] [INFO]  [USER] vfs: open '/var/images/pm_pid_layout/manifest.toml' client=7
+[    9.246] [INFO]  [USER] vfs: cache_fill inode=843 size=206 base=0x64f53000
+[    9.247] [INFO]  [USER] vfs: open '/var/images/pm_proc_query_all_cap/manifest.toml' client=7
+[    9.251] [INFO]  [USER] vfs: cache_fill inode=848 size=222 base=0x64f54000
+[    9.251] [INFO]  [USER] vfs: open '/var/images/pm_service_restart/manifest.toml' client=7
+[    9.256] [INFO]  [USER] vfs: cache_fill inode=853 size=254 base=0x64f55000
+[    9.257] [INFO]  [USER] vfs: open '/var/images/pm_session_crash_cascade/manifest.toml' client=7
+[    9.260] [INFO]  [USER] vfs: cache_fill inode=858 size=228 base=0x64f56000
+[    9.261] [INFO]  [USER] vfs: open '/var/images/pm_session_id_recycle/manifest.toml' client=7
+[    9.264] [INFO]  [USER] vfs: cache_fill inode=863 size=222 base=0x64f57000
+[    9.265] [INFO]  [USER] vfs: open '/var/images/pm_vfs_view_scope/manifest.toml' client=7
+[    9.268] [INFO]  [USER] vfs: cache_fill inode=868 size=214 base=0x64f58000
+[    9.269] [INFO]  [USER] vfs: open '/var/images/pollprobe/manifest.toml' client=7
+[    9.272] [INFO]  [USER] vfs: cache_fill inode=875 size=186 base=0x64f59000
+[    9.273] [INFO]  [USER] vfs: open '/var/images/printf/manifest.toml' client=7
+[    9.277] [INFO]  [USER] vfs: cache_fill inode=880 size=207 base=0x64f5a000
+[    9.278] [INFO]  [USER] vfs: open '/var/images/ps/manifest.toml' client=7
+[    9.281] [INFO]  [USER] vfs: cache_fill inode=885 size=199 base=0x64f5b000
+[    9.281] [INFO]  [USER] vfs: open '/var/images/pthreadprobe/manifest.toml' client=7
+[    9.285] [INFO]  [USER] vfs: cache_fill inode=892 size=185 base=0x64f5c000
+[    9.285] [INFO]  [USER] vfs: open '/var/images/pwdprobe/manifest.toml' client=7
+[    9.288] [INFO]  [USER] vfs: cache_fill inode=899 size=177 base=0x64f5d000
+[    9.289] [INFO]  [USER] vfs: open '/var/images/regdeny/manifest.toml' client=7
+[    9.293] [INFO]  [USER] vfs: cache_fill inode=904 size=194 base=0x64f5e000
+[    9.294] [INFO]  [USER] vfs: open '/var/images/ringio/manifest.toml' client=7
+[    9.297] [INFO]  [USER] vfs: cache_fill inode=909 size=192 base=0x64f5f000
+[    9.298] [INFO]  [USER] vfs: open '/var/images/rm/manifest.toml' client=7
+[    9.301] [INFO]  [USER] vfs: cache_fill inode=914 size=199 base=0x64f60000
+[    9.302] [INFO]  [USER] vfs: open '/var/images/sed/manifest.toml' client=7
+[    9.305] [INFO]  [USER] vfs: cache_fill inode=919 size=201 base=0x64f61000
+[    9.306] [INFO]  [USER] vfs: open '/var/images/session-procmgr/manifest.toml' client=7
+[    9.310] [INFO]  [USER] vfs: cache_fill inode=924 size=272 base=0x64f62000
+[    9.311] [INFO]  [USER] vfs: open '/var/images/setjmpprobe/manifest.toml' client=7
+[    9.314] [INFO]  [USER] vfs: cache_fill inode=931 size=183 base=0x64f63000
+[    9.315] [INFO]  [USER] vfs: open '/var/images/shell/manifest.toml' client=7
+[    9.318] [INFO]  [USER] vfs: cache_fill inode=936 size=261 base=0x64f64000
+[    9.319] [INFO]  [USER] vfs: open '/var/images/sleep/manifest.toml' client=7
+[    9.322] [INFO]  [USER] vfs: cache_fill inode=941 size=205 base=0x64f65000
+[    9.323] [INFO]  [USER] vfs: open '/var/images/sleepy/manifest.toml' client=7
+[    9.327] [INFO]  [USER] vfs: cache_fill inode=948 size=173 base=0x64f66000
+[    9.328] [INFO]  [USER] vfs: open '/var/images/sort/manifest.toml' client=7
+[    9.331] [INFO]  [USER] vfs: cache_fill inode=953 size=203 base=0x64f67000
+[    9.332] [INFO]  [USER] vfs: open '/var/images/spawnpipeprobe/manifest.toml' client=7
+[    9.335] [INFO]  [USER] vfs: cache_fill inode=963 size=205 base=0x64f68000
+[    9.336] [INFO]  [USER] vfs: open '/var/images/stackgrow/manifest.toml' client=7
+[    9.340] [INFO]  [USER] vfs: cache_fill inode=968 size=198 base=0x64f69000
+[    9.341] [INFO]  [USER] vfs: open '/var/images/stackprobe/manifest.toml' client=7
+[    9.345] [INFO]  [USER] vfs: cache_fill inode=975 size=181 base=0x64f6a000
+[    9.345] [INFO]  [USER] vfs: open '/var/images/stat/manifest.toml' client=7
+[    9.348] [INFO]  [USER] vfs: cache_fill inode=980 size=203 base=0x64f6b000
+[    9.349] [INFO]  [USER] vfs: open '/var/images/stubsprobe/manifest.toml' client=7
+[    9.352] [INFO]  [USER] vfs: cache_fill inode=987 size=188 base=0x64f6c000
+[    9.353] [INFO]  [USER] vfs: open '/var/images/sudotest/manifest.toml' client=7
+[    9.356] [INFO]  [USER] vfs: cache_fill inode=992 size=196 base=0x64f6d000
+[    9.357] [INFO]  [USER] vfs: open '/var/images/survivor/manifest.toml' client=7
+[    9.361] [INFO]  [USER] vfs: cache_fill inode=999 size=191 base=0x64f6e000
+[    9.361] [INFO]  [USER] vfs: open '/var/images/suspendprobe/manifest.toml' client=7
+[    9.365] [INFO]  [USER] vfs: cache_fill inode=1004 size=204 base=0x64f6f000
+[    9.365] [INFO]  [USER] vfs: open '/var/images/sutest/manifest.toml' client=7
+[    9.369] [INFO]  [USER] vfs: cache_fill inode=1009 size=192 base=0x64f70000
+[    9.370] [INFO]  [USER] vfs: open '/var/images/sysmon/manifest.toml' client=7
+[    9.373] [INFO]  [USER] vfs: cache_fill inode=1014 size=180 base=0x64f71000
+[    9.374] [INFO]  [USER] vfs: open '/var/images/tail/manifest.toml' client=7
+[    9.377] [INFO]  [USER] vfs: cache_fill inode=1019 size=203 base=0x64f72000
+[    9.378] [INFO]  [USER] vfs: open '/var/images/timetick_probe/manifest.toml' client=7
+[    9.381] [INFO]  [USER] vfs: cache_fill inode=1024 size=201 base=0x64f73000
+[    9.382] [INFO]  [USER] vfs: open '/var/images/tlsprobe/manifest.toml' client=7
+[    9.386] [INFO]  [USER] vfs: cache_fill inode=1031 size=177 base=0x64f74000
+[    9.387] [INFO]  [USER] vfs: open '/var/images/top/manifest.toml' client=7
+[    9.390] [INFO]  [USER] vfs: cache_fill inode=1036 size=210 base=0x64f75000
+[    9.390] [INFO]  [USER] vfs: open '/var/images/touch/manifest.toml' client=7
+[    9.394] [INFO]  [USER] vfs: cache_fill inode=1041 size=205 base=0x64f76000
+[    9.395] [INFO]  [USER] vfs: open '/var/images/tr/manifest.toml' client=7
+[    9.399] [INFO]  [USER] vfs: cache_fill inode=1046 size=199 base=0x64f77000
+[    9.400] [INFO]  [USER] vfs: open '/var/images/uniq/manifest.toml' client=7
+[    9.403] [INFO]  [USER] vfs: cache_fill inode=1051 size=203 base=0x64f78000
+[    9.404] [INFO]  [USER] vfs: open '/var/images/usb-input/manifest.toml' client=7
+[    9.407] [INFO]  [USER] vfs: cache_fill inode=1054 size=414 base=0x64f79000
+[    9.408] [INFO]  [USER] vfs: open '/var/images/viewchild/manifest.toml' client=7
+[    9.413] [INFO]  [USER] vfs: cache_fill inode=1063 size=186 base=0x64f7a000
+[    9.414] [INFO]  [USER] vfs: open '/var/images/viewprobe/manifest.toml' client=7
+[    9.418] [INFO]  [USER] vfs: cache_fill inode=1068 size=198 base=0x64f7b000
+[    9.419] [INFO]  [USER] vfs: open '/var/images/virtio-9p/manifest.toml' client=7
+[    9.423] [INFO]  [USER] vfs: cache_fill inode=1071 size=441 base=0x64f7c000
+[    9.423] [INFO]  [USER] vfs: open '/var/images/virtio-blk/manifest.toml' client=7
+[    9.427] [INFO]  [USER] vfs: cache_fill inode=1076 size=530 base=0x64f7d000
+[    9.428] [INFO]  [USER] vfs: open '/var/images/virtio-net/manifest.toml' client=7
+[    9.432] [INFO]  [USER] vfs: cache_fill inode=1081 size=436 base=0x64f7e000
+[    9.433] [INFO]  [USER] vfs: open '/var/images/vt/manifest.toml' client=7
+[    9.436] [INFO]  [USER] vfs: open '/var/images/virtio-snd/manifest.toml' client=7
+[    9.440] [INFO]  [USER] vfs: cache_fill inode=1086 size=436 base=0x64f7f000
+[    9.441] [INFO]  [USER] vfs: open '/var/images/vqprobe/manifest.toml' client=7
+[    9.445] [INFO]  [USER] vfs: cache_fill inode=1093 size=194 base=0x64f80000
+[    9.446] [INFO]  [USER] vfs: open '/var/images/vtcrash/manifest.toml' client=7
+[    9.450] [INFO]  [USER] vfs: cache_fill inode=1104 size=194 base=0x64f81000
+[    9.451] [INFO]  [USER] vfs: open '/var/images/vtmgr/manifest.toml' client=7
+[    9.455] [INFO]  [USER] vfs: open '/var/images/waitprobe/manifest.toml' client=7
+[    9.458] [INFO]  [USER] vfs: cache_fill inode=1119 size=195 base=0x64f82000
+[    9.459] [INFO]  [USER] vfs: open '/var/images/wc/manifest.toml' client=7
+[    9.462] [INFO]  [USER] vfs: cache_fill inode=1124 size=199 base=0x64f83000
+[    9.463] [INFO]  [USER] vfs: open '/var/images/wget/manifest.toml' client=7
+[    9.466] [INFO]  [USER] vfs: cache_fill inode=1129 size=195 base=0x64f84000
+[    9.467] [INFO]  [USER] vfs: open '/var/images/which/manifest.toml' client=7
+[    9.471] [INFO]  [USER] vfs: cache_fill inode=1134 size=205 base=0x64f85000
+[    9.472] [INFO]  [USER] vfs: open '/var/images/xhciprobe/manifest.toml' client=7
+[    9.475] [INFO]  [USER] vfs: cache_fill inode=1139 size=198 base=0x64f86000
+[    9.476] [INFO]  [USER] drivermgr: phase 2 — 7 userdisk bind rules
+[    9.476] [INFO]  [USER] registry: SUBSCRIBE root-procmgr:spawn sender_tid=7 reply_ep=120 → forward grant_ep=116
+[    9.477] [INFO]  [USER] registry-client: handle_grant_request endpoint=spawn requester=120
+[    9.478] [INFO]  [USER] registry: SUBSCRIBE forward OK root-procmgr:spawn grant_ep=116
+[    9.479] [INFO]  [USER] registry: SUBSCRIBE drivermon:main sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    9.480] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:main grant_ep=123
+[    9.480] [INFO]  [USER] registry-client: handle_grant_request endpoint=main requester=120
+[    9.481] [INFO]  [USER] registry: SUBSCRIBE drivermon:notify sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    9.482] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:notify grant_ep=123
+[    9.483] [INFO]  [USER] registry-client: handle_grant_request endpoint=notify requester=120
+[    9.484] [INFO]  [USER] registry: SUBSCRIBE drivermon:fault sender_tid=7 reply_ep=120 → forward grant_ep=123
+[    9.485] [INFO]  [USER] registry: SUBSCRIBE forward OK drivermon:fault grant_ep=123
+[    9.485] [INFO]  [USER] registry-client: handle_grant_request endpoint=fault requester=120
+[    9.486] [INFO]  [USER] drivermgr: device /acpi/ACPI0006 no matching driver
+[    9.487] [INFO]  [USER] drivermgr: device /acpi/ACPI0010 no matching driver
+[    9.487] [INFO]  [USER] drivermgr: device /acpi/PNP0400 no matching driver
+[    9.488] [INFO]  [USER] drivermgr: device /acpi/PNP0501 no matching driver
+[    9.489] [INFO]  [USER] drivermgr: device /acpi/PNP0700 no matching driver
+[    9.489] [INFO]  [USER] drivermgr: device /acpi/PNP0A03 no matching driver
+[    9.490] [INFO]  [USER] drivermgr: device /acpi/PNP0A06 no matching driver
+[    9.490] [INFO]  [USER] drivermgr: device /acpi/PNP0B00 no matching driver
+[    9.491] [INFO]  [USER] drivermgr: device /acpi/PNP0C0F no matching driver
+[    9.491] [INFO]  [USER] drivermgr: device /acpi/QEMU0002 no matching driver
+[    9.492] [INFO]  [USER] drivermgr: device /pci/00:00.0 no matching driver
+[    9.492] [INFO]  [USER] drivermgr: device /pci/00:01.0 no matching driver
+[    9.493] [INFO]  [USER] drivermgr: device /pci/00:02.0 no matching driver
+[    9.494] [INFO]  [USER] drivermgr: device /pci/00:03.0 no matching driver
+[    9.494] [INFO]  [USER] drivermgr: DEVICE_STATE /acpi/PNP0303 Unbound -> Bound
+[    9.495] [INFO]  [USER] drivermgr: DEVICE_STATE /acpi/PNP0F13 Unbound -> Bound
+[    9.496] [INFO]  [USER] drivermgr: DEVICE_STATE /pci/00:04.0 Unbound -> Bound

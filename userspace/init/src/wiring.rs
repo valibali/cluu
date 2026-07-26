@@ -3,6 +3,17 @@
 //! This module owns the orchestration of service startup. It applies the
 //! ServiceKind-specific policy through a small trait (Single Responsibility),
 //! keeping each service's wiring decisions isolated from boot/mapping code.
+//!
+//! # displayd boot path (T7)
+//!
+//! displayd is started by root-procmgr via `/etc/system.toml` (same pattern
+//! as compositor, console, vtmgr, inputd) — NOT by init's SERVICE_LIST.
+//! It appears in system.toml before compositor so the framebuffer owner is
+//! ready before the WM tries to connect. Per-session displayd endpoints are
+//! installed via `PARAM_DISPLAYD_EP` by root-procmgr at SESSION_CREATE
+//! (T6 — see `userspace/root-procmgr/src/main.rs:mint_session_displayd_ep`).
+//! init does not need a ServiceKind::Displayd because procmgr handles the
+//! autostart.
 
 use alloc::format;
 use libcluu::boot::{
