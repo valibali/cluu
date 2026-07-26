@@ -233,6 +233,9 @@ enum Commands {
     /// Internal: build doom port
     #[command(hide = true)]
     BuildDoom,
+    /// Internal: build pinned SDL2 2.30.0 static library for CLUU
+    #[command(hide = true)]
+    BuildSdl2,
     /// Internal: create initrd
     #[command(hide = true)]
     CreateInitrd {
@@ -379,6 +382,9 @@ fn main() -> Result<()> {
         }
         Commands::BuildDoom => {
             build_doom()?;
+        }
+        Commands::BuildSdl2 => {
+            build_sdl2()?;
         }
         Commands::CreateInitrd { profile } => {
             create_initrd(&profile)?;
@@ -3375,6 +3381,46 @@ fn build_doom() -> Result<()> {
     }
 
     println!("  ✓ DOOM built");
+    Ok(())
+}
+
+/// Build pinned SDL2 2.30.0 static library for the CLUU userspace target.
+/// Vendored under userspace/sdl2/SDL2-2.30.0/. Produces libSDL2.a in the
+/// sysroot. See .omo/evidence/task-14-cluu-multimedia-stack.txt.
+fn build_sdl2() -> Result<()> {
+    let sdl2_dir = project_root().join("userspace/sdl2");
+    let sdl2_src = sdl2_dir.join("SDL2-2.30.0/src/SDL.c");
+    if !sdl2_src.exists() {
+        eprintln!(
+            "  Warning: SDL2 source not found at {}, skipping SDL2 build",
+            sdl2_src.display()
+        );
+        return Ok(());
+    }
+
+    let newlib_lib = project_root().join("target/sysroot/x86_64-cluu-elf/lib");
+    if !newlib_lib.exists() {
+        println!("▸ Building newlib (prerequisite for SDL2)...");
+        ensure_newlib_installed()?;
+    }
+
+    let syscalls = project_root().join("target/sysroot/lib/libcluu_syscalls.a");
+    if !syscalls.exists() {
+        println!("▸ Building libcluu_syscalls (prerequisite for SDL2)...");
+        build_syscalls("dev")?;
+    }
+
+    println!("▸ Building pinned SDL2 2.30.0 static library...");
+    let status = Command::new("make")
+        .current_dir(&sdl2_dir)
+        .arg("-j4")
+        .status()
+        .context("Failed to build SDL2")?;
+    if !status.success() {
+        bail!("SDL2 build failed");
+    }
+
+    println!("  ✓ SDL2 static library built and staged to sysroot");
     Ok(())
 }
 

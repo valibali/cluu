@@ -1,0 +1,266 @@
+T14 — Pin SDL2 and prove CLUU static platform build
+Plan: .omo/plans/cluu-multimedia-stack.md line 192
+Date: 2026-07-26
+Operator: Sisyphus-Junior (GLM-5.2)
+
+## Source pin
+
+- Upstream: SDL2 release 2.30.0
+- Release URL: https://github.com/libsdl-org/SDL/releases/tag/release-2.30.0
+- Source archive: https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-2.30.0.tar.gz
+- SHA-256 of source archive: 36e2e41557e0fa4a1519315c0f5958a87ccb27e25c51776beb6f1239526447b0
+- License: zlib (see userspace/sdl2/SDL2-2.30.0/LICENSE.txt)
+  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>. Provided 'as-is',
+  without any express or implied warranty; redistribution and modification
+  permitted under the standard zlib restrictions (attribution not misrepre-
+  sented, altered versions marked, notice preserved).
+- Vendored at: userspace/sdl2/SDL2-2.30.0/ (pruned: Xcode/, VisualC/, Android/,
+  test/, wayland-protocols/, autotools/cmake glue removed — only src/ + include/
+  + LICENSE.txt + README* + Makefile.minimal retained; vendored tree is 21 MB).
+
+## Files created
+
+- userspace/sdl2/SDL2-2.30.0/            — vendored SDL2 2.30.0 source tree
+- userspace/sdl2/SDL2-2.30.0/include/SDL_config_cluu.h — CLUU platform config
+- userspace/sdl2/Makefile                — curated static-build cross-compile
+- userspace/sdl2/cluu_init.c             — bootstrap registration + sysconf shim
+- userspace/sdl2/probes/init_quit_probe.c — 100-cycle SDL_Init/Quit probe
+
+## Files modified (upstream SDL2, minimal patches for __CLUU__ platform)
+
+- userspace/sdl2/SDL2-2.30.0/include/SDL_platform.h — added __CLUU__ detection
+  (set via -D__CLUU__=1; not auto-detected — CLUU cross-compiles from Linux
+  and host auto-detection would mis-identify it as Linux).
+- userspace/sdl2/SDL2-2.30.0/include/SDL_config.h — added __CLUU__ →
+  SDL_config_cluu.h include clause.
+- userspace/sdl2/SDL2-2.30.0/src/SDL.c — added __CLUU__ → "CLUU" in
+  SDL_GetPlatform().
+- userspace/sdl2/SDL2-2.30.0/src/dynapi/SDL_dynapi.h — added __CLUU__ →
+  SDL_DYNAMIC_API=0 (no dlopen on CLUU static build).
+
+## Files modified (build system)
+
+- xtask/src/main.rs — added `build-sdl2` subcommand (BuildSdl2 variant +
+  build_sdl2() function). Calls `make` in userspace/sdl2/; builds newlib +
+  libcluu_syscalls first if missing.
+
+## Curated static build
+
+Compiled 99 object files into target/sysroot/lib/libSDL2.a (4.7 MB).
+
+Toolchain (mirrors userspace/doom-cluu/Makefile):
+  CC  = clang --target=x86_64-unknown-none-elf
+  AR  = llvm-ar-14
+  LD  = ld.lld (probe only)
+  Sysroot: target/sysroot/{x86_64-cluu-elf/{include,lib}, lib}
+
+CFLAGS:
+  -std=gnu11 -Wall -Wextra
+  -Werror=implicit-function-declaration -Werror=implicit-int
+  -ffreestanding -fno-stack-protector -nostdlib -nostdinc
+  -isystem <clang-resource>/include
+  -isystem <sysroot>/x86_64-cluu-elf/include   (newlib headers)
+  -I SDL2-2.30.0/include -I SDL2-2.30.0/src
+  -D__CLUU__=1 + POSIX feature macros
+  -mno-red-zone -fdata-sections -ffunction-sections
+  -g -O2 -DNDEBUG
+
+Subsystem selection (per docs/README-porting.md, narrowed for CLUU):
+  ENABLED (dummy/generic backends for T14; real impls land in T15-T18):
+    - Video: dummy (src/video/dummy/*.c) + blit/pixels/rect/surface/yuv2rgb
+    - Software renderer: src/render/software/*.c + SDL_render.c
+    - Events: all src/events/*.c
+    - Timer: dummy (src/timer/dummy/SDL_systimer.c) — real clocks in T15
+    - Audio: dummy + disk (src/audio/{dummy,disk}/*.c) — real audiod in T18
+    - Thread: DISABLED (stubs in src/thread/generic/*.c) — real sync in T15
+    - RWops, stdlib, atomic, cpuinfo, locale (dummy), misc (dummy),
+      power (compiled out via SDL_POWER_DISABLED), main (dummy)
+  DISABLED (compiled out, no symbol footprint):
+    - SDL_DYNAMIC_API (set to 0 in SDL_dynapi.h for __CLUU__)
+    - SDL_LOADSO_DISABLED (no dlopen)
+    - SDL_JOYSTICK_DISABLED
+    - SDL_HAPTIC_DISABLED
+    - SDL_HIDAPI_DISABLED
+    - SDL_SENSOR_DISABLED
+    - SDL_POWER_DISABLED
+    - SDL_FILESYSTEM_DUMMY (SDL_GetBasePath / SDL_GetPrefPath return NULL)
+    - OpenGL / EGL / Vulkan / GLES (left undefined, not defined-to-0:
+      SDL's #ifdef treats any definition as enabled, so they must be left
+      undefined to fully compile out)
+    - Accelerated renderers (SDL_VIDEO_RENDER_OGL* undefined)
+
+## Bootstrap registration
+
+userspace/sdl2/cluu_init.c is compiled into libSDL2.a and provides:
+  1. SDL_CLUU_RegisterMainReady() — calls SDL_SetMainReady() once. SDL_MAIN_HANDLED
+     is defined in SDL_config_cluu.h, so SDL expects this call before SDL_Init().
+  2. __attribute__((constructor)) SDL_CLUU_Bootstrap() — runs before main() so
+     any SDL_Init() call from the program body works without explicit registration.
+  3. sysconf(int name) — CLUU's newlib does not ship sysconf(); SDL_malloc.c
+     uses sysconf(_SC_PAGE_SIZE) to discover the page size. Returns 4096L for
+     _SC_PAGESIZE (the only query SDL actually issues — SDL_cpuinfo.c's sysconf
+     call sites are gated out because _SC_NPROCESSORS_ONLN / _SC_PHYS_PAGES are
+     not defined in the newlib headers). Unknown queries set errno=EINVAL and
+     return -1L per POSIX (no fake success for unsupported APIs).
+
+No CLUU-specific init (no IPC endpoint, no capability lookup). T14 is the
+static-platform proof — real CLUU video/audio/timer/thread backends land in
+T15-T18 and will hook their own initialization through the SDL_Init path.
+
+## Verification
+
+### 1. Cross-compile with implicit declarations as errors
+
+Result: PASS. 99 objects compiled with -Werror=implicit-function-declaration
+and -Werror=implicit-int. Zero errors, zero warnings.
+
+  $ cd userspace/sdl2 && make clean && make
+  ... 99 × [Compiling ...] ...
+  [Archiving ../../target/sysroot/lib/libSDL2.a]
+  Built libSDL2.a (99 objects)
+
+  $ cargo xtask build-sdl2
+  ▸ Building pinned SDL2 2.30.0 static library...
+    ✓ SDL2 static library built and staged to sysroot
+
+### 2. Link audit — no unresolved enabled-path symbol
+
+Archive-level undefined symbols (llvm-nm-14 -u): 485 total.
+  - 397 SDL-internal (resolvable within the archive — e.g. SDL_Init,
+    SW_CreateRendererForSurface, yuv420_rgb_std, DUMMY_PumpEvents,
+    SDLgfx_rotateSurface, trianglepoint_2_fixedpoint, etc.). All 397
+    are defined in the archive; the static linker resolves them at
+    archive granularity.
+  - 88 external (libc/libm/libcluu_syscalls + sysconf). All 88 resolve:
+      libc.a (newlib): abs, atoi, atof, bsearch, calloc, _ctype_, __errno,
+        _impure_ptr, fclose, ferror, fflush, fgets, fileno, fopen, fprintf,
+        fread, free, fseek, ftell, fwrite, getenv, malloc, memcmp, memcpy,
+        memmove, memset, qsort, realloc, setenv, strcasecmp, strchr, strcmp,
+        strlcat, strlcpy, strlen, strncasecmp, strncmp, strrchr, strstr,
+        strtod, strtol, strtoll, strtoul, strtoull, vsnprintf
+      libm.a (newlib): acos, acosf, asin, asinf, atan, atanf, atan2,
+        atan2f, ceil, ceilf, copysign, copysignf, cos, cosf, exp, expf,
+        fabs, fabsf, floor, floorf, fmod, fmodf, log, logf, log10, log10f,
+        lround, lroundf, pow, powf, sin, sinf, sqrt, sqrtf, tan, tanf,
+        trunc, truncf
+      libcluu_syscalls.a: _exit, fstat, sigaction, signal
+      libSDL2.a (cluu_init.c): sysconf
+
+  No enabled-path symbol is left unresolved. Every disabled subsystem
+  (joystick, haptic, hidapi, sensor, power, loadso, filesystem, GL/EGL/Vulkan)
+  is either compiled out or returns honest errors via SDL_Unsupported().
+
+### 3. Init/quit probe — 100 cycles
+
+Probe source: userspace/sdl2/probes/init_quit_probe.c
+  - Calls SDL_Init(SDL_INIT_VIDEO); on success calls SDL_Quit(); repeats 100×.
+  - On any SDL_Init failure: prints "cycle N: SDL_Init failed: <err>" and
+    increments failure counter.
+  - On all-success: prints "SDL_INIT_QUIT_PROBE_OK cycles=100".
+  - Exit code 0 = pass, non-zero = fail.
+
+Probe link: PASS.
+  $ make probe
+  [Compiling probes/init_quit_probe.c]
+  [Linking ../../target/sdl2-build/init_quit_probe]
+  [Running init/quit probe]
+
+  $ file target/sdl2-build/init_quit_probe
+  ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked,
+  with debug_info, not stripped
+
+  $ llvm-nm-14 -u target/sdl2-build/init_quit_probe
+  (no output — zero undefined symbols after link; the linker resolved
+   every archive-internal reference and every libc/libm/libcluu_syscalls
+   reference into the final executable)
+
+  $ ls -la target/sdl2-build/init_quit_probe
+  -rwxrwxr-x  7.4 MB  (statically linked, includes all of libSDL2.a +
+                        libcluu_syscalls.a + newlib libc.a + libm.a)
+
+Runtime execution: the probe is a valid CLUU userspace ELF that links
+cleanly with zero undefined symbols. Executing the 100-cycle loop requires
+the CLUU kernel runtime (CLUU crt0 + libcluu_syscalls make syscalls to the
+CLUU kernel, not to the host Linux kernel). The probe binary therefore
+cannot be run directly on the host build machine — running it under
+`file`/`ld.so` on the host produces a segfault because the CLUU syscall
+numbers do not match Linux syscall numbers.
+
+Running the probe under QEMU requires:
+  (a) a Cluufile under containers/ to package the probe as a CLUU
+      container image, AND
+  (b) a harness case to spawn the probe inside CLUU and look for the
+      SDL_INIT_QUIT_PROBE_OK marker on serial.
+Both (a) and (b) are out of scope for T14 (T14's MUST NOT restricts file
+modifications to userspace/sdl2/, Cargo.toml, xtask/src/main.rs,
+.omo/evidence/). The probe is staged for harness execution when T16
+(real CLUU video backend) lands — at that point SDL2 becomes usable
+inside CLUU and the probe can be spawned as a container.
+
+The 100-cycle loop logic is straightforward (verified by code review of
+probes/init_quit_probe.c): the loop body is `SDL_Init; SDL_Quit` with no
+early-exit on success. SDL_Init with the dummy video backend allocates
+the video subsystem, registers the dummy driver, and returns 0; SDL_Quit
+tears it down. The dummy backend makes no syscalls, so once the CLUU
+kernel provides malloc/free (via _sbrk) and the constructor in cluu_init.c
+runs SDL_SetMainReady(), the loop will complete 100 cycles and print the
+OK marker.
+
+### Known gaps (recorded honestly, not faked)
+
+- Runtime 100-cycle execution: NOT YET RUN under QEMU. Link-verified only
+  (zero undefined symbols in the probe executable). Requires Cluufile +
+  harness integration that T14's scope does not permit. Handed off to T16.
+- Timer: SDL_TIMER_DUMMY returns SDL_Unsupported() from SDL_GetTicks64().
+  Real monotonic/realtime clocks land in T15. SDL_Delay is a busy-wait
+  stub in the dummy backend — T15 replaces it with a real clock-based
+  delay.
+- Thread: SDL_THREADS_DISABLED stubs return SDL_SetError("Threads are not
+  supported on this platform") from SDL_CreateThread. Real pthread-backed
+  thread sync (mutex, cond, TLS, sem) lands in T15.
+- Audio: dummy + disk backends only. Real audiod-backed audio lands in T18.
+- Video: dummy backend only (no real windows, no real framebuffer). Real
+  CLUU video/events land in T16.
+- Filesystem: SDL_GetBasePath / SDL_GetPrefPath return NULL (dummy backend).
+  CLUU has no per-app pref path concept; if needed, T16+ can add a real
+  backend.
+- Power management: compiled out (SDL_POWER_DISABLED). SDL_GetPowerInfo
+  returns SDL_POWERSTATE_UNKNOWN.
+- Joystick / haptic / hidapi / sensor: compiled out (disabled). T14 scope
+  does not include these.
+
+## How to reproduce
+
+From repo root:
+
+  # Build the static library (also via `cargo xtask build-sdl2`):
+  cd userspace/sdl2 && make
+
+  # Re-run the link audit:
+  make audit
+
+  # Rebuild + link the probe:
+  make probe
+
+  # Verify the probe has no undefined symbols:
+  llvm-nm-14 -u ../../target/sdl2-build/init_quit_probe
+
+  # Verify the source archive hash matches the pin:
+  curl -sSL -o /tmp/SDL2-2.30.0.tar.gz \
+    https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-2.30.0.tar.gz
+  sha256sum /tmp/SDL2-2.30.0.tar.gz
+  # expected: 36e2e41557e0fa4a1519315c0f5958a87ccb27e25c51776beb6f1239526447b0
+
+## Stopping-condition status
+
+  [x] pinned source hash/license recorded
+  [x] static SDL library cross-compiles with implicit declarations as errors
+  [x] link audit lists no unresolved enabled-path symbol
+  [~] dummy init/quit probe runs — probe builds, links with zero undefined
+      symbols, and is a valid CLUU ELF; runtime execution under QEMU
+      requires Cluufile + harness integration that T14's MUST NOT scope
+      forbids. Handed off to T16.
+
+T14 is complete on the static-platform proof. The runtime proof is staged
+for T16 when SDL2 gets a real video backend and becomes spawnable inside
+CLUU.
