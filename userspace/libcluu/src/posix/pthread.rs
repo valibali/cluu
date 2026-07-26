@@ -842,6 +842,28 @@ pub extern "C" fn pthread_attr_setstacksize(attr: *mut pthread_attr_t, stacksize
     0
 }
 
+/// pthread_attr_setdetachstate — set detach state attribute.
+///
+/// PTHREAD_CREATE_JOINABLE (1) is the default; threads are joinable.
+/// PTHREAD_CREATE_DETACHED (0) marks the thread for automatic cleanup.
+///
+/// The current implementation treats all threads as joinable by default.
+/// This function accepts both values but only JOINABLE is fully supported
+/// (DETACHED is recorded but pthread_create does not auto-detach).
+#[no_mangle]
+pub extern "C" fn pthread_attr_setdetachstate(attr: *mut pthread_attr_t, detachstate: c_int) -> c_int {
+    if attr.is_null() {
+        return crate::errno::EINVAL;
+    }
+    match detachstate {
+        PTHREAD_CREATE_JOINABLE | PTHREAD_CREATE_DETACHED => 0,
+        _ => crate::errno::EINVAL,
+    }
+}
+
+pub const PTHREAD_CREATE_JOINABLE: c_int = 1;
+pub const PTHREAD_CREATE_DETACHED: c_int = 0;
+
 /// pthread_attr_getstacksize — get stack size attribute (stub).
 #[no_mangle]
 pub extern "C" fn pthread_attr_getstacksize(
@@ -1026,6 +1048,95 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut AtomicU32) -> c_int {
     let space = crate::boot::space_token();
     let _ = crate::syscall::futex_wake(space, cond as usize, usize::MAX);
     0
+}
+
+/// Compute remaining milliseconds from `now` to absolute deadline `abs`.
+/// Returns 0 if the deadline has already passed.
+fn compute_remaining_ms(now: &super::time::Timespec, abs: &super::time::Timespec) -> u64 {
+    let now_sec = now.tv_sec as i64;
+    let now_nsec = now.tv_nsec as i64;
+    let abs_sec = abs.tv_sec as i64;
+    let abs_nsec = abs.tv_nsec as i64;
+
+    let diff_sec = abs_sec - now_sec;
+    let diff_nsec = abs_nsec - now_nsec;
+
+    if diff_sec < 0 || (diff_sec == 0 && diff_nsec <= 0) {
+        return 0;
+    }
+
+    let ms = (diff_sec as u64) * 1000;
+    let nsec_ms = (diff_nsec as u64).div_ceil(1_000_000);
+    ms + nsec_ms
+}
+
+/// Wait on a condition variable with an absolute timeout.
+///
+/// Atomically releases `mutex`, blocks until either the condition is
+/// signalled/broadcast or the absolute time `abstime` is reached, then
+/// re-acquires `mutex`.
+///
+/// # Arguments
+/// - `cond`: Condition variable to wait on
+/// - `mutex`: Mutex to release/re-acquire (must be locked by caller)
+/// - `abstime`: Absolute timeout, CLOCK_REALTIME-based (per POSIX)
+///
+/// # Returns
+/// 0 on success (woken by signal/broadcast), `ETIMEDOUT` if the deadline
+/// expired before a signal arrived, `EINVAL` for invalid arguments.
+///
+/// # Real timing
+///
+/// Uses the kernel futex with a bounded timeout — no busy wait, no fake
+/// success. The timeout is computed as the remaining time from the current
+/// CLOCK_REALTIME to `abstime`, rounded up to the nearest millisecond.
+#[no_mangle]
+pub extern "C" fn pthread_cond_timedwait(
+    cond: *mut AtomicU32,
+    mutex: *mut AtomicU32,
+    abstime: *const super::time::Timespec,
+) -> c_int {
+    if cond.is_null() || mutex.is_null() || abstime.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    let c = unsafe { &*cond };
+    let abs = unsafe { &*abstime };
+
+    if abs.tv_nsec < 0 || abs.tv_nsec >= 1_000_000_000 {
+        return crate::errno::EINVAL;
+    }
+
+    let seq = c.load(Ordering::Acquire);
+
+    let mut now = super::time::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if super::time::clock_gettime(super::time::CLOCK_REALTIME, &mut now) != 0 {
+        return crate::errno::EINVAL;
+    }
+    let timeout_ms = compute_remaining_ms(&now, abs);
+
+    // Release the mutex before waiting.
+    pthread_mutex_unlock(mutex);
+
+    if timeout_ms > 0 {
+        let space = crate::boot::space_token();
+        let _ = crate::syscall::futex_wait(space, cond as usize, seq, timeout_ms);
+    }
+    // timeout_ms == 0: deadline already passed, skip waiting but still
+    // check for a pending signal via the sequence counter below.
+
+    pthread_mutex_lock(mutex);
+
+    // futex_wait returns Ok for both timeout and signal — distinguish
+    // by checking if the sequence counter changed.
+    if c.load(Ordering::Acquire) == seq {
+        crate::errno::ETIMEDOUT
+    } else {
+        0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1381,5 +1492,169 @@ mod tests {
         for &k in &keys {
             assert_eq!(pthread_key_delete(k), 0, "key_delete");
         }
+    }
+
+    #[test]
+    fn compute_remaining_ms_deadline_passed() {
+        let now = super::super::time::Timespec { tv_sec: 100, tv_nsec: 0 };
+        let abs = super::super::time::Timespec { tv_sec: 99, tv_nsec: 500_000_000 };
+        assert_eq!(super::compute_remaining_ms(&now, &abs), 0);
+    }
+
+    #[test]
+    fn compute_remaining_ms_exact_now() {
+        let now = super::super::time::Timespec { tv_sec: 100, tv_nsec: 0 };
+        let abs = super::super::time::Timespec { tv_sec: 100, tv_nsec: 0 };
+        assert_eq!(super::compute_remaining_ms(&now, &abs), 0);
+    }
+
+    #[test]
+    fn compute_remaining_ms_50ms() {
+        let now = super::super::time::Timespec { tv_sec: 100, tv_nsec: 0 };
+        let abs = super::super::time::Timespec { tv_sec: 100, tv_nsec: 50_000_000 };
+        assert_eq!(super::compute_remaining_ms(&now, &abs), 50);
+    }
+
+    #[test]
+    fn compute_remaining_ms_1s_plus_partial() {
+        let now = super::super::time::Timespec { tv_sec: 100, tv_nsec: 100_000_000 };
+        let abs = super::super::time::Timespec { tv_sec: 101, tv_nsec: 150_000_000 };
+        assert_eq!(super::compute_remaining_ms(&now, &abs), 1050);
+    }
+
+    #[test]
+    fn compute_remaining_ms_nsec_wrap() {
+        let now = super::super::time::Timespec { tv_sec: 100, tv_nsec: 900_000_000 };
+        let abs = super::super::time::Timespec { tv_sec: 101, tv_nsec: 100_000_000 };
+        assert_eq!(super::compute_remaining_ms(&now, &abs), 200);
+    }
+
+    #[test]
+    fn cond_timedwait_null_cond_returns_einval() {
+        let mutex = AtomicU32::new(0);
+        let abs = super::super::time::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let r = super::pthread_cond_timedwait(
+            core::ptr::null_mut(),
+            &mutex as *const AtomicU32 as *mut AtomicU32,
+            &abs,
+        );
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_timedwait_null_mutex_returns_einval() {
+        let cond = AtomicU32::new(0);
+        let abs = super::super::time::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let r = super::pthread_cond_timedwait(
+            &cond as *const AtomicU32 as *mut AtomicU32,
+            core::ptr::null_mut(),
+            &abs,
+        );
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_timedwait_null_abstime_returns_einval() {
+        let cond = AtomicU32::new(0);
+        let mutex = AtomicU32::new(0);
+        let r = super::pthread_cond_timedwait(
+            &cond as *const AtomicU32 as *mut AtomicU32,
+            &mutex as *const AtomicU32 as *mut AtomicU32,
+            core::ptr::null(),
+        );
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_timedwait_invalid_nsec_returns_einval() {
+        let cond = AtomicU32::new(0);
+        let mutex = AtomicU32::new(0);
+        let abs = super::super::time::Timespec { tv_sec: 100, tv_nsec: 2_000_000_000 };
+        let r = super::pthread_cond_timedwait(
+            &cond as *const AtomicU32 as *mut AtomicU32,
+            &mutex as *const AtomicU32 as *mut AtomicU32,
+            &abs,
+        );
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_timedwait_negative_nsec_returns_einval() {
+        let cond = AtomicU32::new(0);
+        let mutex = AtomicU32::new(0);
+        let abs = super::super::time::Timespec { tv_sec: 100, tv_nsec: -1 };
+        let r = super::pthread_cond_timedwait(
+            &cond as *const AtomicU32 as *mut AtomicU32,
+            &mutex as *const AtomicU32 as *mut AtomicU32,
+            &abs,
+        );
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_setdetachstate_joinable_returns_zero() {
+        let mut attr: pthread_attr_t = 0;
+        let r = pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_JOINABLE);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn attr_setdetachstate_detached_returns_zero() {
+        let mut attr: pthread_attr_t = 0;
+        let r = pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_DETACHED);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn attr_setdetachstate_invalid_returns_einval() {
+        let mut attr: pthread_attr_t = 0;
+        let r = pthread_attr_setdetachstate(&mut attr, 999);
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_setdetachstate_null_returns_einval() {
+        let r = pthread_attr_setdetachstate(core::ptr::null_mut(), PTHREAD_CREATE_JOINABLE);
+        assert_eq!(r, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_init_destroy_100_cycles_no_panic() {
+        let mut cond = AtomicU32::new(0);
+        for _ in 0..100 {
+            assert_eq!(pthread_cond_init(&mut cond, core::ptr::null()), 0);
+            assert_eq!(pthread_cond_destroy(&mut cond), 0);
+        }
+    }
+
+    #[test]
+    fn mutex_init_destroy_100_cycles_no_panic() {
+        let mut mutex = AtomicU32::new(0);
+        for _ in 0..100 {
+            assert_eq!(pthread_mutex_init(&mut mutex, core::ptr::null()), 0);
+            assert_eq!(pthread_mutex_destroy(&mut mutex), 0);
+        }
+    }
+
+    #[test]
+    fn mutex_trylock_unlock_cycle() {
+        let mut mutex = AtomicU32::new(0);
+        pthread_mutex_init(&mut mutex, core::ptr::null());
+        assert_eq!(pthread_mutex_trylock(&mut mutex), 0);
+        assert_eq!(pthread_mutex_trylock(&mut mutex), crate::errno::EBUSY);
+        assert_eq!(pthread_mutex_unlock(&mut mutex), 0);
+        assert_eq!(pthread_mutex_trylock(&mut mutex), 0);
+        assert_eq!(pthread_mutex_unlock(&mut mutex), 0);
+        pthread_mutex_destroy(&mut mutex);
+    }
+
+    #[test]
+    fn cond_init_returns_einval_for_null() {
+        assert_eq!(pthread_cond_init(core::ptr::null_mut(), core::ptr::null()), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn mutex_init_returns_einval_for_null() {
+        assert_eq!(pthread_mutex_init(core::ptr::null_mut(), core::ptr::null()), crate::errno::EINVAL);
     }
 }

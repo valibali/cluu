@@ -218,6 +218,24 @@ pub extern "C" fn usleep(usec: u32) -> c_int {
     }
 }
 
+/// Sleep for at least `ms` milliseconds via kernel-level timed blocking.
+/// No busy wait — uses the same IPC recv-with-timeout as `nanosleep`.
+///
+/// # Arguments
+/// - `ms`: Milliseconds to sleep (0 returns immediately)
+///
+/// # Returns
+/// 0 on success, -1 if timed blocking is unavailable.
+#[no_mangle]
+pub extern "C" fn delay(ms: u32) -> c_int {
+    if timed_sleep_ms(ms as u64) {
+        0
+    } else {
+        set_errno(ENOSYS);
+        -1
+    }
+}
+
 /// POSIX nanosleep - sleep with nanosecond granularity.
 ///
 /// Sleeps for the time specified in `req`. The actual resolution is
