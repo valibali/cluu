@@ -151,6 +151,11 @@ impl ShmMapping {
     /// that includes at least `size_of::<WindowShm>()` bytes, and the region
     /// is never unmapped for the lifetime of this `ShmMapping`.
     pub fn header(&self) -> &WindowShm {
+        // SAFETY: `self.ptr` is NonNull (checked in `new`). The mapping
+        // established by `shm::map_frame_rw` is at least
+        // `size_of::<WindowShm>()` bytes and remains valid for the
+        // lifetime of `self`. `WindowShm` is `#[repr(C)]` and the SHM
+        // page is page-aligned, satisfying alignment.
         unsafe { &*(self.ptr.as_ptr() as *const WindowShm) }
     }
 
@@ -169,8 +174,18 @@ impl ShmMapping {
             return None;
         }
         let header_size = core::mem::size_of::<WindowShm>();
+        // SAFETY: `self.ptr` is a valid NonNull mapping. `header_size` is
+        // `size_of::<WindowShm>()`, and the mapping includes at least that
+        // plus the cell array (guaranteed by `shm::map_frame_rw`'s size
+        // argument). The pointer arithmetic `.add(header_size)` stays within
+        // the mapping because the cell array follows the header.
         let cells_ptr = unsafe { self.ptr.as_ptr().add(header_size) as *const u64 };
         let off = iy as usize * inner_w as usize + ix as usize;
+        // SAFETY: `off = iy * inner_w + ix` with `ix < inner_w` and
+        // `iy < inner_h` (both checked above), so `off < inner_w * inner_h`.
+        // The cell array has `inner_w * inner_h` u64 entries (established
+        // by the client during `WindowShm` init). `read_volatile` is used
+        // because the client may update cells concurrently via SHM.
         Some(unsafe { core::ptr::read_volatile(cells_ptr.add(off)) })
     }
 }

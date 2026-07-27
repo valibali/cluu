@@ -135,6 +135,12 @@ impl GpuDriver {
 
         // ── Read device config ───────────────────────────────────────────
         let cfg_va = transport.device_cfg_va;
+        // SAFETY: `cfg_va` is the MMIO-mapped virtio-gpu device config
+        // space, established by `ModernPciTransport::new` during BAR
+        // mapping. `GpuConfig` is `#[repr(C)]` matching the virtio-gpu
+        // config layout. `read_volatile` is required because this is MMIO
+        // (the device may update `events_read` at any time). The mapping
+        // is valid for the lifetime of `transport`.
         let gpu_cfg: protocol::GpuConfig =
             unsafe { core::ptr::read_volatile(cfg_va as *const protocol::GpuConfig) };
         debug_print(&format!(
@@ -198,11 +204,18 @@ impl GpuDriver {
     /// re-query GET_DISPLAY_INFO).
     pub fn check_display_event(&mut self) -> Result<bool> {
         let cfg_va = self.transport.device_cfg_va;
+        // SAFETY: MMIO read of the device config — same argument as in
+        // `init()`. `cfg_va` is a valid MMIO mapping for the lifetime of
+        // `self.transport`. `read_volatile` is required for MMIO.
         let cfg: protocol::GpuConfig =
             unsafe { core::ptr::read_volatile(cfg_va as *const protocol::GpuConfig) };
 
         if cfg.events_read & protocol::VIRTIO_GPU_EVENT_DISPLAY != 0 {
             // Ack by writing the same bit to events_clear.
+            // SAFETY: MMIO write to the `events_clear` field at offset 4
+            // in the device config region. `cfg_va + 4` is the documented
+            // offset of `events_clear` in the virtio-gpu config space.
+            // `write_volatile` is required for MMIO writes.
             unsafe {
                 let clear_ptr = (cfg_va + 4) as *mut u32;
                 core::ptr::write_volatile(clear_ptr, protocol::VIRTIO_GPU_EVENT_DISPLAY);
@@ -245,6 +258,12 @@ impl GpuDriver {
             // We modify the in-memory copy before writing to DMA.
             // Safety: all commands start with CtrlHdr.
             if cmd_bytes.len() >= core::mem::size_of::<protocol::CtrlHdr>() {
+                // SAFETY: `cmd_region.virt` is a DMA allocation from
+                // `pool.alloc` with 4-byte alignment and size >=
+                // `cmd_bytes.len()`. The check above ensures
+                // `cmd_bytes.len() >= size_of::<CtrlHdr>()`, so the
+                // `*hdr` dereference is within bounds. The copy is
+                // non-overlapping (DMA region ≠ cmd_bytes source).
                 unsafe {
                     let hdr = cmd_region.virt as *mut protocol::CtrlHdr;
                     core::ptr::copy_nonoverlapping(
@@ -256,6 +275,9 @@ impl GpuDriver {
                     (*hdr).fence_id = fid;
                 }
             } else {
+                // SAFETY: `cmd_region.virt` is a DMA allocation with size
+                // >= `cmd_bytes.len()` (guaranteed by `pool.alloc`).
+                // Non-overlapping source/dest.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         cmd_bytes.as_ptr(),
@@ -266,6 +288,9 @@ impl GpuDriver {
             }
             Some(fid)
         } else {
+            // SAFETY: Same DMA copy as above — `cmd_region.virt` is a
+            // valid DMA region of size >= `cmd_bytes.len()`, 4-byte
+            // aligned, non-overlapping with the source.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     cmd_bytes.as_ptr(),
@@ -277,6 +302,9 @@ impl GpuDriver {
         };
 
         // Zero the response buffer.
+        // SAFETY: `resp_region.virt` is a DMA allocation with size >=
+        // `resp_size` (guaranteed by `pool.alloc`). `write_bytes` fills
+        // the region with zeros — no read of uninitialized memory.
         unsafe {
             core::ptr::write_bytes(resp_region.virt as *mut u8, 0, resp_size);
         }
@@ -310,12 +338,22 @@ impl GpuDriver {
         let mut spins = 0u32;
         loop {
             if let Some((_cookie, _len)) = self.vq_control.pop_used() {
+                // SAFETY: `resp_region.virt` is a DMA buffer of size >=
+                // `resp_size` >= `size_of::<u32>()`. The device wrote the
+                // response type at offset 0. `read_volatile` is used
+                // because the buffer was just written by the device via
+                // DMA (memory may be WC — volatile ensures the read is
+                // not optimized away).
                 let resp_type = unsafe {
                     core::ptr::read_volatile(resp_region.virt as *const u32)
                 };
 
                 // Verify fence echo if fenced.
                 if let Some(expected_fid) = fence_id {
+                    // SAFETY: `resp_region.virt + 8` is within the DMA
+                    // buffer (size >= `size_of::<CtrlHdr>()` = 24 bytes,
+                    // and offset 8 is the `fence_id` field). `read_volatile`
+                    // for the same DMA reason as above.
                     let resp_fid = unsafe {
                         core::ptr::read_volatile(
                             (resp_region.virt + 8) as *const u64,
@@ -367,6 +405,14 @@ impl GpuDriver {
             entry_regions.push(self.pool.alloc(core::mem::size_of::<protocol::MemEntry>(), 4)?);
         }
 
+        // SAFETY: All three copies write to DMA regions allocated by
+        // `pool.alloc` with 4-byte alignment and sizes matching the
+        // source types. `cmd_region` holds exactly
+        // `size_of::<ResourceAttachBacking>()` bytes; each `entry_regions[i]`
+        // holds `size_of::<MemEntry>()` bytes. The `resp_region` zero-fill
+        // covers `size_of::<CtrlHdr>()` bytes. Source pointers are stack
+        // locals (`&cmd`, `entry`) — properly aligned, non-overlapping
+        // with DMA destinations.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 cmd as *const protocol::ResourceAttachBacking as *const u8,
@@ -434,6 +480,9 @@ impl GpuDriver {
         let mut spins = 0u32;
         loop {
             if let Some((_cookie, _len)) = self.vq_control.pop_used() {
+                // SAFETY: `resp_region.virt` is a DMA buffer of size >=
+                // `size_of::<CtrlHdr>()` >= 4. `read_volatile` because the
+                // device wrote via DMA.
                 let resp_type = unsafe {
                     core::ptr::read_volatile(resp_region.virt as *const u32)
                 };
@@ -467,6 +516,12 @@ impl GpuDriver {
         let cmd_region = self.pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
         let resp_region = self.pool.alloc(resp_size, 8)?;
 
+        // SAFETY: `cmd_region` is a DMA buffer of size >=
+        // `size_of::<CtrlHdr>()`, 4-byte aligned. `resp_region` is size
+        // >= `resp_size`, 8-byte aligned (RespDisplayInfo may need it for
+        // the pmodes array). `copy_nonoverlapping` from a stack local
+        // (`&cmd`) to DMA — non-overlapping. `write_bytes` zeroes the
+        // response buffer before the device writes into it.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 &cmd as *const protocol::CtrlHdr as *const u8,
@@ -498,6 +553,11 @@ impl GpuDriver {
         let mut spins = 0u32;
         loop {
             if let Some((_cookie, _len)) = self.vq_control.pop_used() {
+                // SAFETY: `resp_region` is a DMA buffer of size >=
+                // `resp_size` = `size_of::<RespDisplayInfo>()`, 8-byte
+                // aligned (allocated with align=8 above). `read_volatile`
+                // because the device wrote via DMA. The full struct is
+                // within bounds because `pool.alloc` guaranteed the size.
                 let resp: protocol::RespDisplayInfo = unsafe {
                     core::ptr::read_volatile(resp_region.virt as *const protocol::RespDisplayInfo)
                 };
@@ -564,6 +624,12 @@ impl GpuDriver {
             height,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: `&cmd` is a properly-aligned stack local. Casting
+            // from `*const ResourceCreate2d` to `*const u8` is sound
+            // because the struct is `#[repr(C)]` and the slice length
+            // equals `size_of::<ResourceCreate2d>()`. The slice is
+            // immediately passed to `submit_command` which copies it to
+            // DMA — no alignment issue on the u8 view.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::ResourceCreate2d as *const u8,
                 core::mem::size_of::<protocol::ResourceCreate2d>(),
@@ -630,6 +696,9 @@ impl GpuDriver {
             padding: 0,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: Same pattern as `create_2d` — `&cmd` is an aligned
+            // stack local, `#[repr(C)]` struct, slice length =
+            // `size_of::<ResourceDetachBacking>()`.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::ResourceDetachBacking as *const u8,
                 core::mem::size_of::<protocol::ResourceDetachBacking>(),
@@ -674,6 +743,8 @@ impl GpuDriver {
             resource_id,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: Same `from_raw_parts` pattern — `&cmd` is an aligned
+            // `#[repr(C)]` stack local; slice length = `size_of::<SetScanout>()`.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::SetScanout as *const u8,
                 core::mem::size_of::<protocol::SetScanout>(),
@@ -721,6 +792,8 @@ impl GpuDriver {
             padding: 0,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: Same pattern — aligned `#[repr(C)]` stack local,
+            // slice length = `size_of::<TransferToHost2d>()`.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::TransferToHost2d as *const u8,
                 core::mem::size_of::<protocol::TransferToHost2d>(),
@@ -766,6 +839,8 @@ impl GpuDriver {
             padding: 0,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: Same pattern — aligned `#[repr(C)]` stack local,
+            // slice length = `size_of::<ResourceFlush>()`.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::ResourceFlush as *const u8,
                 core::mem::size_of::<protocol::ResourceFlush>(),
@@ -799,6 +874,8 @@ impl GpuDriver {
             padding: 0,
         };
         let cmd_bytes = unsafe {
+            // SAFETY: Same pattern — aligned `#[repr(C)]` stack local,
+            // slice length = `size_of::<ResourceUnref>()`.
             core::slice::from_raw_parts(
                 &cmd as *const protocol::ResourceUnref as *const u8,
                 core::mem::size_of::<protocol::ResourceUnref>(),
@@ -874,6 +951,14 @@ impl GpuDriver {
 
         // 6. Write test pattern — vertical gradient.
         let fb_ptr = backing.virt as *mut u32;
+        // SAFETY: `backing` is a contiguous DMA region of
+        // `fb_pages * 4096` bytes = `fb_bytes` rounded up, where
+        // `fb_bytes = width * height * 4`. The write index
+        // `y * width + x` is bounded by `y < height` and `x < width`,
+        // so the max index is `(height-1) * width + (width-1)` =
+        // `width * height - 1`, which is within the allocation.
+        // `fb_ptr` is 4-byte aligned (DMA pool allocations are
+        // page-aligned).
         for y in 0..height as usize {
             // Linear interpolation between top and bottom colors.
             let t = y as u32 * 256 / height.max(1) as u32;

@@ -18,7 +18,7 @@ use cluu_wire::display::{DamageList, OutputInfo, PixelFormat, Rect};
 use displayd::backend::Backend;
 use displayd::surface::Surface;
 
-use libcluu::posix::{_close, _open, _read, c_void, mmap, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE};
+use libcluu::posix::{_close, _open, _read, c_void, mmap, munmap, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE};
 
 /// 40-byte geometry header at the start of /dev/fb0.
 const FB_HEADER_MAGIC: u32 = 0x4642_4630; // "FB0\0"
@@ -106,6 +106,10 @@ pub struct LinearFbBackend {
     info: OutputInfo,
     fb_ptr: *mut u32,
     fb_len: usize,
+    /// Original mmap size in bytes (from FramebufferMapping.size).
+    /// Retained for RAII unmap in `Drop`. May be larger than
+    /// `fb_len * 4` because the hardware FB can be pitch-padded.
+    fb_size_bytes: usize,
     compose_buffer: Vec<u32>,
 }
 
@@ -122,6 +126,7 @@ impl LinearFbBackend {
             },
             fb_ptr: fb.ptr,
             fb_len: buf_len,
+            fb_size_bytes: fb.size,
             compose_buffer: vec![0u32; buf_len],
         }
     }
@@ -154,6 +159,16 @@ impl LinearFbBackend {
             if off + copy_w > self.compose_buffer.len() {
                 break;
             }
+            // SAFETY: Both source and destination are valid for `copy_w` u32s:
+            // - `off + copy_w <= self.fb_len` (checked above) guarantees the
+            //   FB write stays within the mmap'd region.
+            // - `off + copy_w <= self.compose_buffer.len()` (checked above)
+            //   guarantees the source read stays within the Vec backing.
+            // - Source and dest do not overlap (compose_buffer is a Vec,
+            //   fb_ptr is an mmap'd region — disjoint allocations).
+            // - Both pointers are 4-byte aligned (fb_ptr came from mmap of
+            //   a page-aligned region; compose_buffer.as_ptr() is aligned to
+            //   u32 by Rust's allocator).
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     self.compose_buffer.as_ptr().add(off),
@@ -187,5 +202,18 @@ impl Backend for LinearFbBackend {
     fn try_direct_scanout(&mut self, _surface: &Surface) -> bool {
         // Linear FB has no direct-scanout path — always composite.
         false
+    }
+}
+
+impl Drop for LinearFbBackend {
+    fn drop(&mut self) {
+        // RAII unmap: release the WC-mapped framebuffer back to the kernel.
+        // Best-effort — a failure here is logged via the return value being
+        // ignored, matching the mmap error-handling convention in
+        // `map_framebuffer`. A null `fb_ptr` (e.g. if `new` was never called
+        // or mapping failed) is a no-op: `munmap` returns -1 for null.
+        if !self.fb_ptr.is_null() && self.fb_size_bytes > 0 {
+            let _ = munmap(self.fb_ptr as *mut c_void, self.fb_size_bytes);
+        }
     }
 }

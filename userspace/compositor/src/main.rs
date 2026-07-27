@@ -570,7 +570,16 @@ fn reply_postcard<R: serde::Serialize>(
     label: u32,
     value: &R,
 ) {
-    let bytes = postcard::to_allocvec(value).expect("ser");
+    let bytes = match postcard::to_allocvec(value) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = debug_print(&alloc::format!(
+                "compositor: reply_postcard serialize failed: {:?}\n",
+                e
+            ));
+            return;
+        }
+    };
     let reply_msg = Message::new(label, [bytes.len(), ABI_VERSION as usize, 0, 0, 0, 0], 2);
     let reply_token = extract_reply_id(msg).unwrap_or(0);
     let _ = reply_with_payload(reply_token, &reply_msg, &bytes);

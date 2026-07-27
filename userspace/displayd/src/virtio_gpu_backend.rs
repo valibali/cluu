@@ -6,6 +6,26 @@
 //! commands for dirty rects only — never the full screen unless the
 //! damage covers it.
 //!
+//! # Synchronous IPC (AGENTS.md §7)
+//!
+//! This backend uses synchronous `ipc_call_timeout` for construction,
+//! flush, event polling, and `Drop` cleanup. This is acceptable and NOT
+//! a deadlock risk because:
+//!
+//! 1. **gpudev is a leaf driver.** It has no downstream IPC dependencies —
+//!    it talks only to hardware (virtio-gpu PCI device via DMA + IRQ).
+//!    Unlike the VFS→procmgr chain, there is no mutual-blocking IPC cycle.
+//! 2. **All IPC calls have timeouts.** The probe uses 500 ms; per-operation
+//!    commands use 2000 ms. A hung driver times out and displayd falls
+//!    back to linear-fb (selection is runtime per T12).
+//! 3. **gpudev never calls displayd.** The dependency graph is one-way:
+//!    displayd → gpudev → hardware. There is no reverse edge that could
+//!    form a cycle.
+//! 4. **displayd's main loop is single-threaded but gpudev is not in the
+//!    loop's wait set.** The loop blocks on `ipc_recv_any` for client
+//!    messages; blocking on gpudev during a flush is a separate, bounded
+//!    wait that cannot deadlock the loop.
+//!
 //! # Selection (T12)
 //!
 //! `new()` looks up `gpudev:main` in the registry and probes it with a
@@ -137,6 +157,13 @@ impl VirtioGpuBackend {
     /// 5. Set scanout to bind the resource.
     ///
     /// Returns `Err` if any step fails — caller falls back to LinearFbBackend.
+    ///
+    /// # Synchronous IPC safety (AGENTS.md §7)
+    ///
+    /// The IPC calls here are synchronous and blocking, but safe because
+    /// gpudev is a leaf driver with no downstream IPC dependencies (see the
+    /// module-level `# Synchronous IPC` section). All calls have timeouts;
+    /// a hung driver returns `Err` and the caller falls back to linear-fb.
     pub fn new() -> Result<Self, &'static str> {
         let driver_endpoint = match registry::lookup_cached("gpudev:main") {
             Some(ep) => ep,
@@ -193,6 +220,13 @@ impl VirtioGpuBackend {
     }
 
     /// Create the 2D resource, attach backing, and set scanout.
+    ///
+    /// # Synchronous IPC safety (AGENTS.md §7)
+    ///
+    /// Each `ipc_call_timeout` here blocks displayd, but cannot deadlock:
+    /// gpudev is a leaf driver (no downstream IPC), and each call has a
+    /// 2000 ms timeout (`CMD_TIMEOUT_MS`). A hung driver returns `Err`,
+    /// propagating to `new()` which falls back to linear-fb.
     fn init_resource(&mut self) -> Result<(), &'static str> {
         // CREATE_2D
         let req = Message::new(
@@ -274,6 +308,13 @@ impl VirtioGpuBackend {
     /// Poll the driver for display events. If the driver reports a mode
     /// change, re-query GET_DISPLAY_INFO and update the output info.
     /// Best-effort: errors are silently ignored.
+    ///
+    /// # Synchronous IPC safety (AGENTS.md §7)
+    ///
+    /// The poll uses `ipc_call_timeout` with `CMD_TIMEOUT_MS`. This is a
+    /// bounded, one-way query to a leaf driver — no deadlock risk. The
+    /// caller (main loop) treats errors as "no event", so a timeout is
+    /// benign. See the module-level `# Synchronous IPC` section.
     #[allow(dead_code)]
     pub fn poll_display_event(&mut self) {
         let req = Message::new(GPU_POLL_EVENT, [0, 0, 0, 0, 0, 0], 0);
@@ -337,6 +378,13 @@ impl VirtioGpuBackend {
     }
 
     /// Send a transfer+flush IPC for a single dirty rect.
+    ///
+    /// # Synchronous IPC safety (AGENTS.md §7)
+    ///
+    /// Blocks on gpudev with a 2000 ms timeout. gpudev is a leaf driver
+    /// (no downstream IPC), so this cannot form a deadlock cycle. The
+    /// result is discarded — a failed flush is non-fatal; the next flush
+    /// retries.
     fn transfer_flush_rect(&self, rect: Rect) {
         let req = Message::new(
             GPU_TRANSFER_FLUSH,
@@ -436,6 +484,12 @@ impl Backend for VirtioGpuBackend {
 impl Drop for VirtioGpuBackend {
     fn drop(&mut self) {
         // Best-effort cleanup: unref the resource.
+        //
+        // # Synchronous IPC safety (AGENTS.md §7)
+        //
+        // The Drop IPC call has a 2000 ms timeout. gpudev is a leaf driver
+        // with no downstream IPC, so this cannot deadlock. The result is
+        // discarded — cleanup is best-effort and a timeout is non-fatal.
         let req = Message::new(
             GPU_UNREF_RESOURCE,
             [self.resource_id as usize, 0, 0, 0, 0, 0],

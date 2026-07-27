@@ -135,6 +135,19 @@ fn run() -> Result<()> {
     debug_print("AUDIOD_READY")?;
 
     // ── Main loop ────────────────────────────────────────────────────────
+    //
+    // # Periodic wakeup (AGENTS.md §7)
+    //
+    // The 10 ms recv timeout is NOT polling — it is the audio period.
+    // audiod is a mixer service that MUST wake periodically to mix active
+    // streams and submit PCM periods to virtio-snd. Audio has real-time
+    // requirements: periodic wakeup is the standard ALSA/JACK/PulseAudio
+    // pattern. The timeout drives `mix_and_submit` on each wake.
+    //
+    // This is NOT a deadlock risk because audiod has no downstream IPC
+    // dependencies — it talks only to virtio-snd (a leaf driver with no
+    // downstream IPC) via the `AudioSessionClient`. There is no
+    // mutual-blocking IPC cycle.
     let registry_ep = registry::control_endpoint();
     let mut buf = [0u8; 256];
     loop {
@@ -152,6 +165,12 @@ fn run() -> Result<()> {
         if idx == 1 {
             // Registry control message.
             if len >= core::mem::size_of::<Message>() {
+                // SAFETY: `buf` is a stack-local `[u8; 256]` which is
+                // naturally aligned to at least 8 bytes on x86_64 (stack
+                // alignment), satisfying `Message`'s alignment. The length
+                // check `len >= size_of::<Message>()` ensures the cast
+                // reads only within the received bytes. The payload slice
+                // below is bounded by `len`, so it also stays in bounds.
                 let msg = unsafe { &*(buf.as_ptr() as *const Message) };
                 let payload = &buf[core::mem::size_of::<Message>()..len];
                 let _ = registry::handle_incoming_message(msg, payload);
@@ -165,6 +184,9 @@ fn run() -> Result<()> {
         if len < core::mem::size_of::<Message>() {
             continue;
         }
+        // SAFETY: Same argument as the registry branch above — `buf` is a
+        // stack-local `[u8; 256]` with sufficient natural alignment for
+        // `Message`, and `len >= size_of::<Message>()` was just checked.
         let msg = unsafe { &*(buf.as_ptr() as *const Message) };
         audiod.handle_message(msg);
         audiod.drain_completions();

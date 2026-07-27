@@ -85,6 +85,14 @@ impl<'a> FrameRing<'a> {
         assert!(capacity >= MIN_CAPACITY);
         let header_bytes = FrameRingHeader::bytes();
         let (header_slice, data_slice) = backing.split_at_mut(header_bytes);
+        // SAFETY: `FrameRingHeader` is `#[repr(C)]` containing only
+        // `AtomicU32` fields (4-byte alignment). The backing buffer in
+        // practice comes from an SHM page or `Vec<u8>`, both of which are
+        // at least 4-byte aligned (SHM pages are page-aligned; Vec<u8>'s
+        // allocation is usize-aligned on x86_64). The `assert!` above
+        // guarantees `backing.len() >= header_bytes + capacity * 4`, so
+        // the header and data regions are within bounds. The borrow
+        // lifetime is tied to `'a` (the backing borrow).
         let header = unsafe {
             &mut *(header_slice.as_mut_ptr() as *mut FrameRingHeader)
         };
@@ -99,6 +107,10 @@ impl<'a> FrameRing<'a> {
         fence(Ordering::Release);
         let data_len = capacity * FRAME_BYTES;
         Self {
+            // SAFETY: `header` was just fully initialised above (all fields
+            // stored). Casting `&mut` to `&` is sound — the shared reference
+            // is valid for `'a`. No mutable aliasing exists because the
+            // `&mut` binding is dropped after this cast.
             header: unsafe { &*(header as *const FrameRingHeader) },
             data: &mut data_slice[..data_len],
             capacity,
@@ -112,6 +124,10 @@ impl<'a> FrameRing<'a> {
         }
         let header_bytes = FrameRingHeader::bytes();
         let (header_slice, data_slice) = backing.split_at_mut(header_bytes);
+        // SAFETY: Same alignment argument as `initialize` — backing is at
+        // least 4-byte aligned (SHM page or Vec<u8>). The length check
+        // above ensures the header fits. The magic check below validates
+        // that the header was previously initialised by `initialize`.
         let header = unsafe {
             &mut *(header_slice.as_mut_ptr() as *mut FrameRingHeader)
         };
@@ -127,6 +143,8 @@ impl<'a> FrameRing<'a> {
             return None;
         }
         Some(Self {
+            // SAFETY: Same as `initialize` — `header` is valid (magic
+            // verified) and the cast from `&mut` to `&` is sound for `'a`.
             header: unsafe { &*(header as *const FrameRingHeader) },
             data: &mut data_slice[..data_len],
             capacity,

@@ -141,6 +141,10 @@ struct TrackedSurface {
 static mut NEXT_TOKEN: u64 = 0xA000_0000_0000_0001;
 
 fn mint_token() -> u64 {
+    // SAFETY: `NEXT_TOKEN` is a `static mut` accessed only from displayd's
+    // single main thread. displayd is single-threaded (no `spawn`, no extra
+    // threads — the main loop is `ipc_recv_any` → `handle_message`), so
+    // there is no concurrent access. `wrapping_add` prevents overflow panic.
     unsafe {
         let t = NEXT_TOKEN;
         NEXT_TOKEN = NEXT_TOKEN.wrapping_add(1);
@@ -546,6 +550,15 @@ fn handle_message(
                     ).is_ok();
                     if mapped {
                         let src_len = (dr.w as usize) * (dr.h as usize);
+                        // SAFETY: `scratch_va` was just mapped by
+                        // `space_map_range` with `pages` pages (each 4 KiB),
+                        // and `src_len = dr.w * dr.h` u32s = `src_len * 4`
+                        // bytes. The bounds check below ensures
+                        // `src_off + copy_len <= src.len()` before any read.
+                        // The mapping is unmap'd after the copy, but `src`
+                        // is only used within this block. Alignment: the
+                        // kernel maps pages page-aligned (4 KiB), which
+                        // satisfies u32's 4-byte alignment.
                         let src = unsafe {
                             core::slice::from_raw_parts(
                                 scratch_va as *const u32,

@@ -53,6 +53,16 @@ impl Compositor {
             for row in 0..max_rows {
                 let dst_off = (screen_y + row) * pitch_words + screen_x;
                 let src_off = row * pw;
+                // SAFETY: `pixels_ptr` is the SHM mapping base (NonNull,
+                // validated by `ShmMapping::new`). `src_off = row * pw`
+                // with `row < max_rows <= ph`, so `src_off + max_cols <=
+                // ph * pw` — within the source region. `dst_off` is
+                // bounded by `screen_y + max_rows <= height_px` and
+                // `screen_x + max_cols <= width_px` (both computed via
+                // `.min()` above), so the destination is within
+                // `backbuf`. Source (SHM) and dest (backbuf Vec) are
+                // disjoint allocations. Both are u32-aligned (SHM is
+                // page-aligned; Vec<u32> is u32-aligned).
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         pixels_ptr.add(src_off),
@@ -132,6 +142,12 @@ impl Compositor {
         // COM2.  The compositor is single-threaded so these static muts are
         // safe (no concurrent access).
         #[allow(static_mut_refs)]
+        // SAFETY: The compositor is single-threaded — the main loop is
+        // `ipc_recv_any` → `handle_message` → `tick_frame`, with no
+        // `spawn` or extra threads. `FRAME_COUNT` and `FRAME_START_TSC`
+        // are only accessed here, so there is no data race. The
+        // `static_mut_refs` lint is allowed because this is a known
+        // single-threaded context.
         unsafe {
             static mut FRAME_COUNT: u32 = 0;
             static mut FRAME_START_TSC: u64 = 0;
@@ -305,6 +321,14 @@ impl Compositor {
             let py = y as usize + row;
             let src_off = py * pitch_words + x as usize;
             let dst_off = row * w as usize;
+            // SAFETY: `src_off` is within `backbuf` because
+            // `py < height_px` (bounded by `h <= height_px`) and
+            // `x + w <= width_px` (clipped above), so
+            // `src_off + w <= height_px * pitch_words`. `dst_off` is
+            // within the frame mapping because `region_pixels =
+            // w * h <= frame_max_pixels` (checked above). Source
+            // (backbuf Vec) and dest (frame mapping at `backbuf_va`)
+            // are disjoint. Both are u32-aligned.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     self.backbuf.as_ptr().add(src_off),
@@ -341,6 +365,10 @@ impl Compositor {
 /// Read the CPU's time-stamp counter. Used only for the bench one-shot.
 #[inline]
 fn read_tsc() -> u64 {
+    // SAFETY: `_rdtsc` is a x86_64 intrinsic that reads the timestamp
+    // counter register. It has no memory safety requirements — it cannot
+    // fault, requires no valid pointers, and touches no memory. The
+    // `unsafe` is required because it's an inline asm intrinsic.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 fn font_glyph_alpha(ch: u8, bold: bool, italic: bool) -> [u8; 128] {
