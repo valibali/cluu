@@ -1,4 +1,15 @@
-//! Audio engine: MP3 decode + virtio-snd playback + PCM tap for visualization.
+//! Audio engine: MP3 decode + audiod stream lifecycle + virtio-snd playback.
+//!
+//! T20 migration: cluuamp talks to audiod for stream lifecycle (open, close,
+//! pause, resume, drain) via the PARAM_AUDIOD_EP / registry-brokered endpoint.
+//! The actual PCM transport still goes through virtio-snd (audiod's mixer path
+//! is stubbed in T17 — same pattern as the SDL2 CLUU audio backend in T18).
+//!
+//! The decoder writes bounded frames into `pcm_s16` (the producer ring),
+//! gated by submit-before-decode so it never exceeds ~1 period + 1 frame.
+//! Playback position uses accepted/played byte counters that increment ONLY
+//! on confirmed virtio-snd completion — padding bytes from partial EOF
+//! periods are excluded via per-slot `actual_bytes` tracking.
 //!
 //! Single-threaded, non-blocking. The event loop calls `tick()` each frame;
 //! tick drains completions (timeout=0), decodes one MP3 frame if the ring
@@ -17,6 +28,7 @@ use libcluu::boot::{process_info, TOKEN_SPACE};
 use libcluu::fs::client::{VfsClient, VfsFile};
 use libcluu::registry;
 use libcluu::syscall::{space_grant, space_map_range};
+use libcluu::types::Message;
 use libcluu::{debug_print, Error, Result};
 
 use crate::mp3_ffi::{self, Decoder};
@@ -28,6 +40,13 @@ const PERIOD_BYTES: usize = 4096;
 const SCRATCH_VA: usize = 0x7000_0000;
 const SCRATCH_PAGES: usize = 24;
 const RING_SLOTS: usize = 8;
+
+/// Audiod IPC labels (matching `audiod/src/session.rs`).
+const AUDIOD_STREAM_OPEN: u32 = 0x700;
+const AUDIOD_STREAM_CLOSE: u32 = 0x701;
+const AUDIOD_STREAM_PAUSE: u32 = 0x702;
+const AUDIOD_STREAM_RESUME: u32 = 0x703;
+const AUDIOD_STREAM_DRAIN: u32 = 0x704;
 const READ_CHUNK: usize = 64 * 1024;
 const DECODE_BATCH: usize = 4;
 const STREAM_BUF_SIZE: usize = 256 * 1024;
@@ -189,6 +208,7 @@ pub struct AudioEngine {
     pcm_mono: Box<[f32]>,
     pcm_scope: Box<[i16]>,
     tap_metadata: Box<[TapMetadata]>,
+    actual_bytes: Box<[usize]>,
     ring_slot: usize,
     ring_inflight: u32,
     state: PlaybackState,
@@ -196,7 +216,6 @@ pub struct AudioEngine {
     balance: i8,
     sample_rate: u32,
     channels: u8,
-    pcm_submitted: u64,
     pcm_played: u64,
     pcm_total_decoded: u64,
     decode_complete: bool,
@@ -206,6 +225,9 @@ pub struct AudioEngine {
     needs_refill: bool,
     needs_advance: bool,
     completion_scratch: Vec<(libcluu::audio_client::PcmHandle, Result<()>)>,
+    audiod_ep: usize,
+    audiod_stream_id: u32,
+    audiod_session_id: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<AudioEngine>() < 16 * 1024);
@@ -237,6 +259,7 @@ impl AudioEngine {
             pcm_mono: vec![0.0; FFT_WINDOW].into_boxed_slice(),
             pcm_scope: vec![0; SCOPE_WINDOW * 2].into_boxed_slice(),
             tap_metadata: vec![TapMetadata::EMPTY; RING_SLOTS].into_boxed_slice(),
+            actual_bytes: vec![0usize; RING_SLOTS].into_boxed_slice(),
             ring_slot: 0,
             ring_inflight: 0,
             state: PlaybackState::Stopped,
@@ -244,7 +267,6 @@ impl AudioEngine {
             balance: 0,
             sample_rate: 44100,
             channels: 2,
-            pcm_submitted: 0,
             pcm_played: 0,
             pcm_total_decoded: 0,
             decode_complete: false,
@@ -254,6 +276,9 @@ impl AudioEngine {
             needs_refill: false,
             needs_advance: false,
             completion_scratch: Vec::new(),
+            audiod_ep: 0,
+            audiod_stream_id: 0,
+            audiod_session_id: 0,
         }
     }
 
@@ -445,6 +470,7 @@ impl AudioEngine {
     pub fn play(&mut self) -> Result<()> {
         if self.state == PlaybackState::Paused {
             self.state = PlaybackState::Playing;
+            self.send_audiod_resume();
             return Ok(());
         }
         if self.state == PlaybackState::Stopped {
@@ -454,22 +480,28 @@ impl AudioEngine {
             self.load_current()?;
         }
         self.state = PlaybackState::Playing;
+        let _ = debug_print("CLUUAMP_SOLO_OK\n");
         Ok(())
     }
 
     pub fn pause(&mut self) {
         if self.state == PlaybackState::Playing {
             self.state = PlaybackState::Paused;
+            self.send_audiod_pause();
         } else if self.state == PlaybackState::Paused {
             self.state = PlaybackState::Playing;
+            self.send_audiod_resume();
         }
     }
 
     pub fn stop(&mut self) {
+        if self.state != PlaybackState::Stopped {
+            self.send_audiod_drain();
+        }
         self.state = PlaybackState::Stopped;
         self.stream_consumed = 0;
         self.pcm_s16.clear();
-        self.pcm_submitted = 0;
+        self.pcm_played = 0;
         self.decoder = Decoder::new();
     }
 
@@ -511,6 +543,11 @@ impl AudioEngine {
     }
 
     fn close_audio(&mut self) {
+        if self.audiod_stream_id != 0 {
+            self.send_audiod_close();
+            self.audiod_stream_id = 0;
+            self.audiod_session_id = 0;
+        }
         if let Some(file) = self.vfs_file.take() {
             let vfs_ep = registry::subscribe_output("vfs", "main").ok();
             if let Some(ep) = vfs_ep {
@@ -525,13 +562,13 @@ impl AudioEngine {
         self.stream_file_offset = 0;
         self.file_size = 0;
         self.pcm_s16.clear();
-        self.pcm_submitted = 0;
         self.pcm_played = 0;
         self.pcm_total_decoded = 0;
         self.decode_complete = false;
         self.ring_slot = 0;
         self.ring_inflight = 0;
         self.tap_metadata.fill(TapMetadata::EMPTY);
+        self.actual_bytes.fill(0);
         self.file_loaded = false;
     }
 
@@ -588,6 +625,8 @@ impl AudioEngine {
         self.audio = Some(audio);
         self.decoder = Decoder::new();
         self.file_loaded = true;
+
+        self.open_audiod_stream();
 
         let meta = id3::parse(&self.stream_buf);
         if !meta.is_empty() {
@@ -754,10 +793,12 @@ impl AudioEngine {
         audio.drain_completions_into(&mut self.completion_scratch);
         for (handle, result) in self.completion_scratch.drain(..) {
             self.ring_inflight = self.ring_inflight.saturating_sub(1);
-            self.pcm_played += PERIOD_BYTES as u64;
             if let Some(slot) = metadata_slot_for_handle(&self.tap_metadata, handle) {
                 let metadata = self.tap_metadata[slot];
+                let actual = self.actual_bytes[slot];
                 self.tap_metadata[slot] = TapMetadata::EMPTY;
+                self.actual_bytes[slot] = 0;
+                self.pcm_played += actual as u64;
                 if result.is_ok() {
                     self.pcm_mono.copy_from_slice(&metadata.mono);
                     self.pcm_scope.copy_from_slice(&metadata.scope);
@@ -814,10 +855,10 @@ impl AudioEngine {
             handle: Some(handle),
             ..metadata
         };
+        self.actual_bytes[slot] = to_copy;
         self.pcm_s16.drain(..to_copy);
         self.ring_slot = (self.ring_slot + 1) % RING_SLOTS;
         self.ring_inflight += 1;
-        self.pcm_submitted += PERIOD_BYTES as u64;
         Ok(())
     }
 
@@ -836,5 +877,95 @@ impl AudioEngine {
             self.state = PlaybackState::Stopped;
         }
         Ok(())
+    }
+
+    fn open_audiod_stream(&mut self) {
+        let ep = match registry::subscribe_output("audiod", "main") {
+            Ok(ep) => ep,
+            Err(_) => {
+                let _ = debug_print("cluuamp: audiod not available — direct virtio-snd mode\n");
+                return;
+            }
+        };
+        self.audiod_ep = ep;
+
+        let req = Message::new(
+            AUDIOD_STREAM_OPEN,
+            [0, self.sample_rate as usize, self.channels as usize, 0, 0, 0],
+            3,
+        );
+        let mut reply_buf = [0u8; 64];
+        let bytes = match libcluu::syscall::ipc_call(ep, req.as_bytes(), &mut reply_buf) {
+            Ok(n) => n,
+            Err(_) => {
+                self.audiod_ep = 0;
+                return;
+            }
+        };
+        let (rmsg, _) = match libcluu::ipc::parse_message(&reply_buf[..bytes]) {
+            Some(parsed) => parsed,
+            None => {
+                self.audiod_ep = 0;
+                return;
+            }
+        };
+        if rmsg.tag.label != AUDIOD_STREAM_OPEN || rmsg.words[0] != 0 {
+            self.audiod_ep = 0;
+            return;
+        }
+        self.audiod_stream_id = rmsg.words[1] as u32;
+        self.audiod_session_id = rmsg.words[2] as u32;
+        let _ = debug_print(&format!(
+            "cluuamp: audiod stream open id={} session={}\n",
+            self.audiod_stream_id, self.audiod_session_id & 0xFF
+        ));
+    }
+
+    fn send_audiod_close(&mut self) {
+        if self.audiod_ep == 0 || self.audiod_stream_id == 0 {
+            return;
+        }
+        let msg = Message::new(
+            AUDIOD_STREAM_CLOSE,
+            [self.audiod_session_id as usize, self.audiod_stream_id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::syscall::ipc_send(self.audiod_ep, msg.as_bytes());
+    }
+
+    fn send_audiod_pause(&mut self) {
+        if self.audiod_ep == 0 || self.audiod_stream_id == 0 {
+            return;
+        }
+        let msg = Message::new(
+            AUDIOD_STREAM_PAUSE,
+            [self.audiod_session_id as usize, self.audiod_stream_id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::syscall::ipc_send(self.audiod_ep, msg.as_bytes());
+    }
+
+    fn send_audiod_resume(&mut self) {
+        if self.audiod_ep == 0 || self.audiod_stream_id == 0 {
+            return;
+        }
+        let msg = Message::new(
+            AUDIOD_STREAM_RESUME,
+            [self.audiod_session_id as usize, self.audiod_stream_id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::syscall::ipc_send(self.audiod_ep, msg.as_bytes());
+    }
+
+    fn send_audiod_drain(&mut self) {
+        if self.audiod_ep == 0 || self.audiod_stream_id == 0 {
+            return;
+        }
+        let msg = Message::new(
+            AUDIOD_STREAM_DRAIN,
+            [self.audiod_session_id as usize, self.audiod_stream_id as usize, 0, 0, 0, 0],
+            2,
+        );
+        let _ = libcluu::syscall::ipc_send(self.audiod_ep, msg.as_bytes());
     }
 }
