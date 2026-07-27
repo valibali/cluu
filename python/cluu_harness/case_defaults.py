@@ -526,16 +526,9 @@ _DEFAULTS: dict[str, CaseDefaults] = {
         test_command="",
         run_wait_s=45,
     ),
-    "l2_audio_play": CaseDefaults(
-        test_command="mp3player /host/winamp.mp3",
-        sendkey_sequence=_creds_no_sleep(),
-        sendkey_sequence_nowait=True,
-        run_wait_s=120,
-        pre_sendkey_wait_marker="login: window registered",
-    ),
     "l2_cluuamp": CaseDefaults(
         test_command="cluuamp /host/winamp.mp3",
-        sendkey_sequence=_creds_no_sleep(),
+        sendkey_sequence=_creds_slow(),
         sendkey_sequence_nowait=True,
         run_wait_s=90,
         pre_sendkey_wait_marker="login: window registered",

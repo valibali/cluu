@@ -64,6 +64,11 @@ pub mod layout {
     /// per-service buffers without risking PML4 entry collisions.
     pub const USER_GRANT_TOP: u64 = 0x1_0000_0000;
 
+    /// Base VA for kernel-managed SHM mappings (SpaceMapAuto).
+    /// Above the stack, below USER_GRANT_TOP — 2 GB of SHM space.
+    pub const SHM_BASE: u64 = 0x8000_0000;
+    pub const SHM_END: u64 = USER_GRANT_TOP;
+
     // Physmap base (direct map of physical memory)
     pub const PHYS_MAP_BASE: u64 = 0xffff_8000_0000_0000;
 
@@ -263,6 +268,9 @@ pub struct AddressSpace {
     /// of .data). Set via `invoke_space_protect` with
     /// `PROTECT_INSTALL_DEMAND_ZERO`.
     pub bss: MemoryRegion,
+
+    /// Bump pointer for SpaceMapAuto; starts at SHM_BASE, per address space.
+    pub shm_next_va: u64,
 }
 
 impl AddressSpace {
@@ -295,6 +303,7 @@ impl AddressSpace {
             aslr_stack_guard_end: layout::USER_STACK_BOTTOM + 0x1000,
             text_source: None,
             bss: null_region,
+            shm_next_va: layout::SHM_BASE,
         }
     }
 

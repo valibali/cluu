@@ -1,20 +1,19 @@
-//! Audio engine: MP3 decode + audiod stream lifecycle + virtio-snd playback.
+//! Audio engine: MP3 decode + audiod SHM ring playback.
 //!
-//! T20 migration: cluuamp talks to audiod for stream lifecycle (open, close,
-//! pause, resume, drain) via the PARAM_AUDIOD_EP / registry-brokered endpoint.
-//! The actual PCM transport still goes through virtio-snd (audiod's mixer path
-//! is stubbed in T17 — same pattern as the SDL2 CLUU audio backend in T18).
+//! cluuamp is an audiod client. It opens a stream with audiod, receives a
+//! frame token for a SHM SPSC ring, maps the ring, and pushes decoded PCM
+//! frames to it. audiod mixes all client streams and submits to virtio-snd.
 //!
 //! The decoder writes bounded frames into `pcm_s16` (the producer ring),
 //! gated by submit-before-decode so it never exceeds ~1 period + 1 frame.
-//! Playback position uses accepted/played byte counters that increment ONLY
-//! on confirmed virtio-snd completion — padding bytes from partial EOF
-//! periods are excluded via per-slot `actual_bytes` tracking.
+//! Playback position uses the ring's `total_read` counter (frames consumed
+//! by audiod) — padding bytes from partial EOF periods are excluded via
+//! per-period byte tracking.
 //!
 //! Single-threaded, non-blocking. The event loop calls `tick()` each frame;
-//! tick drains completions (timeout=0), decodes one MP3 frame if the ring
+//! tick drains ring progress (timeout=0), decodes one MP3 frame if the ring
 //! has space, and submits PCM periods. Volume/balance applied as PCM scaling
-//! before submit (virtio-snd has no mixer).
+//! before push (audiod applies per-stream gain at mix time).
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -23,13 +22,14 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use libcluu::audio_client::{hz_to_rate, AudioSessionClient, PcmHandle, PcmParams, PCM_FMT_S16};
 use libcluu::boot::{process_info, TOKEN_SPACE};
 use libcluu::fs::client::{VfsClient, VfsFile};
 use libcluu::registry;
-use libcluu::syscall::{space_grant, space_map_range};
+use libcluu::syscall::{space_map_auto, space_map_range, space_unmap, MAP_FRAME_TOKEN};
 use libcluu::types::Message;
 use libcluu::{debug_print, Error, Result};
+
+use audiod::ring::FrameRing;
 
 use crate::mp3_ffi::{self, Decoder};
 use crate::equalizer::Equalizer;
@@ -38,8 +38,11 @@ use crate::id3::{self, TrackMeta};
 
 const PERIOD_BYTES: usize = 4096;
 const SCRATCH_VA: usize = 0x7000_0000;
-const SCRATCH_PAGES: usize = 24;
-const RING_SLOTS: usize = 8;
+const SCRATCH_PAGES: usize = 16;
+const RING_VA: usize = 0x7100_0000;
+const PAGE_SIZE: usize = 4096;
+const FLAGS_USER_RW: usize = 0x07;
+const FRAME_BYTES: usize = 4;
 
 /// Audiod IPC labels (matching `audiod/src/session.rs`).
 const AUDIOD_STREAM_OPEN: u32 = 0x700;
@@ -47,6 +50,8 @@ const AUDIOD_STREAM_CLOSE: u32 = 0x701;
 const AUDIOD_STREAM_PAUSE: u32 = 0x702;
 const AUDIOD_STREAM_RESUME: u32 = 0x703;
 const AUDIOD_STREAM_DRAIN: u32 = 0x704;
+const AUDOD_QUERY_CAPS: u32 = 0x708;
+const PCM_FMT_S16: u8 = 5;
 const READ_CHUNK: usize = 64 * 1024;
 const DECODE_BATCH: usize = 4;
 const STREAM_BUF_SIZE: usize = 256 * 1024;
@@ -57,7 +62,6 @@ const SCOPE_WINDOW: usize = 576;
 
 #[derive(Clone, Copy)]
 struct TapMetadata {
-    handle: Option<PcmHandle>,
     mono: [f32; FFT_WINDOW],
     scope: [i16; SCOPE_WINDOW * 2],
     mono_len: usize,
@@ -66,7 +70,6 @@ struct TapMetadata {
 
 impl TapMetadata {
     const EMPTY: Self = Self {
-        handle: None,
         mono: [0.0; FFT_WINDOW],
         scope: [0; SCOPE_WINDOW * 2],
         mono_len: 0,
@@ -85,17 +88,9 @@ const fn submission_target(sample_rate: u32, channels: u8) -> usize {
     let target = periods_for_13ms as usize + 1;
     if target < 2 {
         2
-    } else if target > RING_SLOTS {
-        RING_SLOTS
     } else {
         target
     }
-}
-
-fn metadata_slot_for_handle(metadata: &[TapMetadata], handle: PcmHandle) -> Option<usize> {
-    metadata
-        .iter()
-        .position(|entry| entry.handle == Some(handle))
 }
 
 fn tap_metadata(pcm: &[u8], byte_count: usize, channels: u8) -> TapMetadata {
@@ -126,10 +121,8 @@ fn tap_metadata(pcm: &[u8], byte_count: usize, channels: u8) -> TapMetadata {
 #[cfg(test)]
 mod tests {
     use super::{
-        metadata_slot_for_handle, submission_target, tap_metadata, TapMetadata, FFT_WINDOW,
-        RING_SLOTS, SCOPE_WINDOW,
+        submission_target, tap_metadata, TapMetadata, FFT_WINDOW, SCOPE_WINDOW,
     };
-    use libcluu::audio_client::PcmHandle;
 
     #[test]
     fn submission_target_keeps_low_rate_stereo_at_two_periods() {
@@ -140,17 +133,6 @@ mod tests {
     #[test]
     fn submission_target_uses_three_periods_for_96khz_stereo() {
         assert_eq!(submission_target(96000, 2), 3);
-    }
-
-    #[test]
-    fn metadata_lookup_matches_completed_handles_out_of_order() {
-        let mut metadata = [TapMetadata::EMPTY; RING_SLOTS];
-        metadata[1].handle = Some(PcmHandle(11));
-        metadata[6].handle = Some(PcmHandle(22));
-
-        assert_eq!(metadata_slot_for_handle(&metadata, PcmHandle(22)), Some(6));
-        assert_eq!(metadata_slot_for_handle(&metadata, PcmHandle(11)), Some(1));
-        assert_eq!(metadata_slot_for_handle(&metadata, PcmHandle(33)), None);
     }
 
     #[test]
@@ -193,7 +175,12 @@ pub struct AudioEngine {
     current_index: usize,
     track_metas: Vec<Option<TrackMeta>>,
     decoder: Decoder,
-    audio: Option<AudioSessionClient>,
+    ring_va: usize,
+    ring_bytes: usize,
+    ring_total_read_last: u64,
+    pending_metadata: TapMetadata,
+    gain_scratch: Box<[u8]>,
+    frame_buf: Box<[[i16; 2]]>,
     vfs_file: Option<VfsFile>,
     stream_buf: Vec<u8>,
     stream_consumed: usize,
@@ -207,10 +194,6 @@ pub struct AudioEngine {
     eq_scratch: Box<[u8]>,
     pcm_mono: Box<[f32]>,
     pcm_scope: Box<[i16]>,
-    tap_metadata: Box<[TapMetadata]>,
-    actual_bytes: Box<[usize]>,
-    ring_slot: usize,
-    ring_inflight: u32,
     state: PlaybackState,
     volume: u8,
     balance: i8,
@@ -224,13 +207,45 @@ pub struct AudioEngine {
     bitrate_kbps: u32,
     needs_refill: bool,
     needs_advance: bool,
-    completion_scratch: Vec<(libcluu::audio_client::PcmHandle, Result<()>)>,
     audiod_ep: usize,
     audiod_stream_id: u32,
     audiod_session_id: u32,
+    audiod_period_bytes: usize,
 }
 
 const _: () = assert!(core::mem::size_of::<AudioEngine>() < 16 * 1024);
+
+fn ring_push(ring_va: usize, ring_bytes: usize, frames: &[[i16; 2]]) -> usize {
+    if ring_va == 0 {
+        return 0;
+    }
+    let backing = unsafe { core::slice::from_raw_parts_mut(ring_va as *mut u8, ring_bytes) };
+    FrameRing::attach(backing)
+        .map(|mut r| r.push(frames))
+        .unwrap_or(0)
+}
+
+fn pcm_to_stereo_frames(pcm: &[u8], frame_buf: &mut [[i16; 2]], channels: u8) -> usize {
+    let sample_count = pcm.len() / 2;
+    if channels == 2 {
+        let n_frames = sample_count / 2;
+        for i in 0..n_frames {
+            let offset = i * 4;
+            frame_buf[i][0] = i16::from_le_bytes([pcm[offset], pcm[offset + 1]]);
+            frame_buf[i][1] = i16::from_le_bytes([pcm[offset + 2], pcm[offset + 3]]);
+        }
+        n_frames
+    } else {
+        let n_frames = sample_count;
+        for i in 0..n_frames {
+            let offset = i * 2;
+            let sample = i16::from_le_bytes([pcm[offset], pcm[offset + 1]]);
+            frame_buf[i][0] = sample;
+            frame_buf[i][1] = sample;
+        }
+        n_frames
+    }
+}
 
 impl AudioEngine {
     pub fn new(playlist: Vec<String>) -> Self {
@@ -244,7 +259,12 @@ impl AudioEngine {
                 d.init();
                 d
             },
-            audio: None,
+            ring_va: 0,
+            ring_bytes: 0,
+            ring_total_read_last: 0,
+            pending_metadata: TapMetadata::EMPTY,
+            gain_scratch: vec![0u8; PERIOD_BYTES].into_boxed_slice(),
+            frame_buf: vec![[0i16; 2]; PERIOD_BYTES / 2].into_boxed_slice(),
             vfs_file: None,
             stream_buf: Vec::with_capacity(STREAM_BUF_SIZE),
             stream_consumed: 0,
@@ -258,10 +278,6 @@ impl AudioEngine {
             eq_scratch: vec![0; PERIOD_BYTES].into_boxed_slice(),
             pcm_mono: vec![0.0; FFT_WINDOW].into_boxed_slice(),
             pcm_scope: vec![0; SCOPE_WINDOW * 2].into_boxed_slice(),
-            tap_metadata: vec![TapMetadata::EMPTY; RING_SLOTS].into_boxed_slice(),
-            actual_bytes: vec![0usize; RING_SLOTS].into_boxed_slice(),
-            ring_slot: 0,
-            ring_inflight: 0,
             state: PlaybackState::Stopped,
             volume: 100,
             balance: 0,
@@ -275,10 +291,10 @@ impl AudioEngine {
             bitrate_kbps: 0,
             needs_refill: false,
             needs_advance: false,
-            completion_scratch: Vec::new(),
             audiod_ep: 0,
             audiod_stream_id: 0,
             audiod_session_id: 0,
+            audiod_period_bytes: 0,
         }
     }
 
@@ -547,6 +563,16 @@ impl AudioEngine {
             self.send_audiod_close();
             self.audiod_stream_id = 0;
             self.audiod_session_id = 0;
+            self.audiod_period_bytes = 0;
+        }
+        if self.ring_va != 0 {
+            let info = process_info();
+            let space_token = info.tokens[TOKEN_SPACE];
+            let num_pages = self.ring_bytes / PAGE_SIZE;
+            let _ = space_unmap(space_token, self.ring_va, num_pages);
+            self.ring_va = 0;
+            self.ring_bytes = 0;
+            self.ring_total_read_last = 0;
         }
         if let Some(file) = self.vfs_file.take() {
             let vfs_ep = registry::subscribe_output("vfs", "main").ok();
@@ -556,7 +582,6 @@ impl AudioEngine {
                 let _ = vfs.close(file);
             }
         }
-        self.audio = None;
         self.stream_buf.clear();
         self.stream_consumed = 0;
         self.stream_file_offset = 0;
@@ -565,10 +590,7 @@ impl AudioEngine {
         self.pcm_played = 0;
         self.pcm_total_decoded = 0;
         self.decode_complete = false;
-        self.ring_slot = 0;
-        self.ring_inflight = 0;
-        self.tap_metadata.fill(TapMetadata::EMPTY);
-        self.actual_bytes.fill(0);
+        self.pending_metadata = TapMetadata::EMPTY;
         self.file_loaded = false;
     }
 
@@ -604,29 +626,10 @@ impl AudioEngine {
         self.equalizer
             .configure(self.eq_settings, self.sample_rate, self.channels);
 
-        let snd_ep = registry::subscribe_output("snddev", "main")?;
-        let params = PcmParams {
-            format: PCM_FMT_S16,
-            rate: hz_to_rate(rate),
-            channels,
-        };
-        let audio = AudioSessionClient::open(snd_ep, params)?;
+        self.open_audiod_stream(rate, channels, space_token)?;
 
-        for i in 0..RING_SLOTS {
-            space_grant(
-                space_token,
-                audio.driver_space_token,
-                SCRATCH_VA + i * PERIOD_BYTES,
-                audio.grant_target_va + i * PERIOD_BYTES,
-                0,
-            )?;
-        }
-
-        self.audio = Some(audio);
         self.decoder = Decoder::new();
         self.file_loaded = true;
-
-        self.open_audiod_stream();
 
         let meta = id3::parse(&self.stream_buf);
         if !meta.is_empty() {
@@ -638,7 +641,7 @@ impl AudioEngine {
     }
 
     fn refill_stream(&mut self, vfs: &VfsClient, space_token: usize) -> Result<()> {
-        let vfs_scratch = SCRATCH_VA + RING_SLOTS * PERIOD_BYTES;
+        let vfs_scratch = SCRATCH_VA;
         while self.stream_buf.len() < STREAM_BUF_SIZE && self.stream_file_offset < self.file_size {
             let space = STREAM_BUF_SIZE - self.stream_buf.len();
             let want = if self.file_size - self.stream_file_offset > READ_CHUNK {
@@ -722,7 +725,7 @@ impl AudioEngine {
         if self.state != PlaybackState::Playing {
             return Ok(());
         }
-        if self.audio.is_none() {
+        if self.ring_va == 0 {
             return Ok(());
         }
 
@@ -732,12 +735,13 @@ impl AudioEngine {
             self.needs_refill = true;
         }
 
-        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_inflight < RING_SLOTS as u32 {
+        let period_frames = self.period_frames();
+        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_available_write() >= period_frames {
             self.submit_period()?;
         }
 
         let mut decoded = 0usize;
-        while self.ring_inflight < RING_SLOTS as u32
+        while self.ring_available_write() >= period_frames
             && decoded < DECODE_BATCH
             && self.pcm_s16.len() < PERIOD_BYTES
         {
@@ -751,7 +755,7 @@ impl AudioEngine {
             decoded += 1;
         }
 
-        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_inflight < RING_SLOTS as u32 {
+        while self.pcm_s16.len() >= PERIOD_BYTES && self.ring_available_write() >= period_frames {
             self.submit_period()?;
         }
 
@@ -759,10 +763,12 @@ impl AudioEngine {
         if at_eof {
             self.decode_complete = true;
         }
-        if at_eof && !self.pcm_s16.is_empty() && self.ring_inflight < RING_SLOTS as u32 {
+        if at_eof && !self.pcm_s16.is_empty() && self.ring_available_write() >= period_frames {
             self.submit_period()?;
         }
-        if at_eof && self.pcm_s16.is_empty() && self.ring_inflight == 0 {
+        let consumed = self.ring_total_read_last;
+        let ring_remaining = self.ring_total_written() - consumed;
+        if at_eof && self.pcm_s16.is_empty() && ring_remaining == 0 {
             self.needs_advance = true;
         }
 
@@ -770,7 +776,7 @@ impl AudioEngine {
     }
 
     pub fn ring_saturated(&self) -> bool {
-        self.state == PlaybackState::Playing && self.ring_inflight >= RING_SLOTS as u32
+        self.state == PlaybackState::Playing && self.ring_available_write() < self.period_frames()
     }
 
     pub fn service_pending(&mut self) -> Result<()> {
@@ -786,31 +792,30 @@ impl AudioEngine {
     }
 
     fn drain_completions(&mut self) {
-        let audio = match self.audio.as_mut() {
-            Some(a) => a,
-            None => return,
-        };
-        audio.drain_completions_into(&mut self.completion_scratch);
-        for (handle, result) in self.completion_scratch.drain(..) {
-            self.ring_inflight = self.ring_inflight.saturating_sub(1);
-            if let Some(slot) = metadata_slot_for_handle(&self.tap_metadata, handle) {
-                let metadata = self.tap_metadata[slot];
-                let actual = self.actual_bytes[slot];
-                self.tap_metadata[slot] = TapMetadata::EMPTY;
-                self.actual_bytes[slot] = 0;
-                self.pcm_played += actual as u64;
-                if result.is_ok() {
-                    self.pcm_mono.copy_from_slice(&metadata.mono);
-                    self.pcm_scope.copy_from_slice(&metadata.scope);
-                    self.new_pcm_available = metadata.mono_len > 0 || metadata.scope_len > 0;
-                }
-            }
+        if self.ring_va == 0 {
+            return;
+        }
+        let total_read = self.ring_total_read();
+        if total_read > self.ring_total_read_last {
+            let delta_frames = total_read - self.ring_total_read_last;
+            self.ring_total_read_last = total_read;
+            let bytes_per_frame = 2 * self.channels as u64;
+            self.pcm_played += delta_frames * bytes_per_frame;
+            let metadata = self.pending_metadata;
+            self.pcm_mono.copy_from_slice(&metadata.mono);
+            self.pcm_scope.copy_from_slice(&metadata.scope);
+            self.new_pcm_available = metadata.mono_len > 0 || metadata.scope_len > 0;
         }
     }
 
     fn decode_one_frame(&mut self) -> Result<()> {
         if self.stream_avail() == 0 {
             return Ok(());
+        }
+        const PCM_S16_CAP: usize = PERIOD_BYTES * 2;
+        if self.pcm_s16.len() > PCM_S16_CAP {
+            let excess = self.pcm_s16.len() - PERIOD_BYTES;
+            self.pcm_s16.drain(..excess);
         }
         let (consumed, info) = self
             .decoder
@@ -832,40 +837,35 @@ impl AudioEngine {
     }
 
     fn submit_period(&mut self) -> Result<()> {
-        let slot = self.next_free_slot().ok_or(Error::InvalidState)?;
-        let slot_va = SCRATCH_VA + slot * PERIOD_BYTES;
-        let scratch = unsafe { core::slice::from_raw_parts_mut(slot_va as *mut u8, PERIOD_BYTES) };
+        if self.ring_va == 0 {
+            return Err(Error::InvalidState);
+        }
         let to_copy = self.pcm_s16.len().min(PERIOD_BYTES);
         self.equalizer.process_period(
             &self.pcm_s16[..to_copy],
             &mut self.eq_scratch,
             self.eq_enabled,
         );
-        let metadata = tap_metadata(&self.eq_scratch[..to_copy], to_copy, self.channels);
+        self.pending_metadata = tap_metadata(&self.eq_scratch[..to_copy], to_copy, self.channels);
         apply_period(
             &self.eq_scratch[..to_copy],
-            scratch,
+            &mut self.gain_scratch[..to_copy],
             Gain::new(self.volume, self.balance, self.channels),
         );
-        let handle = match self.audio.as_mut() {
-            Some(audio) => audio.submit_grant(slot, PERIOD_BYTES)?,
-            None => return Err(Error::InvalidState),
-        };
-        self.tap_metadata[slot] = TapMetadata {
-            handle: Some(handle),
-            ..metadata
-        };
-        self.actual_bytes[slot] = to_copy;
+        let n_frames = pcm_to_stereo_frames(
+            &self.gain_scratch[..to_copy],
+            &mut self.frame_buf,
+            self.channels,
+        );
+        let pushed = ring_push(self.ring_va, self.ring_bytes, &self.frame_buf[..n_frames]);
+        if pushed < n_frames {
+            let _ = debug_print(&format!(
+                "cluuamp: ring full, pushed {}/{} frames (xrun)\n",
+                pushed, n_frames
+            ));
+        }
         self.pcm_s16.drain(..to_copy);
-        self.ring_slot = (self.ring_slot + 1) % RING_SLOTS;
-        self.ring_inflight += 1;
         Ok(())
-    }
-
-    fn next_free_slot(&self) -> Option<usize> {
-        (0..RING_SLOTS)
-            .map(|offset| (self.ring_slot + offset) % RING_SLOTS)
-            .find(|&slot| self.tap_metadata[slot].handle.is_none())
     }
 
     fn advance_to_next(&mut self) -> Result<()> {
@@ -879,46 +879,122 @@ impl AudioEngine {
         Ok(())
     }
 
-    fn open_audiod_stream(&mut self) {
-        let ep = match registry::subscribe_output("audiod", "main") {
-            Ok(ep) => ep,
-            Err(_) => {
-                let _ = debug_print("cluuamp: audiod not available — direct virtio-snd mode\n");
-                return;
-            }
-        };
+    fn open_audiod_stream(
+        &mut self,
+        rate: u32,
+        channels: u8,
+        space_token: usize,
+    ) -> Result<()> {
+        let ep = registry::lookup_service("audiod:main")
+            .ok_or(Error::NotFound)?;
         self.audiod_ep = ep;
+
+        let caps = self.query_audiod_caps()?;
+        let fmt_bit = 1u64 << PCM_FMT_S16;
+        if (caps & fmt_bit) == 0 {
+            return Err(Error::InvalidState);
+        }
 
         let req = Message::new(
             AUDIOD_STREAM_OPEN,
-            [0, self.sample_rate as usize, self.channels as usize, 0, 0, 0],
-            3,
+            [0, rate as usize, channels as usize, PERIOD_BYTES, PCM_FMT_S16 as usize, 0],
+            5,
         );
         let mut reply_buf = [0u8; 64];
-        let bytes = match libcluu::syscall::ipc_call(ep, req.as_bytes(), &mut reply_buf) {
-            Ok(n) => n,
-            Err(_) => {
-                self.audiod_ep = 0;
-                return;
-            }
-        };
-        let (rmsg, _) = match libcluu::ipc::parse_message(&reply_buf[..bytes]) {
-            Some(parsed) => parsed,
-            None => {
-                self.audiod_ep = 0;
-                return;
-            }
-        };
+        let bytes = libcluu::syscall::ipc_call(ep, req.as_bytes(), &mut reply_buf)?;
+        let (rmsg, _) = libcluu::ipc::parse_message(&reply_buf[..bytes])
+            .ok_or(Error::InvalidState)?;
         if rmsg.tag.label != AUDIOD_STREAM_OPEN || rmsg.words[0] != 0 {
-            self.audiod_ep = 0;
-            return;
+            return Err(Error::InvalidState);
         }
         self.audiod_stream_id = rmsg.words[1] as u32;
         self.audiod_session_id = rmsg.words[2] as u32;
+        let frame_token = rmsg.words[3] as u64;
+        let ring_bytes = rmsg.words[4];
+        let actual_period_bytes = rmsg.words[5];
+
+        let num_pages = (ring_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        let va = space_map_auto(space_token, frame_token as usize, FLAGS_USER_RW, num_pages)?;
+        self.ring_va = va;
+        self.ring_bytes = num_pages * PAGE_SIZE;
+        self.ring_total_read_last = 0;
+        self.audiod_period_bytes = actual_period_bytes;
+
         let _ = debug_print(&format!(
-            "cluuamp: audiod stream open id={} session={}\n",
-            self.audiod_stream_id, self.audiod_session_id & 0xFF
+            "cluuamp: audiod stream open id={} session={} ring_bytes={} period_bytes={}\n",
+            self.audiod_stream_id, self.audiod_session_id & 0xFF, ring_bytes, actual_period_bytes
         ));
+        Ok(())
+    }
+
+    fn ring_backing(&mut self) -> Option<&'static mut [u8]> {
+        if self.ring_va == 0 {
+            return None;
+        }
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(self.ring_va as *mut u8, self.ring_bytes)
+        };
+        Some(backing)
+    }
+
+    fn ring_available_write(&self) -> usize {
+        if self.ring_va == 0 {
+            return 0;
+        }
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(self.ring_va as *mut u8, self.ring_bytes)
+        };
+        FrameRing::attach(backing)
+            .map(|r| r.available_write())
+            .unwrap_or(0)
+    }
+
+    fn query_audiod_caps(&self) -> Result<u64> {
+        let req = Message::new(
+            AUDOD_QUERY_CAPS,
+            [0, 0, 0, 0, 0, 0],
+            0,
+        );
+        let mut reply_buf = [0u8; 64];
+        let bytes = libcluu::syscall::ipc_call(self.audiod_ep, req.as_bytes(), &mut reply_buf)?;
+        let (rmsg, _) = libcluu::ipc::parse_message(&reply_buf[..bytes])
+            .ok_or(Error::InvalidState)?;
+        if rmsg.tag.label != AUDOD_QUERY_CAPS || rmsg.words[0] != 0 {
+            return Err(Error::InvalidState);
+        }
+        Ok(rmsg.words[1] as u64)
+    }
+
+    fn ring_total_read(&self) -> u64 {
+        if self.ring_va == 0 {
+            return 0;
+        }
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(self.ring_va as *mut u8, self.ring_bytes)
+        };
+        FrameRing::attach(backing)
+            .map(|r| r.total_read())
+            .unwrap_or(0)
+    }
+
+    fn ring_total_written(&self) -> u64 {
+        if self.ring_va == 0 {
+            return 0;
+        }
+        let backing = unsafe {
+            core::slice::from_raw_parts_mut(self.ring_va as *mut u8, self.ring_bytes)
+        };
+        FrameRing::attach(backing)
+            .map(|r| r.total_written())
+            .unwrap_or(0)
+    }
+
+    fn period_frames(&self) -> usize {
+        if self.channels == 1 {
+            PERIOD_BYTES / 2
+        } else {
+            PERIOD_BYTES / FRAME_BYTES
+        }
     }
 
     fn send_audiod_close(&mut self) {

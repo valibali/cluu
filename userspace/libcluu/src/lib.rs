@@ -176,6 +176,7 @@ pub use syscall::{
     thread_create,
     token_derive,
     token_derive_scoped,
+    token_derive_scoped_irq,
     // Core syscalls
     yield_cpu,
     InvokeOp,

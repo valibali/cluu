@@ -56,6 +56,7 @@ struct UsbDevice {
     report_dma: DmaRegion,
     report_len: usize,
     last_keys: [u8; 6],
+    last_hid_mods: u8,
     repeat: Option<RepeatState>,
 }
 
@@ -273,6 +274,7 @@ fn probe_device(
         report_dma,
         report_len,
         last_keys: [0; 6],
+        last_hid_mods: 0,
         repeat: None,
     })
 }
@@ -298,6 +300,46 @@ fn parse_hid_protocol(config: &[u8]) -> Option<u8> {
     None
 }
 
+const HID_MOD_LCTRL: u8 = 1 << 0;
+const HID_MOD_LSHIFT: u8 = 1 << 1;
+const HID_MOD_LALT: u8 = 1 << 2;
+const HID_MOD_RCTRL: u8 = 1 << 4;
+const HID_MOD_RSHIFT: u8 = 1 << 5;
+const HID_MOD_RALT: u8 = 1 << 6;
+
+fn forward_modifier_changes(ctx: &UsbInputContext, old: u8, new: u8, kbd_mods: u8) {
+    let msg_mods = pack_mods_for_ipc(kbd_mods);
+    let entries: [(u8, u8); 6] = [
+        (HID_MOD_LCTRL,  0x1D),
+        (HID_MOD_LSHIFT, 0x2A),
+        (HID_MOD_LALT,   0x38),
+        (HID_MOD_RCTRL,  0x1D),
+        (HID_MOD_RSHIFT, 0x36),
+        (HID_MOD_RALT,   0x38),
+    ];
+
+    for (bit, scancode) in entries {
+        let was = old & bit != 0;
+        let is = new & bit != 0;
+        if was == is { continue; }
+
+        if is {
+            let msg = Message::new(
+                KBD_EVENT_LABEL,
+                [0, 0, msg_mods as usize, scancode as usize, 0, 0],
+                5,
+            );
+            ctx.forward(&msg);
+        } else {
+            let msg = Message::new(
+                KBD_EVENT_LABEL,
+                [0, 0, msg_mods as usize, (scancode | 0x80) as usize, 0, 2],
+                5,
+            );
+            ctx.forward(&msg);
+        }
+    }
+}
 fn handle_report(
     ctx: &UsbInputContext,
     dev: &mut UsbDevice,
@@ -331,6 +373,11 @@ fn handle_kbd_report(
     let hid_mods = report[0];
     let kbd_mods = hid_modifiers_to_kbd(hid_mods);
     let ctrl_alt = is_ctrl_alt(kbd_mods);
+
+    let old_hid_mods = dev.last_hid_mods;
+    dev.last_hid_mods = hid_mods;
+
+    forward_modifier_changes(ctx, old_hid_mods, hid_mods, kbd_mods);
 
     let mut new_keys: [u8; 6] = [0; 6];
     let count = (report.len() - 2).min(6);

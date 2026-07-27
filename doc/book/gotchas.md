@@ -756,7 +756,7 @@ The "2x speed" was actually severe underrun: at 48kHz, 8×4KB = 170ms of buffer 
 
 **Key insight:** `buffer_bytes`/`period_bytes` in `set_params` are stored by QEMU but never used for TX buffering. Don't rely on device-side buffering to smooth I/O jitter. Either pipeline enough data ahead or preload entirely.
 
-**See also:** `userspace/mp3player/src/main.rs` (`play_mp3` full-file load), `userspace/virtio-snd/src/session.rs`, QEMU `hw/audio/virtio-snd.c` (`virtio_snd_pcm_prepare`, `virtio_snd_pcm_out_cb`).
+**See also:** `userspace/virtio-snd/src/session.rs`, QEMU `hw/audio/virtio-snd.c` (`virtio_snd_pcm_prepare`, `virtio_snd_pcm_out_cb`).
 
 ## idle-until-runnable-missing-cli (2026-07-16-virtio-snd-irq)
 

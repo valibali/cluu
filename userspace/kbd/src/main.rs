@@ -106,7 +106,7 @@ fn handle_kbd_message(ctx: &mut KbdContext, decoder: &mut ScancodeDecoder, msg: 
         // so game clients (DOOM) can detect key-up. Legacy consumers ignore
         // kind=2 because ascii=0.
         if event.pressed {
-            if event.ascii.is_some() || event.extended != 0 {
+            if event.ascii.is_some() || event.extended != 0 || event.scancode != 0 {
                 let outbound = build_kbd_event(
                     event.ascii,
                     event.scancode,

@@ -29,7 +29,7 @@ use alloc::format;
 
 use crate::ring::FrameRing;
 use crate::resample::LinearResampler;
-use crate::mixer::Gain;
+use crate::mixer::{Gain, Pan};
 
 /// IPC labels for audiod stream control.
 pub const AUDIOD_STREAM_OPEN: u32 = 0x700;
@@ -39,7 +39,18 @@ pub const AUDIOD_STREAM_RESUME: u32 = 0x703;
 pub const AUDIOD_STREAM_DRAIN: u32 = 0x704;
 pub const AUDIOD_STREAM_GAIN: u32 = 0x705;
 pub const AUDIOD_STREAM_STATUS: u32 = 0x706;
+pub const AUDIOD_STREAM_PANORAMA: u32 = 0x707;
+pub const AUDIOD_QUERY_CAPS: u32 = 0x708;
 pub const AUDIOD_SESSION_DESTROYED: u32 = 0x710;
+
+/// Capabilities bitmasks returned by AUDOD_QUERY_CAPS.
+/// Format bits: bit N set ⇒ PCM_FMT_N supported (see libcluu audio_client constants).
+pub const CAPS_FMT_S16: u64 = 1 << 5;
+/// Channel bits: bit 1 = mono, bit 2 = stereo.
+pub const CAPS_CH_MONO: u64 = 1 << 1;
+pub const CAPS_CH_STEREO: u64 = 1 << 2;
+/// Rate bits: bit N set ⇒ PCM_RATE_N supported (all known rates — audiod resamples).
+pub const CAPS_RATES_ALL: u64 = 0x7FF;
 
 /// Stream state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +71,7 @@ pub struct Stream {
     pub session_id: u32,
     pub state: StreamState,
     pub gain: Gain,
+    pub pan: Pan,
     pub resampler: LinearResampler,
     /// Per-stream control endpoint (recv side, held by audiod).
     pub control_endpoint: usize,
@@ -67,6 +79,8 @@ pub struct Stream {
     pub ring_backing: &'static mut [u8],
     /// Ring capacity in frames.
     pub ring_capacity: usize,
+    /// Frame token backing the SHM ring; freed on stream close.
+    pub frame_token: u64,
     /// Monotonic frame counters.
     pub frames_written: u64,
     pub frames_played: u64,
@@ -108,6 +122,11 @@ impl Stream {
     /// Set the stream gain (Q15 fixed-point).
     pub fn set_gain(&mut self, q15: i32) {
         self.gain = Gain::from_q15(q15);
+    }
+
+    /// Set the stream panorama (balance ∈ [-100, +100]).
+    pub fn set_pan(&mut self, balance: i8) {
+        self.pan = Pan::from_balance(balance);
     }
 
     /// Check if the stream has finished draining (ring empty + was draining).

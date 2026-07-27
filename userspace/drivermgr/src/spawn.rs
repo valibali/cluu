@@ -79,7 +79,7 @@ pub fn spawn_driver(
     };
 
     let params = build_param_overrides(rule, node);
-    let token_requests = build_token_requests(rule);
+    let token_requests = build_token_requests(rule, node);
 
     let mut payload = Vec::new();
     payload.extend_from_slice(initrd_path.as_bytes());
@@ -167,8 +167,15 @@ fn build_param_overrides(rule: &BindRule, node: &DeviceNode) -> Vec<(usize, u64)
     params
 }
 
-fn build_token_requests(rule: &BindRule) -> Vec<(usize, u32)> {
-    rule.token_slots.clone()
+fn build_token_requests(rule: &BindRule, node: &DeviceNode) -> Vec<(usize, u32)> {
+    let mut slots = rule.token_slots.clone();
+    if node.irq_line.is_some() {
+        let irq_rights = (libcluu::rights::Rights::IRQ_HANDLE
+            | libcluu::rights::Rights::IRQ_ACK)
+            .bits() as u32;
+        slots.push((libcluu::boot::TOKEN_EXTRA_2, irq_rights));
+    }
+    slots
 }
 
 fn register_with_drivermon(

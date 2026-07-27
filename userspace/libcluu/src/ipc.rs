@@ -470,6 +470,9 @@ pub const AUDIO_COMPLETE: u32 = 0x602;
 pub const AUDIO_CLOSE: u32 = 0x603;
 /// Procmgr → virtio-snd: a tid has exited; reap any sessions owned by it.
 pub const AUDIO_TID_CLEANUP: u32 = 0x604;
+/// Client → virtio-snd: query supported format/rate/channel bitmasks.
+/// Reply: words[0]=status(0=ok), words[1]=formats, words[2]=rates, words[3]=channels.
+pub const AUDIO_QUERY_CAPS: u32 = 0x605;
 
 // ──────────────────────────────────────────────────────────────────────
 // devmgr IPC labels — block device manager service.

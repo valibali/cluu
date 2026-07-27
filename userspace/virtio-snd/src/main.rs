@@ -22,10 +22,10 @@ use cluu_virtio_core::{DmaPool, DmaRegion, IrqSource};
 use libcluu::boot::{
     process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE,
 };
-use libcluu::ipc::{extract_reply_id, AUDIO_CLOSE, AUDIO_OPEN_SESSION, AUDIO_SUBMIT_PCM, AUDIO_TID_CLEANUP, PARAM_DEVICE_PATH};
+use libcluu::ipc::{extract_reply_id, reply, AUDIO_CLOSE, AUDIO_OPEN_SESSION, AUDIO_QUERY_CAPS, AUDIO_SUBMIT_PCM, AUDIO_TID_CLEANUP, PARAM_DEVICE_PATH};
 use libcluu::registry;
 use libcluu::syscall::ipc_recv_any_with_sender;
-use libcluu::types::Message;
+use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Result};
 
 /// DMA pool for virtqueue rings + small control/event buffers.
@@ -40,6 +40,20 @@ const GRANT_TARGET_VA: usize = 0x5300_0000;
 
 /// Virtqueue size (QEMU virtio-snd uses 64 for all queues).
 const QUEUE_SIZE: u16 = 64;
+
+const CAPS_FMTS: u64 = (1u64 << proto::PCM_FMT_S16) | (1u64 << proto::PCM_FMT_S32);
+const CAPS_RATES: u64 = (1u64 << proto::PCM_RATE_5512)
+    | (1u64 << proto::PCM_RATE_8000)
+    | (1u64 << proto::PCM_RATE_11025)
+    | (1u64 << proto::PCM_RATE_16000)
+    | (1u64 << proto::PCM_RATE_22050)
+    | (1u64 << proto::PCM_RATE_32000)
+    | (1u64 << proto::PCM_RATE_44100)
+    | (1u64 << proto::PCM_RATE_48000)
+    | (1u64 << proto::PCM_RATE_64000)
+    | (1u64 << proto::PCM_RATE_88200)
+    | (1u64 << proto::PCM_RATE_96000);
+const CAPS_CHANNELS: u64 = (1u64 << 1) | (1u64 << 2);
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -62,7 +76,6 @@ struct Driver {
     pool: DmaPool,
     space_token: usize,
     _event_buf: DmaRegion,
-    irq_seen: bool,
     sessions: BTreeMap<u32, session::AudioSession>,
     next_session_id: u32,
     pending_tx: session::PendingTx,
@@ -180,7 +193,6 @@ fn run() -> Result<()> {
         pool,
         space_token,
         _event_buf: event_buf,
-        irq_seen: false,
         sessions: BTreeMap::new(),
         next_session_id: 1,
         pending_tx: BTreeMap::new(),
@@ -250,11 +262,8 @@ fn run() -> Result<()> {
 
         if idx == 1 {
             let _isr = driver.transport.isr_status();
-            if !driver.irq_seen {
-                debug_print("VIRTIO_SND_IRQ")?;
-                driver.irq_seen = true;
-            }
             driver.drain_queues();
+            let _ = driver.irq.ack();
             continue;
         }
 
@@ -291,6 +300,7 @@ fn dispatch_audio(driver: &mut Driver, msg: &Message, sender_tid: usize) {
             let format = msg.words[1] as u8;
             let rate = msg.words[2] as u8;
             let channels = msg.words[3] as u8;
+            let period_bytes = msg.words[4];
             let Driver {
                 transport,
                 vq_control,
@@ -313,6 +323,7 @@ fn dispatch_audio(driver: &mut Driver, msg: &Message, sender_tid: usize) {
                 format,
                 rate,
                 channels,
+                period_bytes,
                 reply_token,
             );
         }
@@ -384,6 +395,16 @@ fn dispatch_audio(driver: &mut Driver, msg: &Message, sender_tid: usize) {
                 sessions,
                 dead_tid,
             );
+        }
+        AUDIO_QUERY_CAPS => {
+            let rmsg = Message::new(
+                AUDIO_QUERY_CAPS,
+                [0, CAPS_FMTS as usize, CAPS_RATES as usize, CAPS_CHANNELS as usize, 0, 0],
+                4,
+            );
+            if let Some(rt) = reply_token {
+                let _ = reply(rt, &rmsg, IpcFlags::empty());
+            }
         }
         _ => {}
     }

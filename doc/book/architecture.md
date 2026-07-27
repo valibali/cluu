@@ -220,7 +220,7 @@ See [Terminal Stack](../terminal/index.html) for the per-service detail.
 `mkdir`, `rm`, `cp`, `mv`, `cat`, `grep`, `head`, `tail`, `wc`, `ls`, `ps`,
 `touch`, `top`, `basename`, `date`, `dirname`, `env`, `kill`, `printf`,
 `sleep`, `which`, `sort`, `uniq`, `cut`, `tr`, `find`, `du`, `stat`, `edit`,
-`micropython`, `doom`, `cluuamp`, `mp3player`, `imgview`.
+`micropython`, `doom`, `cluuamp`, `imgview`.
 
 Each ships with a `Cluufile` declaring its capability profile and mount policy.
 See [Container Encapsulation](../containers/index.html).

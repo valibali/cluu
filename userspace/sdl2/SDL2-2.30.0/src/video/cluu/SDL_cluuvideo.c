@@ -237,16 +237,16 @@ int CLUU_VideoInit(_THIS)
         return SDL_SetError("CLUU: failed to create registry control endpoint");
     }
 
-    /* If displayd endpoint is not configured, we can still initialize
-     * (the dummy backend will handle fallback). But if it IS configured,
-     * query the output dimensions. */
+    /* Fall back to registry lookup if PARAM_DISPLAYD_EP is unset. */
+    if (data->displayd_ep == 0 && data->registry_ep != 0) {
+        data->displayd_ep = cluu_registry_subscribe(data, "displayd", "main");
+    }
+
     if (data->displayd_ep == 0) {
-        /* No displayd — use default 640x400. */
         data->screen_w = 640;
         data->screen_h = 400;
         data->screen_pitch = 640 * 4;
     } else {
-        /* Query displayd output info. */
         cluu_msg_init(&req, CLUU_DISPLAY_OUTPUT_INFO_LABEL,
             0, 0, 0, 0, 0, 0, 0);
         ret = cluu_ipc_call(data->displayd_ep,

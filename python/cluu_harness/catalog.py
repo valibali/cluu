@@ -473,9 +473,6 @@ class L2PluginApi: pass
 class L2AudioBoot: pass
 
 
-@cluu_case("l2_audio_play", marker_mode="l2_audio_play", description="mp3player raw-PCM playback via virtio-snd", tags=["audio", "virtio-snd", "mp3player"])
-class L2AudioPlay: pass
-
 @cluu_case("l2_cluuamp", marker_mode="l2_cluuamp", description="cluuamp TUI audio player startup", tags=["audio", "virtio-snd", "tui", "cluuamp"])
 class L2Cluuamp: pass
 

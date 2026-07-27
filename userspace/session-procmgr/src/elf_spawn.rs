@@ -39,7 +39,7 @@ use procmgr_common::wire::SpawnReq;
 use crate::dispatch::SessionState;
 
 const CHILD_STACK_BASE: usize = 0x6d00_0000;
-const CHILD_STACK_PAGES: usize = 32;
+const CHILD_STACK_PAGES: usize = 64;
 const CHILD_STACK_SIZE: usize = CHILD_STACK_PAGES * 4096;
 const PROT_RW_USER: usize = 0x7;
 const ANON_ZERO: usize = 0;

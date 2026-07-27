@@ -322,7 +322,7 @@ decision somewhere durable; do not silently slip.
 
 ### Interlude: virtio-snd audio driver (DONE 2026-07-16)
 
-Userspace virtio-snd driver + mp3player container, built as a side quest
+Userspace virtio-snd driver + cluuamp container, built as a side quest
 between Phase 4 and Phase 5. Proves the userspace driver model extends to
 streaming devices, not just block/net.
 
@@ -331,18 +331,22 @@ Shipped:
 - **virtio-snd driver** (`userspace/virtio-snd/`): PCI probe, 4 virtqueues,
   control queue lifecycle, grant-based TX. Registered as `snddev:main`.
   Rate enum matches virtio-snd spec exactly.
-- **mp3player** (`userspace/mp3player/`): nanomp3 decoder, auto-detect
-  rate/channels, full-file-to-memory load before playback.
+- **cluuamp** (`userspace/cluuamp/`): nanomp3 decoder, audiod client via
+  SHM ring, local EQ/gain/balance, push-to-ring with backpressure.
+- **audiod** (`userspace/audiod/`): audio server — per-stream SHM rings,
+  server-side gain/pan/normalize, mixing, resampling, sole virtio-snd
+  client. Negotiates output format with virtio-snd.
 - **libcluu audio_client**: `AudioSessionClient` with grant-based PCM
-  submission, completion polling, rate constants.
+  submission, completion polling, rate constants, period_bytes
+  negotiation.
 - **Kernel fix**: `idle_until_runnable` missing `cli` after `hlt` —
   nested IRQ on shared IRQ 10 corrupted `iretq` frame → RIP=0x2 crash.
 - **IPC_MESSAGE_MAX**: 4096 → 8192 to fit audio IPC metadata.
 
 Key finding: QEMU's virtio-snd ignores `buffer_bytes`/`period_bytes` for
 playback — PA backend handles all buffering. Device underruns are caused
-by I/O stalls (9p read latency), not buffer misconfiguration. Full-file
-load eliminates the underrun class for mp3player.
+by I/O stalls (9p read latency), not buffer misconfiguration. audiod's
+completion-driven pacing + ring backpressure eliminates this class.
 
 ### Interlude: storage throughput pass (DONE 2026-07-16)
 
@@ -362,7 +366,7 @@ Shipped:
 - **IRQ poll fallback + retry**: 50 ms `recv_any` timeout in virtio-blk
   main loop; `dispatch_irq` retries `try_send` 8× on `WouldBlock`.
 - **Spin-poll yield frequency**: every 100 000 spins (was 1024).
-- **mp3player READ_CHUNK 4 KB→64 KB**: 16× fewer IPC round-trips.
+- **cluuamp READ_CHUNK 4 KB→64 KB**: 16× fewer IPC round-trips.
 - **Virtio indirect descriptors** (`VIRTIO_F_RING_INDIRECT_DESC`): large
   scatter-gather requests use 1-page indirect tables instead of overflowing
   the 256-desc main queue. Supports 4 MB reads.

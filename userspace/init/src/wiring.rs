@@ -187,10 +187,9 @@ impl ServiceWiring for ServiceKind {
                 params[PARAM_TTY_INSTANCE] = instance_id.unwrap_or(0);
             }
             ServiceKind::Procmgr => {
-                // Procmgr exit notification endpoint
                 tokens[TOKEN_EXTRA_0] = ctx.exit_endpoint;
-                // Elevated capability token for process management
                 tokens[TOKEN_EXTRA_1] = child_token;
+                tokens[TOKEN_EXTRA_2] = ctx.irq_handle_root_token;
                 tokens[TOKEN_VFS_VIEW_MGR] = ctx.boot.view_mgr_token;
                 params[PARAM_INITRD_SIZE] = ctx.boot.initrd_size as u64;
             }

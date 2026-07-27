@@ -27,7 +27,7 @@ mod dir;
 pub mod env;
 mod fcntl;
 pub mod file;
-mod framebuffer;
+pub mod framebuffer;
 mod memory;
 pub mod jobs;
 pub mod pipe;

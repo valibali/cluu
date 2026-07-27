@@ -30,4 +30,7 @@ image = "inputd"
 image = "displayd"
 
 [[service]]
+image = "audiod"
+
+[[service]]
 image = "compositor"

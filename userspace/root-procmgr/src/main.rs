@@ -42,6 +42,7 @@ use libcluu::boot::{
     TOKEN_CLOCK,
     TOKEN_EXTRA_0,
     TOKEN_EXTRA_1,
+    TOKEN_EXTRA_2,
     TOKEN_IPC,
     TOKEN_REGISTRY,
     TOKEN_SELF,
@@ -59,6 +60,7 @@ use libcluu::elf::ElfFile;
 use libcluu::fs::client::VfsClient;
 use libcluu::ipc::extract_reply_id;
 use libcluu::ipc::parse_message;
+use libcluu::ipc::PARAM_IRQ_LINE;
 use libcluu::ipc::SharedRing;
 use libcluu::ipc::call;
 use libcluu::ipc::CWD_MAGIC as SPAWN_CWD_MAGIC;
@@ -271,6 +273,7 @@ struct ProcessManager {
     fault_endpoint: usize,
     registry_send: usize,
     initrd_size: usize,
+    irq_root_token: usize,
     _proc_cap: usize,
     exit_cookie_next: usize,
     pid_next: usize,
@@ -392,6 +395,7 @@ impl ProcessManager {
             fault_endpoint: 0,
             registry_send: info.tokens[TOKEN_REGISTRY],
             initrd_size: info.params[PARAM_INITRD_SIZE] as usize,
+            irq_root_token: info.tokens[TOKEN_EXTRA_2],
             _proc_cap: info.tokens[TOKEN_IPC], // Now using TOKEN_IPC
             exit_cookie_next: 1,
             pid_next: 2, // PID 1 is typically init
@@ -4410,7 +4414,19 @@ impl ProcessManager {
             if *slot == TOKEN_EXTRA_0 {
                 continue;
             }
-            let derived = token_derive(self.token, *rights_bits as usize, u64::MAX)?;
+            let irq_line = params.get(PARAM_IRQ_LINE).copied().unwrap_or(0) as u32;
+            let is_irq_token = *slot == TOKEN_EXTRA_2
+                && (rights_bits & (Rights::IRQ_HANDLE.bits() as u32)) != 0;
+            let derived = if is_irq_token {
+                token_derive_scoped_irq(
+                    self.irq_root_token,
+                    *rights_bits,
+                    u64::MAX,
+                    irq_line,
+                )?
+            } else {
+                token_derive(self.token, *rights_bits as usize, u64::MAX)?
+            };
             tokens[*slot] = derived;
         }
 

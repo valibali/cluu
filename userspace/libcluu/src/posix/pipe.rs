@@ -14,6 +14,22 @@ use crate::ipc::{PROCMGR_PIPE_CLOSE_LABEL, PROCMGR_PIPE_CREATE_LABEL};
 use crate::types::Message;
 use crate::IpcFlags;
 
+// Must match procmgr-common/src/labels.rs SESSION_PROCMGR_PIPE_* constants.
+const SESSION_PROCMGR_PIPE_CREATE_LABEL: u32 = 0xB004;
+const SESSION_PROCMGR_PIPE_CLOSE_LABEL: u32 = 0xB005;
+
+fn is_session_process() -> bool {
+    crate::env::read_env_var("CLUU_SESSION_ID").is_some()
+}
+
+fn pipe_create_label() -> u32 {
+    if is_session_process() { SESSION_PROCMGR_PIPE_CREATE_LABEL } else { PROCMGR_PIPE_CREATE_LABEL }
+}
+
+fn pipe_close_label() -> u32 {
+    if is_session_process() { SESSION_PROCMGR_PIPE_CLOSE_LABEL } else { PROCMGR_PIPE_CLOSE_LABEL }
+}
+
 pub const PIPE_DATA_LABEL: u32 = 0x50;
 pub const PIPE_EOF_LABEL: u32 = 0x51;
 
@@ -30,7 +46,7 @@ pub fn close_pipe_id_in_procmgr(pipe_id: usize) {
         Some(ep) => ep,
         None => return,
     };
-    let mut msg = Message::new(PROCMGR_PIPE_CLOSE_LABEL, [0; 6], 0);
+    let mut msg = Message::new(pipe_close_label(), [0; 6], 0);
     msg.words[0] = pipe_id;
     let _ = crate::ipc::call(procmgr_ep, &mut msg, IpcFlags::empty());
 }
@@ -58,7 +74,7 @@ pub extern "C" fn pipe(pipefd: *mut c_int) -> c_int {
     };
 
     // Step 2: ask procmgr to create the pipe and hand back token pair + pipe_id.
-    let mut req = Message::new(PROCMGR_PIPE_CREATE_LABEL, [0; 6], 0);
+    let mut req = Message::new(pipe_create_label(), [0; 6], 0);
     if crate::ipc::call(procmgr_ep, &mut req, IpcFlags::empty()).is_err() {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return -1;

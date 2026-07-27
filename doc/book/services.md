@@ -451,7 +451,8 @@ profile and mount policy. Key utilities:
 | `shell` | ipc vfs registry admin | DIY shell |
 | `cluuterm` | ipc vfs compositor | Terminal emulator |
 | `micropython` | ipc vfs | Python interpreter |
-| `mp3player` | ipc vfs registry | MP3 playback via virtio-snd |
+| `cluuamp` | ipc vfs registry | MP3 playback via audiod |
+| `audiod` | ipc vfs registry | Audio server: mix, resample, gain, pan, normalize |
 | `hello` | ipc vfs | Demo container |
 
 See [Container Encapsulation](../containers/index.html) for the Cluufile model.

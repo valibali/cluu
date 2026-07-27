@@ -13,6 +13,25 @@ const PROCMGR_KILL_LABEL: u32 = 3;
 const PROCMGR_EXIT_LABEL: u32 = 1;
 const WNOHANG: c_int = 1;
 
+// Must match procmgr-common/src/labels.rs SESSION_PROCMGR_* constants.
+// lookup_service("procmgr:spawn") routes to session-procmgr when
+// CLUU_SESSION_ID is set; session-procmgr expects these labels, not the
+// legacy root-procmgr labels above.
+const SESSION_PROCMGR_SPAWN_LABEL: u32 = 0xB000;
+const SESSION_PROCMGR_KILL_LABEL: u32 = 0xB001;
+
+fn is_session_process() -> bool {
+    crate::env::read_env_var("CLUU_SESSION_ID").is_some()
+}
+
+fn spawn_label() -> u32 {
+    if is_session_process() { SESSION_PROCMGR_SPAWN_LABEL } else { PROCMGR_SPAWN_LABEL }
+}
+
+fn kill_label() -> u32 {
+    if is_session_process() { SESSION_PROCMGR_KILL_LABEL } else { PROCMGR_KILL_LABEL }
+}
+
 struct WaitState {
     notify_endpoint: usize,
     procmgr_endpoint: usize,
@@ -164,11 +183,9 @@ pub extern "C" fn _kill(pid: pid_t, sig: c_int) -> c_int {
         }
     };
 
-    // Send PROC_KILL message
-    // Label = 3 (PROC_KILL), words[0] = pid, words[1] = signal
     let do_call = |endpoint: usize| {
         let mut msg = crate::types::Message::new(
-            PROCMGR_KILL_LABEL,
+            kill_label(),
             [pid as usize, sig as usize, 0, 0, 0, 0],
             2,
         );
@@ -475,7 +492,7 @@ pub extern "C" fn posix_spawn(
     payload.extend_from_slice(&(cwd_len as u32).to_le_bytes());
     payload.extend_from_slice(&CWD_MAGIC.to_le_bytes());
 
-    let mut msg = crate::types::Message::new(PROCMGR_SPAWN_LABEL, [0; 6], 4);
+    let mut msg = crate::types::Message::new(spawn_label(), [0; 6], 4);
     msg.words[0] = payload.len();
     msg.words[1] = argc;
     msg.words[2] = fd_inherit_offset; // FdInherit payload offset (0 = no fd actions)
@@ -717,39 +734,8 @@ pub extern "C" fn posix_spawnp(
 /// # Returns
 /// Exit status of command, or -1 on error.
 #[no_mangle]
-pub extern "C" fn system(command: *const c_char) -> c_int {
-    if command.is_null() {
-        // Check if shell is available
-        return 1; // Assume shell exists
-    }
-
-    // Spawn sh -c "command"
-    let sh_path = c"/bin/sh".as_ptr() as *const c_char;
-    let c_flag = c"-c".as_ptr() as *const c_char;
-    let argv: [*const c_char; 4] = [sh_path, c_flag, command, core::ptr::null()];
-
-    let mut child_pid: pid_t = 0;
-    let ret = posix_spawn(
-        &mut child_pid,
-        sh_path,
-        core::ptr::null(),
-        core::ptr::null(),
-        argv.as_ptr(),
-        core::ptr::null(),
-    );
-
-    if ret != 0 {
-        set_errno(ret);
-        return -1;
-    }
-
-    // Wait for child
-    let mut status: c_int = 0;
-    if waitpid(child_pid, &mut status, 0) < 0 {
-        return -1;
-    }
-
-    status
+pub extern "C" fn system(_command: *const c_char) -> c_int {
+    -1
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

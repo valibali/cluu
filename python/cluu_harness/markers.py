@@ -551,18 +551,6 @@ MARKER_MODES: dict[str, MarkerModeSpec] = {
             description="virtio-snd driver boot + control/TX self-test",
         ),
         MarkerModeSpec(
-            name="l2_audio_play",
-            required_markers=[
-                _TSC,
-                _SHELL_READY,
-                "VIRTIO_SND_PCI",
-                "VIRTIO_SND_OK",
-                "MP3PLAYER_OPEN",
-                "MP3PLAYER_DONE",
-            ],
-            description="mp3player MP3 playback via virtio-snd",
-        ),
-        MarkerModeSpec(
             name="l2_cluuamp",
             required_markers=[
                 _TSC,

@@ -21,7 +21,7 @@ use libcluu::ipc::{
 use libcluu::rights::Rights;
 use libcluu::syscall::{
     token_derive, token_derive_scoped_block_region, token_derive_scoped_device_region,
-    token_revoke,
+    token_derive_scoped_irq, token_revoke,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error};
@@ -182,17 +182,6 @@ pub fn handle_revoke(msg: &Message, fallback_ep: usize) {
     let _ = reply_to_sender(msg, &reply_msg, fallback_ep, IpcFlags::empty());
 }
 
-/// Mint an IRQ_HANDLE | IRQ_ACK token for a specific IRQ line.
-///
-/// `irq_handle_root_token` is wired into devmgr's TOKEN_EXTRA_2 by init
-/// (D3.1); it carries IRQ_HANDLE | IRQ_ACK | GRANT so devmgr can sub-derive.
-///
-/// The kernel's `TokenDeriveScoped` does not support `ObjectRef::Irq` (only
-/// VfsViewManager / BlockRegion / DeviceRegion), so we use `token_derive`
-/// which inherits the parent's obj_ref. IRQ-line scoping is advisory:
-/// drivermgr tracks which irq_line it requested and passes it as a spawn
-/// param; the driver passes it to `irq_attach(token, ep, irq_line)`, which
-/// checks only the IRQ_HANDLE right, not the obj_ref.
 pub fn handle_mint_irq_cap(
     msg: &Message,
     fallback_ep: usize,
@@ -201,8 +190,8 @@ pub fn handle_mint_irq_cap(
     let irq_line = msg.words[1] as u8;
 
     let (status, token_handle) = {
-        let rights = (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits() as usize;
-        match token_derive(irq_handle_root_token, rights, u64::MAX) {
+        let rights = (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits();
+        match token_derive_scoped_irq(irq_handle_root_token, rights, u64::MAX, irq_line as u32) {
             Ok(handle) => (REPLY_OK, handle),
             Err(e) => (err_to_status(e), 0usize),
         }

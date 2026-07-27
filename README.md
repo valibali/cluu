@@ -23,7 +23,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - Capability-based IPC at ~1,200-1,600 cycles for a full call/reply.
 - A declarative container model: every userspace binary has a `Cluufile` (think Dockerfile, but for a single binary) that defines its capability profile, mount policy, restart policy, and entrypoint. See [`containers/`](containers/).
 - **MicroPython** (`spawn micropython`): runs as a container, executes scripts, can read files via the POSIX shim. Limitations: REPL ergonomics are rough (no line editing inside the REPL prompt), no socket support, large scripts may bump into heap limits.
-- **Audio playback** (`mp3player /host/file.mp3`): userspace virtio-snd driver + MP3 decoder container. Proves the userspace driver model extends to streaming devices, not just block/net.
+- **Audio playback** (`cluuamp /host/file.mp3`): userspace virtio-snd driver + MP3 decoder container + audiod mixer/resampler. Proves the userspace driver model extends to streaming devices, not just block/net.
 - **POSIX-ish C runtime** via a custom-patched newlib targeting `x86_64-cluu-elf`. C programs (see [`userspace/c-programs/`](userspace/c-programs/)) build with the standard toolchain and use stdio, malloc, pthreads, futexes, signals.
 
 ## What does NOT work yet (honest)

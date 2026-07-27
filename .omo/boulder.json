@@ -1,18 +1,415 @@
 {
   "schema_version": 2,
-  "active_work_id": "driver-framework",
+  "active_work_id": "cluu-multimedia-stack-bee4ff13",
   "works": {
-    "driver-framework": {
-      "work_id": "driver-framework",
-      "active_plan": ".omo/plans/driver-framework.md",
-      "plan_name": "driver-framework",
-      "session_ids": ["opencode:ses_07b53f1fbffeFFHRO34IyyEysG"],
-      "status": "active",
-      "worktree_path": null,
-      "constraints": {
-        "no_parallel_qemu": true,
-        "testing_must_be_serial": true
-      }
+    "cluu-multimedia-stack-bee4ff13": {
+      "work_id": "cluu-multimedia-stack-bee4ff13",
+      "active_plan": "/home/vlb2bp/git/cluu/.omo/plans/cluu-multimedia-stack.md",
+      "plan_name": "cluu-multimedia-stack",
+      "status": "completed",
+      "started_at": "2026-07-26T18:50:53.606Z",
+      "updated_at": "2026-07-27T03:44:26.230Z",
+      "session_ids": [
+        "opencode:ses_06098e3f2ffeINFrnozJWhavk1"
+      ],
+      "session_origins": {
+        "opencode:ses_06098e3f2ffeINFrnozJWhavk1": "direct"
+      },
+      "agent": "atlas",
+      "task_sessions": {
+        "todo:1": {
+          "task_key": "todo:1",
+          "task_label": "1",
+          "task_title": "Protect and classify current dirty multimedia work",
+          "session_id": "opencode:ses_0603a9736ffetwEzl4qq2xOvEg",
+          "agent": "Sisyphus-Junior",
+          "category": "quick",
+          "updated_at": "2026-07-26T18:55:49.327Z",
+          "started_at": "2026-07-26T18:55:35.759Z",
+          "status": "completed",
+          "ended_at": "2026-07-26T18:55:49.327Z",
+          "elapsed_ms": 13568
+        },
+        "todo:2": {
+          "task_key": "todo:2",
+          "task_label": "2",
+          "task_title": "Establish reproducible host/guest multimedia baseline",
+          "session_id": "opencode:ses_06035a90affeBD8eGCBVGuTMLg",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-07-26T19:42:45.871Z",
+          "started_at": "2026-07-26T19:41:47.547Z",
+          "status": "completed",
+          "ended_at": "2026-07-26T19:42:45.871Z",
+          "elapsed_ms": 58324
+        },
+        "todo:3": {
+          "task_key": "todo:3",
+          "task_label": "3",
+          "task_title": "Correct and freeze multimedia architecture contracts",
+          "session_id": "opencode:ses_0600bc896ffe4TL9anULHuZVVG",
+          "agent": "Sisyphus-Junior",
+          "started_at": "2026-07-26T19:52:13.882Z",
+          "status": "completed",
+          "updated_at": "2026-07-26T19:54:37.657Z",
+          "ended_at": "2026-07-26T19:54:37.657Z",
+          "elapsed_ms": 143775
+        },
+        "todo:4": {
+          "task_key": "todo:4",
+          "task_label": "4",
+          "task_title": "Define typed display protocol and buffer state machine",
+          "session_id": "opencode:ses_06000bf8affeMz72vztJLXEWBh",
+          "agent": "Sisyphus-Junior",
+          "category": "ultrabrain",
+          "updated_at": "2026-07-26T20:03:25.419Z",
+          "started_at": "2026-07-26T20:03:14.301Z",
+          "status": "completed",
+          "ended_at": "2026-07-26T20:03:25.419Z",
+          "elapsed_ms": 11118
+        },
+        "todo:5": {
+          "task_key": "todo:5",
+          "task_label": "5",
+          "task_title": "Build displayd pure scene/composition core",
+          "session_id": "opencode:ses_05ff80997ffe9Xs264MiTDgyqm",
+          "agent": "Sisyphus-Junior",
+          "category": "ultrabrain",
+          "updated_at": "2026-07-26T20:37:46.713Z",
+          "started_at": "2026-07-26T20:31:17.544Z",
+          "status": "completed",
+          "ended_at": "2026-07-26T20:37:46.713Z",
+          "elapsed_ms": 389169
+        },
+        "todo:7": {
+          "task_key": "todo:7",
+          "task_label": "7",
+          "task_title": "Launch displayd with linear-framebuffer backend",
+          "session_id": "opencode:ses_05fd8fadfffeWxNeIyNR1USeHA",
+          "agent": "Sisyphus-Junior",
+          "started_at": "2026-07-26T21:14:30.109Z",
+          "status": "completed",
+          "updated_at": "2026-07-26T21:24:39.974Z",
+          "ended_at": "2026-07-26T21:24:39.974Z",
+          "elapsed_ms": 609865
+        },
+        "todo:8": {
+          "task_key": "todo:8",
+          "task_label": "8",
+          "task_title": "Convert compositor into displayd WM and TUI-surface client",
+          "session_id": "opencode:ses_05fae2078ffeILTGT753870suA",
+          "agent": "Sisyphus-Junior",
+          "started_at": "2026-07-26T22:17:04.584Z",
+          "status": "completed",
+          "updated_at": "2026-07-26T22:20:32.966Z",
+          "ended_at": "2026-07-26T22:20:32.966Z",
+          "elapsed_ms": 208382
+        },
+        "todo:9": {
+          "task_key": "todo:9",
+          "task_label": "9",
+          "task_title": "Migrate native pixel clients to surfaces and remove direct framebuffer escape",
+          "session_id": "opencode:ses_05f7abf5bffeY9n6hBATxyTQWw",
+          "agent": "Sisyphus-Junior",
+          "started_at": "2026-07-26T22:56:53.134Z",
+          "status": "completed",
+          "updated_at": "2026-07-26T23:03:15.119Z",
+          "ended_at": "2026-07-26T23:03:15.119Z",
+          "elapsed_ms": 381985
+        },
+        "todo:10": {
+          "task_key": "todo:10",
+          "task_label": "10",
+          "task_title": "Prove displayd isolation, lifecycle, visual parity, and fail-stop behavior",
+          "session_id": "opencode:ses_05f53df1bffeMzpVflBxUSgJoF",
+          "agent": "Sisyphus-Junior",
+          "started_at": "2026-07-26T23:25:21.469Z",
+          "status": "completed",
+          "updated_at": "2026-07-26T23:51:55.605Z",
+          "ended_at": "2026-07-26T23:51:55.605Z",
+          "elapsed_ms": 1594136
+        },
+        "todo:13": {
+          "task_key": "todo:13",
+          "task_label": "13",
+          "task_title": "Measure virtio-gpu benefit and bound fullscreen optimization",
+          "session_id": "opencode:ses_05f2772a4ffekSp6pg7apyFiSw",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-07-27T00:36:34.587Z",
+          "started_at": "2026-07-27T00:35:29.329Z",
+          "status": "completed",
+          "ended_at": "2026-07-27T00:36:34.587Z",
+          "elapsed_ms": 65258
+        },
+        "todo:18": {
+          "task_key": "todo:18",
+          "task_label": "18",
+          "task_title": "Implement SDL2 CLUU audio backend over audiod",
+          "session_id": "opencode:ses_05efec9a9ffeQXvGYSJLn1IooC",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-07-27T00:51:10.650Z",
+          "started_at": "2026-07-27T00:50:59.338Z",
+          "status": "completed",
+          "ended_at": "2026-07-27T00:51:10.650Z",
+          "elapsed_ms": 11312
+        },
+        "todo:19": {
+          "task_key": "todo:19",
+          "task_label": "19",
+          "task_title": "Migrate DOOM to pinned SDL2 and retire transitional shim",
+          "session_id": "opencode:ses_05ef13aa5ffeJxdfGhEN7pbnly",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-07-27T01:52:44.099Z",
+          "started_at": "2026-07-27T01:09:35.177Z",
+          "status": "completed",
+          "ended_at": "2026-07-27T01:52:44.099Z",
+          "elapsed_ms": 2588922
+        },
+        "todo:21": {
+          "task_key": "todo:21",
+          "task_label": "21",
+          "task_title": "Validate portability with one independent NES emulator",
+          "session_id": "opencode:ses_05eb915a2ffeN3AQRkp1eMeVNV",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-07-27T02:07:40.027Z",
+          "started_at": "2026-07-27T02:07:40.027Z",
+          "status": "running"
+        },
+        "todo:22": {
+          "task_key": "todo:22",
+          "task_label": "22",
+          "task_title": "Close performance, security, docs, and regression evidence",
+          "session_id": "opencode:ses_05eaa9f64ffeCY7tRx9UQJZPh1",
+          "agent": "sol",
+          "updated_at": "2026-07-27T02:36:42.241Z",
+          "started_at": "2026-07-27T02:11:06.628Z",
+          "status": "completed",
+          "ended_at": "2026-07-27T02:36:42.241Z",
+          "elapsed_ms": 1535613
+        },
+        "final-wave:f1": {
+          "task_key": "final-wave:f1",
+          "task_label": "F1",
+          "task_title": "Plan compliance audit",
+          "session_id": "opencode:ses_05e5ec591ffeiTKPNSomZii3XT",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "started_at": "2026-07-27T03:18:24.202Z",
+          "status": "completed",
+          "updated_at": "2026-07-27T03:43:32.988Z",
+          "ended_at": "2026-07-27T03:43:32.988Z",
+          "elapsed_ms": 1508786
+        }
+      },
+      "ended_at": "2026-07-27T03:44:26.230Z",
+      "elapsed_ms": 32012624
     }
-  }
+  },
+  "active_plan": "/home/vlb2bp/git/cluu/.omo/plans/cluu-multimedia-stack.md",
+  "started_at": "2026-07-26T18:50:53.606Z",
+  "status": "completed",
+  "updated_at": "2026-07-27T03:44:26.230Z",
+  "session_ids": [
+    "opencode:ses_06098e3f2ffeINFrnozJWhavk1"
+  ],
+  "session_origins": {
+    "opencode:ses_06098e3f2ffeINFrnozJWhavk1": "direct"
+  },
+  "plan_name": "cluu-multimedia-stack",
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "Protect and classify current dirty multimedia work",
+      "session_id": "opencode:ses_0603a9736ffetwEzl4qq2xOvEg",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-07-26T18:55:49.327Z",
+      "started_at": "2026-07-26T18:55:35.759Z",
+      "status": "completed",
+      "ended_at": "2026-07-26T18:55:49.327Z",
+      "elapsed_ms": 13568
+    },
+    "todo:2": {
+      "task_key": "todo:2",
+      "task_label": "2",
+      "task_title": "Establish reproducible host/guest multimedia baseline",
+      "session_id": "opencode:ses_06035a90affeBD8eGCBVGuTMLg",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-07-26T19:42:45.871Z",
+      "started_at": "2026-07-26T19:41:47.547Z",
+      "status": "completed",
+      "ended_at": "2026-07-26T19:42:45.871Z",
+      "elapsed_ms": 58324
+    },
+    "todo:3": {
+      "task_key": "todo:3",
+      "task_label": "3",
+      "task_title": "Correct and freeze multimedia architecture contracts",
+      "session_id": "opencode:ses_0600bc896ffe4TL9anULHuZVVG",
+      "agent": "Sisyphus-Junior",
+      "started_at": "2026-07-26T19:52:13.882Z",
+      "status": "completed",
+      "updated_at": "2026-07-26T19:54:37.657Z",
+      "ended_at": "2026-07-26T19:54:37.657Z",
+      "elapsed_ms": 143775
+    },
+    "todo:4": {
+      "task_key": "todo:4",
+      "task_label": "4",
+      "task_title": "Define typed display protocol and buffer state machine",
+      "session_id": "opencode:ses_06000bf8affeMz72vztJLXEWBh",
+      "agent": "Sisyphus-Junior",
+      "category": "ultrabrain",
+      "updated_at": "2026-07-26T20:03:25.419Z",
+      "started_at": "2026-07-26T20:03:14.301Z",
+      "status": "completed",
+      "ended_at": "2026-07-26T20:03:25.419Z",
+      "elapsed_ms": 11118
+    },
+    "todo:5": {
+      "task_key": "todo:5",
+      "task_label": "5",
+      "task_title": "Build displayd pure scene/composition core",
+      "session_id": "opencode:ses_05ff80997ffe9Xs264MiTDgyqm",
+      "agent": "Sisyphus-Junior",
+      "category": "ultrabrain",
+      "updated_at": "2026-07-26T20:37:46.713Z",
+      "started_at": "2026-07-26T20:31:17.544Z",
+      "status": "completed",
+      "ended_at": "2026-07-26T20:37:46.713Z",
+      "elapsed_ms": 389169
+    },
+    "todo:7": {
+      "task_key": "todo:7",
+      "task_label": "7",
+      "task_title": "Launch displayd with linear-framebuffer backend",
+      "session_id": "opencode:ses_05fd8fadfffeWxNeIyNR1USeHA",
+      "agent": "Sisyphus-Junior",
+      "started_at": "2026-07-26T21:14:30.109Z",
+      "status": "completed",
+      "updated_at": "2026-07-26T21:24:39.974Z",
+      "ended_at": "2026-07-26T21:24:39.974Z",
+      "elapsed_ms": 609865
+    },
+    "todo:8": {
+      "task_key": "todo:8",
+      "task_label": "8",
+      "task_title": "Convert compositor into displayd WM and TUI-surface client",
+      "session_id": "opencode:ses_05fae2078ffeILTGT753870suA",
+      "agent": "Sisyphus-Junior",
+      "started_at": "2026-07-26T22:17:04.584Z",
+      "status": "completed",
+      "updated_at": "2026-07-26T22:20:32.966Z",
+      "ended_at": "2026-07-26T22:20:32.966Z",
+      "elapsed_ms": 208382
+    },
+    "todo:9": {
+      "task_key": "todo:9",
+      "task_label": "9",
+      "task_title": "Migrate native pixel clients to surfaces and remove direct framebuffer escape",
+      "session_id": "opencode:ses_05f7abf5bffeY9n6hBATxyTQWw",
+      "agent": "Sisyphus-Junior",
+      "started_at": "2026-07-26T22:56:53.134Z",
+      "status": "completed",
+      "updated_at": "2026-07-26T23:03:15.119Z",
+      "ended_at": "2026-07-26T23:03:15.119Z",
+      "elapsed_ms": 381985
+    },
+    "todo:10": {
+      "task_key": "todo:10",
+      "task_label": "10",
+      "task_title": "Prove displayd isolation, lifecycle, visual parity, and fail-stop behavior",
+      "session_id": "opencode:ses_05f53df1bffeMzpVflBxUSgJoF",
+      "agent": "Sisyphus-Junior",
+      "started_at": "2026-07-26T23:25:21.469Z",
+      "status": "completed",
+      "updated_at": "2026-07-26T23:51:55.605Z",
+      "ended_at": "2026-07-26T23:51:55.605Z",
+      "elapsed_ms": 1594136
+    },
+    "todo:13": {
+      "task_key": "todo:13",
+      "task_label": "13",
+      "task_title": "Measure virtio-gpu benefit and bound fullscreen optimization",
+      "session_id": "opencode:ses_05f2772a4ffekSp6pg7apyFiSw",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-07-27T00:36:34.587Z",
+      "started_at": "2026-07-27T00:35:29.329Z",
+      "status": "completed",
+      "ended_at": "2026-07-27T00:36:34.587Z",
+      "elapsed_ms": 65258
+    },
+    "todo:18": {
+      "task_key": "todo:18",
+      "task_label": "18",
+      "task_title": "Implement SDL2 CLUU audio backend over audiod",
+      "session_id": "opencode:ses_05efec9a9ffeQXvGYSJLn1IooC",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-07-27T00:51:10.650Z",
+      "started_at": "2026-07-27T00:50:59.338Z",
+      "status": "completed",
+      "ended_at": "2026-07-27T00:51:10.650Z",
+      "elapsed_ms": 11312
+    },
+    "todo:19": {
+      "task_key": "todo:19",
+      "task_label": "19",
+      "task_title": "Migrate DOOM to pinned SDL2 and retire transitional shim",
+      "session_id": "opencode:ses_05ef13aa5ffeJxdfGhEN7pbnly",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-07-27T01:52:44.099Z",
+      "started_at": "2026-07-27T01:09:35.177Z",
+      "status": "completed",
+      "ended_at": "2026-07-27T01:52:44.099Z",
+      "elapsed_ms": 2588922
+    },
+    "todo:21": {
+      "task_key": "todo:21",
+      "task_label": "21",
+      "task_title": "Validate portability with one independent NES emulator",
+      "session_id": "opencode:ses_05eb915a2ffeN3AQRkp1eMeVNV",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-07-27T02:07:40.027Z",
+      "started_at": "2026-07-27T02:07:40.027Z",
+      "status": "running"
+    },
+    "todo:22": {
+      "task_key": "todo:22",
+      "task_label": "22",
+      "task_title": "Close performance, security, docs, and regression evidence",
+      "session_id": "opencode:ses_05eaa9f64ffeCY7tRx9UQJZPh1",
+      "agent": "sol",
+      "updated_at": "2026-07-27T02:36:42.241Z",
+      "started_at": "2026-07-27T02:11:06.628Z",
+      "status": "completed",
+      "ended_at": "2026-07-27T02:36:42.241Z",
+      "elapsed_ms": 1535613
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "Plan compliance audit",
+      "session_id": "opencode:ses_05e5ec591ffeiTKPNSomZii3XT",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "started_at": "2026-07-27T03:18:24.202Z",
+      "status": "completed",
+      "updated_at": "2026-07-27T03:43:32.988Z",
+      "ended_at": "2026-07-27T03:43:32.988Z",
+      "elapsed_ms": 1508786
+    }
+  },
+  "agent": "atlas",
+  "ended_at": "2026-07-27T03:44:26.230Z",
+  "elapsed_ms": 32012624
 }

@@ -29,6 +29,8 @@ use libcluu::{debug_print, Error, Result};
 
 pub const PERIOD_BYTES: usize = 2048;
 pub const BUFFER_BYTES: u32 = 8192;
+const MIN_PERIOD_BYTES: usize = 64;
+const MAX_PERIOD_BYTES: usize = 4096;
 const MAX_SESSIONS: usize = 1;
 const SELF_TEST_PERIODS: usize = 16;
 const SELF_TEST_SESSION: u32 = 0xFFFF_FFFF;
@@ -43,6 +45,7 @@ pub struct AudioSession {
     pub format: u8,
     pub rate: u8,
     pub channels: u8,
+    pub period_bytes: usize,
     pub grant_target_va: usize,
     pub xfer_regions: Vec<DmaRegion>,
     pub status_regions: Vec<DmaRegion>,
@@ -67,6 +70,7 @@ pub fn handle_open_session(
     format: u8,
     rate: u8,
     channels: u8,
+    requested_period_bytes: usize,
     reply_token: Option<usize>,
 ) -> Result<()> {
     let sid = *next_session_id;
@@ -85,20 +89,22 @@ pub fn handle_open_session(
         return Err(Error::Busy);
     }
 
+    let period_bytes = clamp_period_bytes(requested_period_bytes);
+
     let s = crate::control::pcm_set_params(
         transport,
         vq_ctrl,
         pool,
         stream_id,
         BUFFER_BYTES,
-        PERIOD_BYTES as u32,
+        period_bytes as u32,
         channels,
         format,
         rate,
     )?;
     debug_print(&format!(
-        "virtio-snd: session_open set_params rate={} ch={} fmt={} status={:#06x}",
-        rate, channels, format, s
+        "virtio-snd: session_open set_params rate={} ch={} fmt={} period_bytes={} req={} status={:#06x}",
+        rate, channels, format, period_bytes, requested_period_bytes, s
     ))?;
     if s != proto::S_OK {
         let rmsg = Message::new(AUDIO_OPEN_SESSION, [1, 0, 0, 0, 0, 0], 1);
@@ -129,6 +135,7 @@ pub fn handle_open_session(
             format,
             rate,
             channels,
+            period_bytes,
             grant_target_va,
             xfer_regions,
             status_regions,
@@ -139,13 +146,19 @@ pub fn handle_open_session(
 
     let rmsg = Message::new(
         AUDIO_OPEN_SESSION,
-        [0, sid as usize, driver_space_token, grant_target_va, 0, 0],
-        4,
+        [0, sid as usize, driver_space_token, grant_target_va, period_bytes, 0],
+        5,
     );
     if let Some(rt) = reply_token {
         let _ = reply(rt, &rmsg, IpcFlags::empty());
     }
     Ok(())
+}
+
+fn clamp_period_bytes(req: usize) -> usize {
+    let mut p = req.clamp(MIN_PERIOD_BYTES, MAX_PERIOD_BYTES);
+    p = (p + 3) & !3;
+    p.min(MAX_PERIOD_BYTES)
 }
 
 pub fn handle_submit_pcm(
@@ -166,7 +179,7 @@ pub fn handle_submit_pcm(
         .get_mut(&session_id)
         .ok_or(Error::InvalidArgument)?;
 
-    if pcm_len == 0 || pcm_len > PERIOD_BYTES {
+    if pcm_len == 0 || pcm_len > session.period_bytes {
         return Err(Error::InvalidArgument);
     }
     if page_index >= RING_SLOTS {
@@ -176,7 +189,7 @@ pub fn handle_submit_pcm(
         return Err(Error::Busy);
     }
 
-    let pcm_va = session.grant_target_va + page_index * PERIOD_BYTES;
+    let pcm_va = session.grant_target_va + page_index * session.period_bytes;
     let pcm_phys = virt_to_phys(space_token, pcm_va)? as u64;
 
     let xfer = &session.xfer_regions[page_index];
@@ -359,6 +372,7 @@ pub fn self_test(
             format: proto::PCM_FMT_S16,
             rate: proto::PCM_RATE_44100,
             channels: 2,
+            period_bytes: PERIOD_BYTES,
             grant_target_va: silence_region.virt,
             xfer_regions,
             status_regions,

@@ -5,7 +5,7 @@
 //! ownership and lifetime explicit and avoids global singletons.
 
 use crate::boot::BootSnapshot;
-use libcluu::{endpoint_create, token_derive, Result, Rights};
+use libcluu::{endpoint_create, token_derive, token_derive_scoped_irq, Result, Rights};
 
 /// Shared resources available to every service during startup.
 pub struct InitContext<'a> {
@@ -57,35 +57,39 @@ impl<'a> InitContext<'a> {
         )?;
 
         // Keyboard service needs an IRQ handle token.
-        let kbd_irq_token = token_derive(
-            boot.root_token,
-            Rights::IRQ_HANDLE.bits() as usize,
+        let kbd_irq_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits(),
             u64::MAX,
+            1,
         )?;
 
-        // virtio-blk IRQ handle for IRQ 11 (virtio-blk on QEMU PIC).
-        let virtio_blk_irq_token = token_derive(
-            boot.root_token,
-            Rights::IRQ_HANDLE.bits() as usize,
+        let virtio_blk_irq_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits(),
             u64::MAX,
+            11,
         )?;
 
-        let virtio_9p_irq_token = token_derive(
-            boot.root_token,
-            Rights::IRQ_HANDLE.bits() as usize,
+        let virtio_9p_irq_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits(),
             u64::MAX,
+            9,
         )?;
 
-        let virtio_net_irq_token = token_derive(
-            boot.root_token,
-            Rights::IRQ_HANDLE.bits() as usize,
+        let virtio_net_irq_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits(),
             u64::MAX,
+            10,
         )?;
 
-        let virtio_snd_irq_token = token_derive(
-            boot.root_token,
-            Rights::IRQ_HANDLE.bits() as usize,
+        let virtio_snd_irq_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK).bits(),
             u64::MAX,
+            10,
         )?;
 
         // PCI_ACCESS token for ACPI shutdown/reset port I/O.
@@ -95,13 +99,11 @@ impl<'a> InitContext<'a> {
             u64::MAX,
         )?;
 
-        // IRQ handle root token for devmgr (D3.1).  Carries GRANT so devmgr
-        // can sub-derive per-driver IRQ_HANDLE | IRQ_ACK tokens via
-        // MINT_IRQ_CAP.  Wired to devmgr's TOKEN_EXTRA_2.
-        let irq_handle_root_token = token_derive(
-            boot.root_token,
-            (Rights::IRQ_HANDLE | Rights::IRQ_ACK | Rights::GRANT).bits() as usize,
+        let irq_handle_root_token = token_derive_scoped_irq(
+            boot.irq_root_token,
+            (Rights::IRQ_HANDLE | Rights::IRQ_ACK | Rights::GRANT).bits(),
             u64::MAX,
+            u32::MAX,
         )?;
 
         Ok(Self {

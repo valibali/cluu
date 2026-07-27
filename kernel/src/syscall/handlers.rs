@@ -767,6 +767,7 @@ pub fn sys_invoke(args: SyscallArgs) -> SyscallResult {
         InvokeOp::SpaceUnmap => invoke_space_unmap(&token, obj_ref, args),
         InvokeOp::SpaceGrant => invoke_space_grant(&token, obj_ref, args),
         InvokeOp::SpaceMapRange => invoke_space_map_range(&token, obj_ref, args),
+        InvokeOp::SpaceMapAuto => invoke_space_map_auto(&token, obj_ref, args),
         InvokeOp::SpaceProtect => invoke_space_protect(&token, obj_ref, args),
         InvokeOp::SpaceGetStats => invoke_space_get_stats(&token, obj_ref, args),
         InvokeOp::FutexWait => invoke_futex_wait(&token, obj_ref, args),
@@ -2611,6 +2612,91 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
     }
 }
 
+fn invoke_space_map_auto(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> SyscallResult {
+    use crate::mm::{frame_registry, space_repository};
+    use crate::mm::space::layout;
+    use crate::token::{Rights, ObjectType};
+    use klibcluu::util::PAGE_SIZE_USIZE as PAGE_SIZE;
+
+    if !token.has_right(Rights::SPACE_MAP) {
+        return Err(Error::PermissionDenied);
+    }
+
+    let frame_token_handle = TokenHandle::from_raw(args.arg3);
+    let flags = args.arg4 as u32;
+    let num_pages = args.arg5;
+
+    if num_pages == 0 || num_pages > 32768 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let writable = (flags & 0x02) != 0;
+    let executable = (flags & 0x04) != 0;
+
+    let (frame_tok, frame_obj_ref) = crate::token::lookup_token(frame_token_handle)
+        .map_err(|_| Error::InvalidArgument)?;
+    if !frame_tok.has_right(Rights::MAP) {
+        return Err(Error::PermissionDenied);
+    }
+    let frame_id = if let ObjectRef::Frame(id) = frame_obj_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+    let phys_base = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
+
+    let space_ref = crate::token::check_object_type(obj_ref, ObjectType::Space)
+        .map_err(|_| Error::InvalidArgument)?;
+    let space_id = if let ObjectRef::Space(id) = space_ref {
+        id
+    } else {
+        return Err(Error::InvalidArgument);
+    };
+
+    let total_bytes = num_pages * PAGE_SIZE;
+    let va = space_repository::with_space_mut(space_id, |space| {
+        let va = space.shm_next_va;
+        let next = va + total_bytes as u64;
+        if next > layout::SHM_END {
+            return None;
+        }
+        space.shm_next_va = next;
+        Some(va)
+    }).ok_or(Error::NotFound)?.ok_or(Error::OutOfMemory)?;
+
+    frame_registry::inc_map_count(frame_id);
+    for page_idx in 0..num_pages {
+        let virt_addr = va + (page_idx * PAGE_SIZE) as u64;
+        let phys_addr = phys_base + (page_idx * PAGE_SIZE) as u64;
+        let _ = crate::mm::frame_table::inc_ref(phys_addr);
+        let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
+            crate::elf::map_user_page(
+                virt_addr,
+                phys_addr,
+                writable,
+                executable,
+                space.page_table_root,
+                space_id,
+            )
+        });
+        match map_result {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                let _ = crate::mm::frame_table::dec_ref(phys_addr);
+                frame_registry::dec_map_count(frame_id);
+                return Err(Error::OutOfMemory);
+            }
+            None => {
+                let _ = crate::mm::frame_table::dec_ref(phys_addr);
+                frame_registry::dec_map_count(frame_id);
+                return Err(Error::NotFound);
+            }
+        }
+    }
+
+    Ok(va as usize)
+}
+
 /// Map a range using 4KB pages (internal helper)
 fn map_range_4kb(req: MapRange4kbRequest) -> SyscallResult {
     use crate::elf;
@@ -3075,6 +3161,14 @@ fn invoke_token_derive_scoped(
             }
 
             OR::DeviceRegion { device_id: parent_device, region_kind: parent_kind, base: child_base, len: child_len }
+        }
+        OR::Irq(parent_irq) => {
+            let child_irq = args.arg5 as u32;
+            if child_irq != parent_irq && parent_irq != u32::MAX {
+                klibcluu::warn("invoke_token_derive_scoped: irq line escape rejected");
+                return Err(Error::PermissionDenied);
+            }
+            OR::Irq(child_irq)
         }
         _ => {
             klibcluu::warn("invoke_token_derive_scoped: token type not scoping-capable");

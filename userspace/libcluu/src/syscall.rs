@@ -130,6 +130,9 @@ pub enum InvokeOp {
     // registered pressure-notification endpoint to release caches.
     // Must match the kernel's InvokeOp::MemoryPressure discriminant.
     MemoryPressure = 87,
+
+    // Map a frame token at a kernel-chosen VA (returned via syscall result).
+    SpaceMapAuto = 88,
 }
 
 /// Page mapping flags for space_map.
@@ -923,6 +926,27 @@ pub fn space_map_range(
     }
 }
 
+/// Map a frame token at a kernel-chosen VA. Returns the VA.
+///
+/// `flags`: 0x02 = writable, 0x04 = executable (same as space_map_range).
+pub fn space_map_auto(
+    space_token: usize,
+    frame_token: usize,
+    flags: usize,
+    num_pages: usize,
+) -> Result<usize> {
+    unsafe {
+        invoke(
+            space_token,
+            InvokeOp::SpaceMapAuto,
+            frame_token,
+            flags,
+            num_pages,
+            0,
+        )
+    }
+}
+
 /// Unmap pages from the current address space.
 ///
 /// # Arguments
@@ -1212,6 +1236,24 @@ pub fn token_derive_scoped_block_region(
             expire_ts as usize,
             child_start_sector as usize,
             child_sector_count as usize,
+        )
+    }
+}
+
+pub fn token_derive_scoped_irq(
+    parent: usize,
+    new_rights: u32,
+    expire_ts: u64,
+    child_irq: u32,
+) -> Result<usize> {
+    unsafe {
+        invoke(
+            parent,
+            InvokeOp::TokenDeriveScoped,
+            new_rights as usize,
+            expire_ts as usize,
+            child_irq as usize,
+            0,
         )
     }
 }

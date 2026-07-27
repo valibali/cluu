@@ -16,7 +16,8 @@ use alloc::vec::Vec;
 
 use crate::boot::{process_info, TOKEN_IPC};
 use crate::ipc::{
-    parse_message, AUDIO_CLOSE, AUDIO_COMPLETE, AUDIO_OPEN_SESSION, AUDIO_SUBMIT_PCM,
+    parse_message, AUDIO_CLOSE, AUDIO_COMPLETE, AUDIO_OPEN_SESSION, AUDIO_QUERY_CAPS,
+    AUDIO_SUBMIT_PCM,
 };
 use crate::syscall::{endpoint_create, ipc_call, ipc_recv_any, ipc_send};
 use crate::types::Message;
@@ -33,6 +34,9 @@ pub struct AudioSessionClient {
     pending: Vec<(PcmHandle, Result<()>)>,
     pub grant_target_va: usize,
     pub driver_space_token: usize,
+    /// Actual period size in bytes, as accepted/clamped by the driver.
+    /// Callers must use this for slot VA math and submit_grant lengths.
+    pub period_bytes: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -40,6 +44,9 @@ pub struct PcmParams {
     pub format: u8,
     pub rate: u8,
     pub channels: u8,
+    /// Requested period size in bytes. Driver may clamp; see
+    /// `AudioSessionClient::period_bytes` for the actual value.
+    pub period_bytes: u32,
 }
 
 impl Default for PcmParams {
@@ -48,6 +55,7 @@ impl Default for PcmParams {
             format: PCM_FMT_S16,
             rate: PCM_RATE_44100,
             channels: 2,
+            period_bytes: 2048,
         }
     }
 }
@@ -82,6 +90,58 @@ pub fn hz_to_rate(hz: u32) -> u8 {
     }
 }
 
+pub fn rate_to_hz(r: u8) -> u32 {
+    match r {
+        PCM_RATE_5512 => 5512,
+        PCM_RATE_8000 => 8000,
+        PCM_RATE_11025 => 11025,
+        PCM_RATE_16000 => 16000,
+        PCM_RATE_22050 => 22050,
+        PCM_RATE_32000 => 32000,
+        PCM_RATE_44100 => 44100,
+        PCM_RATE_48000 => 48000,
+        PCM_RATE_64000 => 64000,
+        PCM_RATE_88200 => 88200,
+        PCM_RATE_96000 => 96000,
+        _ => 44100,
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DriverCaps {
+    pub formats: u64,
+    pub rates: u64,
+    pub channels: u64,
+}
+
+impl DriverCaps {
+    pub fn supports_format(&self, fmt: u8) -> bool {
+        (self.formats & (1u64 << fmt)) != 0
+    }
+    pub fn supports_rate(&self, rate_hz: u32) -> bool {
+        let r = hz_to_rate(rate_hz);
+        (self.rates & (1u64 << r)) != 0
+    }
+    pub fn supports_channels(&self, ch: u8) -> bool {
+        (self.channels & (1u64 << ch)) != 0
+    }
+}
+
+pub fn query_driver_caps(driver_endpoint: usize) -> Result<DriverCaps> {
+    let req = Message::new(AUDIO_QUERY_CAPS, [0, 0, 0, 0, 0, 0], 0);
+    let mut reply_buf = [0u8; 64];
+    let bytes = ipc_call(driver_endpoint, req.as_bytes(), &mut reply_buf)?;
+    let (rmsg, _) = parse_message(&reply_buf[..bytes]).ok_or(Error::InvalidState)?;
+    if rmsg.tag.label != AUDIO_QUERY_CAPS || rmsg.words[0] != 0 {
+        return Err(Error::InvalidState);
+    }
+    Ok(DriverCaps {
+        formats: rmsg.words[1] as u64,
+        rates: rmsg.words[2] as u64,
+        channels: rmsg.words[3] as u64,
+    })
+}
+
 impl AudioSessionClient {
     pub fn open(driver_endpoint: usize, params: PcmParams) -> Result<Self> {
         let info = process_info();
@@ -95,10 +155,10 @@ impl AudioSessionClient {
                 params.format as usize,
                 params.rate as usize,
                 params.channels as usize,
-                0,
+                params.period_bytes as usize,
                 0,
             ],
-            4,
+            5,
         );
         let mut reply_buf = [0u8; 64];
         let bytes = ipc_call(driver_endpoint, req.as_bytes(), &mut reply_buf)?;
@@ -109,6 +169,7 @@ impl AudioSessionClient {
         let session_id = rmsg.words[1] as u32;
         let driver_space_token = rmsg.words[2];
         let grant_target_va = rmsg.words[3];
+        let actual_period_bytes = rmsg.words[4];
         Ok(Self {
             driver_endpoint,
             completion_endpoint,
@@ -117,7 +178,12 @@ impl AudioSessionClient {
             pending: Vec::new(),
             grant_target_va,
             driver_space_token,
+            period_bytes: actual_period_bytes,
         })
+    }
+
+    pub fn completion_endpoint(&self) -> usize {
+        self.completion_endpoint
     }
 
     pub fn submit_grant(&mut self, page_index: usize, len: usize) -> Result<PcmHandle> {

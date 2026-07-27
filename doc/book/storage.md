@@ -206,7 +206,7 @@ Targeted optimization round: ext2 throughput from ~9 MB/s to 803 MB/s,
 - **MSIZE 64 KB→256 KB** (`virtio-9p/src/main.rs`): QEMU 11.0.2 accepts
   256 KB via `TVERSION` negotiation. Virtqueue expanded 64→128 descriptors
   (1 req + 64 response pages). 4× fewer round-trips for large reads.
-- **mp3player READ_CHUNK 4 KB→64 KB** (`mp3player/src/main.rs`): 16× fewer
+- **cluuamp READ_CHUNK 4 KB→64 KB** (`cluuamp/src/audio.rs`): 16× fewer
   IPC round-trips during file load. `SCRATCH_PAGES` 16→24 to fit the larger
   grant buffer window.
 

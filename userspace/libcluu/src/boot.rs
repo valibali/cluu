@@ -14,6 +14,7 @@ pub struct BootInfo {
     pub view_mgr_token: usize,
     pub block_region_token: usize,
     pub device_region_token: usize,
+    pub irq_root_token: usize,
     pub initrd_phys: u64,
     pub initrd_size: u64,
     pub fb_phys: u64,
@@ -40,6 +41,11 @@ pub fn root_token_handle() -> usize {
 /// Clock token handle supplied by the kernel.
 pub fn clock_token_handle() -> usize {
     boot_info().clock_token
+}
+
+/// IRQ root token handle supplied by the kernel.
+pub fn irq_root_token_handle() -> usize {
+    boot_info().irq_root_token
 }
 
 /// Universal process info address - same for all processes.

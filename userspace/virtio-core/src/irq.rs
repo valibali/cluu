@@ -6,23 +6,27 @@
 //! token list — when an IRQ fires the loop wakes, reads ISR (the caller
 //! does this), and drains the used ring.
 
-use libcluu::syscall::{endpoint_create, irq_attach};
+use libcluu::syscall::{endpoint_create, irq_ack, irq_attach};
 use libcluu::Result;
 
 pub struct IrqSource {
     pub endpoint: usize,
     pub irq_number: usize,
+    irq_token: usize,
 }
 
 impl IrqSource {
-    /// Allocate a fresh endpoint and attach IRQ delivery to it. The
-    /// endpoint token is returned for inclusion in `recv_any` lists.
     pub fn new(ipc_token: usize, irq_token: usize, irq_number: usize) -> Result<Self> {
         let endpoint = endpoint_create(ipc_token)?;
         irq_attach(irq_token, endpoint, irq_number)?;
         Ok(Self {
             endpoint,
             irq_number,
+            irq_token,
         })
+    }
+
+    pub fn ack(&self) -> Result<()> {
+        irq_ack(self.irq_token)
     }
 }

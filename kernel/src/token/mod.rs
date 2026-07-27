@@ -466,6 +466,8 @@ pub enum InvokeOp {
     /// Requires WRITE right on the notification token. No-op if no
     /// waiter is registered (bits accumulate until consumed).
     MemoryPressure = 87,
+
+    SpaceMapAuto = 88,
 }
 
 impl InvokeOp {
@@ -523,6 +525,7 @@ impl InvokeOp {
             85 => Some(Self::ThreadSetSession),
             86 => Some(Self::ThreadSetSystemScope),
             87 => Some(Self::MemoryPressure),
+            88 => Some(Self::SpaceMapAuto),
             _ => None,
         }
     }
