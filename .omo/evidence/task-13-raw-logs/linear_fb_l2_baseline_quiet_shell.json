@@ -1,0 +1,83 @@
+{
+  "state": "l2_baseline_quiet_shell",
+  "label": "Quiet shell",
+  "backend": "linear_fb",
+  "display": "none",
+  "passed": true,
+  "error": null,
+  "n_windows": 3,
+  "windows": [
+    {
+      "index": 0,
+      "duration_s": 15.757666666666667,
+      "thread_cpu_pct": {
+        "main": 0.9990101273558851,
+        "other": 0.0,
+        "vcpu": 98.9033291178447
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 17,
+          "bytes": 17
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 17,
+          "cells": 17
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 17
+        }
+      }
+    },
+    {
+      "index": 1,
+      "duration_s": 15.757666666666667,
+      "thread_cpu_pct": {
+        "main": 0.999099014683111,
+        "other": 0.0,
+        "vcpu": 2.997588686442159
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 20,
+          "bytes": 20
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 20,
+          "cells": 20
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 20
+        }
+      }
+    },
+    {
+      "index": 2,
+      "duration_s": 15.757666666666667,
+      "thread_cpu_pct": {
+        "main": 0.9990152607609071,
+        "other": 0.0,
+        "vcpu": 2.9971266204024114
+      },
+      "frame_count": 0,
+      "fps": 0.0,
+      "probe_counts": {
+        "BENCH_COMP_SHM2BB": {
+          "cycles": 27,
+          "bytes": 27
+        },
+        "BENCH_COMP_GRID2BB": {
+          "cycles": 27,
+          "cells": 27
+        },
+        "BENCH_COMP_FRAME": {
+          "cycles": 27
+        }
+      }
+    }
+  ]
+}

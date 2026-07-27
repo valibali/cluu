@@ -1,0 +1,34 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/xtask run --display none`
+▸ Starting QEMU...
+  Press Ctrl+C to exit
+  Serial output will appear in this terminal
+  Network: host HTTP server on http://127.0.0.1:9876 (pid 1836538)
+  From inside CLUU: curl 10.0.2.2:9876
+pulseaudio: set_sink_input_volume() failed Reason: Invalid argument
+pulseaudio: set_sink_input_mute() failed Reason: Invalid argument
+pulseaudio: set_source_output_volume() failed Reason: Invalid argument
+pulseaudio: set_source_output_mute() failed Reason: Invalid argument
+[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+Booting OS...
+ * Locate initrd in Option ROMs
+ * Locate initrd in \BOOTBOOT\INITRD
+ * Gzip compressed initrd @3DB25000 6018683 bytes
+ * Initrd loaded @3A233000 30419968 bytes
+ * Environment @3E3B6000 59 bytes
+ * Screen 1920 x 1080, scanline 7680, fb @80000000 8294400 bytes, type 1 ARGB
+ * System tables
+ * System time 2026-07-27 00:27:30 GMT+0:00 
+ * tar sys/core
+ * Parsing ELF64 @3B280600
+ * fb          @FFFFFFFFFC000000
+ * bootboot    @FFFFFFFFFFE00000
+ * environment @FFFFFFFFFFE01000
+ * Entry point @FFFFFFFFFFE02924, text @3DF33000 1769472 bytes
+ * Stack size  8192 bytes per core
+ * SMP numcores 1
+ * Pagetables PML4 @3DF0C000
+ * Memory Map @3E114000 7536 bytes try #1
+qemu-system-x86_64: terminating on signal 15 from pid 1836527 (timeout)
