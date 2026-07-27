@@ -1,0 +1,22 @@
+FROM minimal
+# fceux 2.6.5 NES emulator — portability validation target (T21).
+#
+# STATUS: BLOCKED — fceux 2.6.5 cannot compile against CLUU's newlib
+# toolchain. See .omo/evidence/task-21-cluu-multimedia-stack.md for the
+# full blocker analysis. The task BLOCKS and escalates to GPT-5.6 Sol
+# for architecture review.
+#
+# No DEVICE profile — fceux would go through displayd+audiod via SDL2
+# backends (matching the DOOM pattern from T19), not direct device
+# access. ipc+registry suffice for VFS ROM loading and SDL2 CLUU
+# backend IPC.
+#
+# The BUILD line below is the INTENDED build command if/when the port
+# succeeds. It does not exist in xtask yet because the build is blocked
+# at the compilation stage (no C++ standard library in the CLUU
+# newlib toolchain).
+PROFILE ipc registry
+MOUNT /tmp inherit
+MOUNT /host ro
+BUILD "cargo xtask build-fceux" target/x86_64-cluu-user/debug/fceux.elf /bin/fceux
+ENTRYPOINT /bin/fceux
