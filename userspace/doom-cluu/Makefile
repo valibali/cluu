@@ -23,12 +23,15 @@ POSIX_DEFS = -D_POSIX_TIMERS=1 -D_POSIX_MONOTONIC_CLOCK=200112L \
              -D_POSIX_THREADS=1 -D_POSIX_PRIORITY_SCHEDULING=1 \
              -DSSIZE_MAX=0x7FFFFFFFFFFFFFFFL
 
-# doomgeneric config: no sound (stubbed), no mmap, 640x400 XRGB8888
+# doomgeneric config: FEATURE_SOUND, SDL2 with CLUU video/events/audio backends.
+# __CLUU__ selects SDL_config_cluu.h in SDL_config.h.
 DOOM_DEFS = -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 \
             -DHAVE_UNISTD_H=1 -DHAVE_SYS_STAT_H=1 -DHAVE_INTTYPES_H=1 \
             -DHAVE_STDINT_H=1 -DHAVE_STDLIB_H=1 -DHAVE_STRINGS_H=1 \
             -DHAVE_STRING_H=1 -DHAVE_SYS_TYPES_H=1 \
-            -DSTDC_HEADERS=1
+            -DSTDC_HEADERS=1 \
+            -D__CLUU__=1 \
+          -DFEATURE_SOUND
 
 CFLAGS = -std=gnu11 -Wall -Wno-unused-parameter -Wno-sign-compare \
          -Wno-old-style-definition -Wno-missing-prototypes \
@@ -39,6 +42,7 @@ CFLAGS = -std=gnu11 -Wall -Wno-unused-parameter -Wno-sign-compare \
          -isystem $(NEWLIB_INC) \
          -I$(DOOM_TOP) \
          -I$(PORT_DIR) \
+         -I$(PORT_DIR)/../sdl2/SDL2-2.30.0/include \
          $(POSIX_DEFS) $(DOOM_DEFS) \
          -mno-red-zone -fdata-sections -ffunction-sections \
          -g -O2 -DNDEBUG
@@ -62,9 +66,13 @@ SRC_DOOM = \
     i_input.o i_video.o doomgeneric.o mus2mid.o
 
 # w_file_stdc.o removed — replaced by port-local w_file_cluu.o (grant-based)
-CLUU_OBJS = $(BUILD)/w_file_cluu.o
+# i_sdlsound.o / i_sdlmusic.o removed — replaced by port-local i_cluu_sound.o
+#   (in-process 8-channel SFX mixer with SDL2 audio output)
+# doomgeneric_sdl.o removed — replaced by port-local doomgeneric_sdl_cluu.o
+#   (minimal patch of upstream: software renderer, CLUU hint activation)
+CLUU_OBJS = $(BUILD)/w_file_cluu.o $(BUILD)/i_cluu_sound.o $(BUILD)/doomgeneric_sdl_cluu.o
 
-OBJS = $(addprefix $(BUILD)/, $(SRC_DOOM)) $(CLUU_OBJS) $(BUILD)/main.o
+OBJS = $(addprefix $(BUILD)/, $(SRC_DOOM)) $(CLUU_OBJS)
 
 PROG = doom
 
@@ -73,11 +81,12 @@ all: $(BUILD)/$(PROG)
 clean:
 	rm -rf $(BUILD)
 
-$(BUILD)/$(PROG): $(OBJS) $(CLUU_LIB)/libdoom_cluu.a
+$(BUILD)/$(PROG): $(OBJS) $(CLUU_LIB)/libdoom_cluu.a $(CLUU_LIB)/libSDL2.a
 	@echo "[Linking $@]"
 	$(LD) $(LDFLAGS) \
 		$(CLUU_LIB)/crt0.o \
 		-o $@ $(OBJS) \
+		$(CLUU_LIB)/libSDL2.a \
 		$(CLUU_LIB)/libdoom_cluu.a \
 		-L$(CLUU_LIB) -lcluu_syscalls \
 		-L$(NEWLIB_LIB) -lc -lm
@@ -98,6 +107,14 @@ $(BUILD)/main.o: $(PORT_DIR)/main.c
 	@echo "[Compiling $<]"
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/doomgeneric_sdl_cluu.o: $(PORT_DIR)/doomgeneric_sdl_cluu.c
+	@echo "[Compiling $<]"
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/w_file_cluu.o: $(PORT_DIR)/w_file_cluu.c
+	@echo "[Compiling $<]"
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/i_cluu_sound.o: $(PORT_DIR)/i_cluu_sound.c
 	@echo "[Compiling $<]"
 	$(CC) $(CFLAGS) -c $< -o $@

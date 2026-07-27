@@ -1,4 +1,7 @@
 FROM minimal
+# No DEVICE profile — DOOM goes through displayd+audiod via SDL2 backends,
+# not direct device access.  ipc+registry suffice for VFS WAD loading and
+# SDL2 CLUU backend IPC (displayd surface protocol, audiod stream lifecycle).
 PROFILE ipc registry
 MOUNT /tmp inherit
 MOUNT /host ro

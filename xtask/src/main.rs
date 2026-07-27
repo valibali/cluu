@@ -3383,28 +3383,9 @@ fn build_doom() -> Result<()> {
     fs::copy(&staticlib_src, &staticlib_dst).context("Failed to copy libdoom_cluu.a to sysroot")?;
     println!("  ✓ doom-cluu staticlib built and staged");
 
-    println!("▸ Building sdl2-cluu staticlib...");
-    let mut sdl2_cmd = Command::new("cargo");
-    sdl2_cmd.current_dir(project_root())
-        .args(["build", "-p", "sdl2-cluu", "--target"])
-        .arg(&target_spec)
-        .arg("-Z")
-        .arg("build-std=core,alloc,compiler_builtins");
-    if std::env::var("CLUU_BENCH").as_deref() == Ok("1") {
-        sdl2_cmd.args(["--features", "bench"]);
-    }
-    let status = sdl2_cmd
-        .status()
-        .context("Failed to build sdl2-cluu staticlib")?;
-    if !status.success() {
-        bail!("sdl2-cluu Rust build failed");
-    }
-
-    let sdl2_src = project_root()
-        .join("target/x86_64-cluu-user/debug/libsdl2_cluu.a");
-    let sdl2_dst = cluu_lib.join("libsdl2_cluu.a");
-    fs::copy(&sdl2_src, &sdl2_dst).context("Failed to copy libsdl2_cluu.a to sysroot")?;
-    println!("  ✓ sdl2-cluu staticlib built and staged");
+    // SDL2 is built separately by build_sdl2() and staged to
+    // target/sysroot/lib/libSDL2.a.  The DOOM Makefile links against it
+    // directly — no sdl2-cluu shim staticlib needed (shim retired in T19).
 
     println!("▸ Building DOOM...");
     let status = Command::new("make")

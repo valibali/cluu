@@ -107,7 +107,6 @@ members = [
     "userspace/tpmd",
     "userspace/libcluu_syscalls",
     "userspace/doom-cluu",
-    "userspace/sdl2-shim",
     "userspace/basename",
     "userspace/date",
     "userspace/dirname",
