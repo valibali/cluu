@@ -2,9 +2,15 @@
 
 CLUUamp is the Winamp-classic-styled TUI audio player. MP3 decode via
 vendored minimp3 (SSE2 SIMD, CC0 public domain), playback through the
-virtio-snd audio session, visualization from a PCM tap (512-point Hann
-FFT, Winamp semitone band mapping), 10-band RBJ peaking equalizer with
-SSE2 stereo lane cascade.
+audiod audio server (see [audiod chapter](audiod.md)), visualization
+from a PCM tap (512-point Hann FFT, Winamp semitone band mapping),
+10-band RBJ peaking equalizer with SSE2 stereo lane cascade.
+
+cluuamp is an audiod client: it opens a stream via
+`AUDIOD_STREAM_OPEN`, gets back a SHM `FrameRing`, and pushes decoded
+stereo S16 frames. cluuamp keeps its own local EQ/gain/balance
+(client-side processing, independent of audiod's server-side gain/pan).
+audiod handles resampling, mixing, and submission to virtio-snd.
 
 ## Layout
 

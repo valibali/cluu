@@ -330,15 +330,17 @@ Shipped:
 
 - **virtio-snd driver** (`userspace/virtio-snd/`): PCI probe, 4 virtqueues,
   control queue lifecycle, grant-based TX. Registered as `snddev:main`.
-  Rate enum matches virtio-snd spec exactly.
+  Rate enum matches virtio-snd spec exactly. See
+  [virtio-snd chapter](virtio_snd.md).
 - **cluuamp** (`userspace/cluuamp/`): nanomp3 decoder, audiod client via
   SHM ring, local EQ/gain/balance, push-to-ring with backpressure.
 - **audiod** (`userspace/audiod/`): audio server — per-stream SHM rings,
   server-side gain/pan/normalize, mixing, resampling, sole virtio-snd
-  client. Negotiates output format with virtio-snd.
+  client. Negotiates output format with virtio-snd. See
+  [audiod chapter](audiod.md).
 - **libcluu audio_client**: `AudioSessionClient` with grant-based PCM
   submission, completion polling, rate constants, period_bytes
-  negotiation.
+  negotiation. `query_driver_caps` / `DriverCaps` for format discovery.
 - **Kernel fix**: `idle_until_runnable` missing `cli` after `hlt` —
   nested IRQ on shared IRQ 10 corrupted `iretq` frame → RIP=0x2 crash.
 - **IPC_MESSAGE_MAX**: 4096 → 8192 to fit audio IPC metadata.
@@ -347,6 +349,46 @@ Key finding: QEMU's virtio-snd ignores `buffer_bytes`/`period_bytes` for
 playback — PA backend handles all buffering. Device underruns are caused
 by I/O stalls (9p read latency), not buffer misconfiguration. audiod's
 completion-driven pacing + ring backpressure eliminates this class.
+
+### Interlude: audiod audio server redesign (DONE 2026-07-27)
+
+Promoted audiod from a thin virtio-snd wrapper to a full audio server
+with format negotiation, per-stream panorama, and mp3player removal.
+
+Shipped:
+
+- **Format negotiation protocol**: `AUDIO_QUERY_CAPS` (0x605) on
+  virtio-snd, `AUDOD_QUERY_CAPS` (0x708) on audiod. Both return
+  format/rate/channel bitmasks. audiod queries virtio-snd caps, picks
+  rate (44100 preferred, 48000 fallback). Clients query audiod caps
+  before opening a stream.
+- **`period_bytes` negotiation**: `PcmParams.period_bytes` field,
+  virtio-snd clamps to [64, 4096] aligned 4, returns actual. audiod
+  uses runtime `period_bytes` for scratch alloc, mix, and submit
+  (const→field refactor).
+- **Per-stream panorama**: `AUDIOD_STREAM_PANORAMA` (0x707).
+  Constant-power pan law via 201-entry Q15 lookup table (cos/sin).
+  Center = −3 dB both channels. Applied after gain, before mix
+  accumulation.
+- **mp3player deleted**: removed from 15 locations (dir, containers,
+  Cargo.toml/lock, python harness, scripts, docs). cluuamp is the sole
+  audiod client.
+- **Slot stride fix**: audiod grants scratch pages with page-aligned
+  stride (4096); virtio-snd was reading with `period_bytes` stride
+  (2048) → every odd period read silence → 43 Hz buzz. Fixed: both
+  sides use `(period_bytes + 4095) & !4095`.
+- **Resampler i32 overflow fix**: `interpolate()` now uses i64
+  arithmetic (`|diff| × frac` could exceed i32 range on full-scale
+  transitions).
+- **IRQ token scoping fix**: kernel `invoke_token_derive_scoped` now
+  supports `ObjectRef::Irq`. Root IRQ token minted at boot, init
+  derives per-driver scoped IRQ tokens. virtio-snd `irq_ack()` works.
+- **Layered processing model**: clients keep independent local
+  EQ/gain/balance; audiod adds server-side gain/pan/normalize. Both
+  layers compose multiplicatively.
+
+Tests: 35/35 audiod lib unit tests pass (ring 7, resample 8, mixer 13,
+session 4, gain 1, pan 5 — includes constant-power verification).
 
 ### Interlude: storage throughput pass (DONE 2026-07-16)
 
@@ -425,10 +467,11 @@ Shipped:
   22 host unit tests pass. Self-test (`DISPLAYD_SELFTEST_OK`) verifies
   create/destroy/damage/quota lifecycle. 5 harness cases (T10) pass:
   surface isolation, root control, buffer lifecycle, failstop, visual parity.
-- **audiod** (`userspace/audiod/`): Audio daemon with N-stream mixer (i32
-  accumulation, single saturation), linear resampling, SPSC frame ring.
-  29/29 host unit tests pass (ring 7, resample 8, mixer 10, session 4).
-  Sole virtio-snd client. Session-scoped via `PARAM_AUDIOD_EP`.
+- **audiod** (`userspace/audiod/`): Audio server with N-stream mixer (i32
+  accumulation, single saturation), linear resampling, SPSC frame ring,
+  per-stream gain/pan/normalize, format negotiation. 35/35 host unit tests
+  pass (ring 7, resample 8, mixer 13, session 4, gain 1, pan 5). Sole
+  virtio-snd client. See [audiod chapter](audiod.md).
 - **SDL2 2.30.0** (`userspace/sdl2/`): Pinned SDL2 with CLUU video, events,
   and audio backends. `SDL_config_cluu.h` undefines all GL/EGL/Vulkan —
   software rendering only. Transitional `sdl2-shim` retired (T19).
@@ -441,17 +484,9 @@ Shipped:
 
 Known failures (measured, not projected):
 
-- **DOOM page fault** (T19 regression): `l2_doom`, `l2_baseline_doom_windowed`
-  fail with PAGE_FAULT at CR2=0x543d3b during DG_Init. The SDL2 CLUU video
-  backend writes to a read-only ELF segment. T19 deferred runtime verification
-  to T22; T22 confirms the failure. See `doc/book/gotchas.md`.
 - **virtio-gpu cannot boot**: Three independent blockers (BOOTBOOT panic with
   `-vga none`, kernel hang with `QEMU_EXTRA_ARGS`, T11 driver no IPC dispatch).
   displayd always falls back to linear-fb. See T13 evidence.
-- **virtio-snd TX self-test timeout**: `l2_audio_boot` fails (missing
-  `VIRTIO_SND_TX_OK`). May be environment-specific (host audio backend).
-- **audiod not in system.toml**: audiod stream lifecycle wired but falls back
-  to direct virtio-snd mode (graceful degradation).
 - **T21 (fceux) BLOCKED**: fceux 2.6.5 requires C++ stdlib, Qt5/6, OpenGL,
   GTK/X11 — all absent from CLUU's newlib toolchain. Escalates to architecture
   review. See T21 evidence.
@@ -463,6 +498,33 @@ Performance (T2↔T13 linear-fb regression check):
 - DOOM fps: T2 3.6-4.3, T13 3.9-4.8 — T13 slightly faster.
 - These measurements were with the pre-T19 sdl2-shim path; cannot be
   re-measured after T19's SDL2 migration (DOOM page-faults).
+
+### Interlude: audiod SIMD/SSE2 optimization (PENDING)
+
+audiod's hot path (mix + gain + pan + resample) is currently scalar
+i32/i64 arithmetic. SSE2 is baseline on x86_64 and available via
+`core::arch::x86_64` in no_std. Target: vectorize the per-period mix
+loop for multi-stream scenarios.
+
+Scope:
+
+- **Gain + pan**: 8× i16 parallel via SSE2 `_mm_mullo_epi16` +
+  `_mm_srai_epi16` for Q15 fixed-point. Pan L/R gains applied via
+  separate shuffle + multiply.
+- **Mix accumulation**: `_mm_add_epi32` for 4× i32 parallel
+  accumulation across streams.
+- **Saturate**: `_mm_packs_epi32` (i32 → i16 with saturation) replaces
+  scalar `saturate_i16` — 4 samples per instruction.
+- **Resampler**: NOT vectorizable (sequential dependency on
+  `frac_pos` + `last_sample` across frames). Keep scalar.
+
+Trigger: revisit when audiod CPU >5% on `top`, or when ≥4 simultaneous
+streams are mixed. Current single-stream cluuamp playback is <0.01%
+CPU — scalar is fine. Premature SIMD adds complexity without
+user-visible benefit.
+
+Constraint: SSE2 only (no AVX) to match the kernel's baseline. SSE2 is
+universal on x86_64 since AMD64 (2003).
 
 ### Phase 6: Ship (PENDING)
 

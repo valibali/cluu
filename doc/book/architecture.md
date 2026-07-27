@@ -203,7 +203,7 @@ See [Terminal Stack](../terminal/index.html) for the per-service detail.
 | Service | Role |
 |---------|------|
 | `displayd` | Display daemon. Surface protocol, compositor backend, linear-fb / virtio-gpu backends. Session-scoped via `PARAM_DISPLAYD_EP`. |
-| `audiod` | Audio daemon. N-stream mixer (i32 accumulation, single saturation), linear resampling, per-session streams via `PARAM_AUDIOD_EP`. Sole virtio-snd client. |
+| `audiod` | Audio server. Per-stream SHM rings, server-side gain/pan/normalize, N-stream mixer (i32 accumulation, single saturation), linear resampling. Sole virtio-snd client. Negotiates output format via `AUDIO_QUERY_CAPS`. See [audiod chapter](audiod.md). |
 | `compositor` | TUI window compositor. Runs as a displayd client — composites cell-grid windows and flushes to displayd surfaces. |
 | `sdl2` | Pinned SDL2 2.30.0 with CLUU video/events/audio backends. SDL2 apps (DOOM, cluuamp) go through displayd + audiod, not direct hardware. |
 
