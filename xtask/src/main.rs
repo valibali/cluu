@@ -2907,6 +2907,9 @@ fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
     (newlib_lib, newlib_include)
 }
 
+// T21 BLOCKED — fceux requires C++ stdlib.
+const BLOCKED_CONTAINERS: &[&str] = &["fceux"];
+
 fn discover_containers() -> Vec<String> {
     let containers_dir = project_root().join("containers");
     let mut names = Vec::new();
@@ -2917,6 +2920,9 @@ fn discover_containers() -> Vec<String> {
                 let has_cargo = entry.path().join("Cargo.toml").exists();
                 if has_cluufile || has_cargo {
                     if let Some(name) = entry.file_name().to_str() {
+                        if BLOCKED_CONTAINERS.contains(&name) {
+                            continue;
+                        }
                         names.push(name.to_string());
                     }
                 }
@@ -3768,12 +3774,17 @@ fn build_containers() -> Result<()> {
         return Ok(());
     }
 
+    let mut built_count = 0;
     for cluufile in &cluufiles {
         let name = cluufile
             .parent()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        if BLOCKED_CONTAINERS.contains(&name.as_str()) {
+            println!("  Skipping blocked container: {}", name);
+            continue;
+        }
         println!("  Building container: {}", name);
         let status = Command::new("cargo")
             .args(["run", "-p", "container-build", "--"])
@@ -3787,9 +3798,10 @@ fn build_containers() -> Result<()> {
                 status.code()
             );
         }
+        built_count += 1;
     }
 
-    println!("  ✓ {} container image(s) built", cluufiles.len());
+    println!("  ✓ {} container image(s) built", built_count);
     Ok(())
 }
 
