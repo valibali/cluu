@@ -185,6 +185,15 @@ void DG_DrawFrame()
   SDL_RenderCopy(renderer, texture, NULL, NULL);
   SDL_RenderPresent(renderer);
 
+  /* CLUU: emit pixel-region marker on first frame (harness expects
+   * "sdl2-cluu: pixel region" — was in the old sdl2-shim, now emitted
+   * here since the real SDL2 CLUU video backend doesn't print it). */
+  static int s_first_frame = 1;
+  if (s_first_frame) {
+    s_first_frame = 0;
+    cluu_debug("sdl2-cluu: pixel region");
+  }
+
   handleKeyInput();
 }
 

@@ -47,7 +47,29 @@ CFLAGS = -std=gnu11 -Wall -Wno-unused-parameter -Wno-sign-compare \
          -mno-red-zone -fdata-sections -ffunction-sections \
          -g -O2 -DNDEBUG
 
-LDFLAGS = -T ../../userspace/user.ld --gc-sections --allow-multiple-definition
+LDFLAGS = -T $(PORT_DIR)/doom.ld --gc-sections --allow-multiple-definition
+
+# Both SDL_cluuvideo.o and SDL_cluuaudio.o define a global named CLUU_bootstrap
+# (VideoBootStrap vs AudioBootStrap — same name, different types).  With
+# --allow-multiple-definition the linker silently picks one definition for all
+# references; if the audio one wins, SDL_VideoInit calls CLUU_AudioInit (returns
+# int 1) instead of CLUU_CreateDevice (returns SDL_VideoDevice *), and the
+# stored _this=0x1 causes a PAGE_FAULT on the first write through it.
+#
+# Fix: rename the audio symbol to CLUUAUDIO_bootstrap via objcopy so both
+# video and audio dispatchers resolve to their own backend's struct.  No SDL2
+# source changes — pure build-time transformation.
+SDL2_LIB_FIXED = $(BUILD)/libSDL2_fixed.a
+
+$(SDL2_LIB_FIXED): $(CLUU_LIB)/libSDL2.a | $(BUILD)
+	@echo "[Fixing SDL2 CLUU_bootstrap symbol collision]"
+	cp $< $@
+	cd $(BUILD) && ar x $(SDL2_LIB_FIXED) SDL_audio.o SDL_cluuaudio.o
+	llvm-objcopy-14 --redefine-sym CLUU_bootstrap=CLUUAUDIO_bootstrap \
+		$(BUILD)/SDL_audio.o $(BUILD)/SDL_audio.o
+	llvm-objcopy-14 --redefine-sym CLUU_bootstrap=CLUUAUDIO_bootstrap \
+		$(BUILD)/SDL_cluuaudio.o $(BUILD)/SDL_cluuaudio.o
+	llvm-ar-14 r $(SDL2_LIB_FIXED) $(BUILD)/SDL_audio.o $(BUILD)/SDL_cluuaudio.o
 
 # doomgeneric engine sources (from Makefile.sdl, minus SDL backends + doomgeneric_sdl)
 SRC_DOOM = \
@@ -81,12 +103,12 @@ all: $(BUILD)/$(PROG)
 clean:
 	rm -rf $(BUILD)
 
-$(BUILD)/$(PROG): $(OBJS) $(CLUU_LIB)/libdoom_cluu.a $(CLUU_LIB)/libSDL2.a
+$(BUILD)/$(PROG): $(OBJS) $(CLUU_LIB)/libdoom_cluu.a $(SDL2_LIB_FIXED)
 	@echo "[Linking $@]"
 	$(LD) $(LDFLAGS) \
 		$(CLUU_LIB)/crt0.o \
 		-o $@ $(OBJS) \
-		$(CLUU_LIB)/libSDL2.a \
+		$(SDL2_LIB_FIXED) \
 		$(CLUU_LIB)/libdoom_cluu.a \
 		-L$(CLUU_LIB) -lcluu_syscalls \
 		-L$(NEWLIB_LIB) -lc -lm
