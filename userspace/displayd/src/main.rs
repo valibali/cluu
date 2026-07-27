@@ -348,11 +348,17 @@ fn run_self_test(scene: &mut Scene, backend: &mut DisplayBackend) {
 }
 
 /// Emit a DISPLAYD_FLUSH marker for each damage rect.
+/// Gated behind CLUU_BENCH to avoid serial flooding in production —
+/// debug_print blocks the vCPU on the serial line.
+#[cfg(feature = "bench")]
 fn emit_flush_marker(damage: &DamageList) {
     for r in damage.rects() {
         let _ = debug_print(&format!("{} {} {}", MARKER_FLUSH, r.w, r.h));
     }
 }
+
+#[cfg(not(feature = "bench"))]
+fn emit_flush_marker(_damage: &DamageList) {}
 
 /// Check if creating one more surface would exceed the quota.
 fn surfaces_exceed_quota(existing: &[u64], max: usize) -> bool {

@@ -23,3 +23,4 @@ path = "src/main.rs"
 [features]
 default = []
 host-test = ["cluu_wire/host-test"]
+bench = []

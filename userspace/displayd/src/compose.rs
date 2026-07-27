@@ -92,6 +92,8 @@ pub fn composite_frame<B: Backend>(scene: &mut Scene, backend: &mut B) -> Damage
 
     // 2. Paint all visible surfaces back-to-front (z-order).
     //    Collect indices and sort by z_order (lower = farther back).
+    //    Clipped to damage rects so idle 1 Hz clock ticks don't blit the
+    //    full surface (Bug B — was 12% CPU at idle).
     let mut indices: Vec<usize> = (0..scene.surface_count())
         .filter(|&i| {
             let s = &scene.surfaces()[i];
@@ -100,10 +102,11 @@ pub fn composite_frame<B: Backend>(scene: &mut Scene, backend: &mut B) -> Damage
         .collect();
     indices.sort_by_key(|&i| scene.surfaces()[i].z_order);
 
+    let damage_rects = damage.rects();
     for &idx in &indices {
         let surface: &Surface = &scene.surfaces()[idx];
         if let Some(src) = surface.displayed_pixels() {
-            blit_surface(scanout, dst_pitch_words, output.width, output.height, surface, src);
+            blit_surface(scanout, dst_pitch_words, output.width, output.height, surface, src, damage_rects);
         }
     }
 
@@ -135,8 +138,10 @@ fn clear_rect(dst: &mut [u32], dst_pitch_words: usize, rect: Rect) {
     }
 }
 
-/// Blit a surface to the scanout buffer. Handles unscaled (row-copy fast
-/// path) and integer-scaled (nearest-neighbor) cases, with clipping.
+/// Blit a surface to the scanout buffer, clipped to the damage rects.
+/// Only rows/columns that intersect a damage rect are copied; undamaged
+/// scanout area is left untouched. Handles unscaled (row-copy fast path)
+/// and integer-scaled (nearest-neighbor) cases, with output-bound clipping.
 fn blit_surface(
     dst: &mut [u32],
     dst_pitch_words: usize,
@@ -144,6 +149,7 @@ fn blit_surface(
     out_h: u32,
     surface: &Surface,
     src: &[u32],
+    damage: &[Rect],
 ) {
     let src_pitch_words = surface.pitch_words();
     let sx = surface.x;
@@ -151,60 +157,75 @@ fn blit_surface(
     let dw = surface.display_w;
     let dh = surface.display_h;
 
-    // Clip to output bounds.
-    let x0 = sx.max(0) as u32;
-    let y0 = sy.max(0) as u32;
-    let x1 = sx
+    // Surface display rect in output coords, clipped to output bounds.
+    let surf_x0 = sx.max(0) as u32;
+    let surf_y0 = sy.max(0) as u32;
+    let surf_x1 = sx
         .saturating_add(dw as i32)
         .min(out_w as i32)
         .max(0) as u32;
-    let y1 = sy
+    let surf_y1 = sy
         .saturating_add(dh as i32)
         .min(out_h as i32)
         .max(0) as u32;
 
-    if x1 <= x0 || y1 <= y0 {
+    if surf_x1 <= surf_x0 || surf_y1 <= surf_y0 {
         return;
     }
 
     let scaled = dw != surface.width || dh != surface.height;
-
-    if !scaled {
-        // Unscaled: XRGB8888 row-copy fast path.
-        // src[y * src_pitch/4 ..][x .. x+w] → dst[y * dst_pitch/4 ..][x .. x+w]
-        let copy_w = (x1 - x0) as usize;
-        let src_x_start = (x0 as i32 - sx) as usize;
-        for row in 0..(y1 - y0) {
-            let oy = y0 + row;
-            let dy = (oy as i32 - sy) as usize;
-            let dst_off = oy as usize * dst_pitch_words + x0 as usize;
-            let src_off = dy * src_pitch_words + src_x_start;
-            if dst_off + copy_w <= dst.len() && src_off + copy_w <= src.len() {
-                dst[dst_off..dst_off + copy_w]
-                    .copy_from_slice(&src[src_off..src_off + copy_w]);
-            }
-        }
+    let table = if scaled {
+        Some(ScaleTable::build(surface.width, surface.height, dw, dh))
     } else {
-        // Scaled: integer nearest scaling with precomputed steps.
-        let table = ScaleTable::build(surface.width, surface.height, dw, dh);
-        for row in 0..(y1 - y0) {
-            let oy = y0 + row;
-            let dy = (oy as i32 - sy) as usize;
-            if dy >= table.src_y.len() {
-                break;
+        None
+    };
+
+    // Blit each damage rect's intersection with the surface display rect.
+    for dr in damage {
+        let x0 = dr.x.max(surf_x0);
+        let y0 = dr.y.max(surf_y0);
+        let x1 = dr.right().min(surf_x1);
+        let y1 = dr.bottom().min(surf_y1);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+
+        if !scaled {
+            // Unscaled: XRGB8888 row-copy fast path.
+            // src[y * src_pitch/4 ..][x .. x+w] → dst[y * dst_pitch/4 ..][x .. x+w]
+            let copy_w = (x1 - x0) as usize;
+            let src_x_start = (x0 as i32 - sx) as usize;
+            for row in 0..(y1 - y0) {
+                let oy = y0 + row;
+                let dy = (oy as i32 - sy) as usize;
+                let dst_off = oy as usize * dst_pitch_words + x0 as usize;
+                let src_off = dy * src_pitch_words + src_x_start;
+                if dst_off + copy_w <= dst.len() && src_off + copy_w <= src.len() {
+                    dst[dst_off..dst_off + copy_w]
+                        .copy_from_slice(&src[src_off..src_off + copy_w]);
+                }
             }
-            let src_y = table.src_y[dy] as usize;
-            let dst_off = oy as usize * dst_pitch_words + x0 as usize;
-            for col in 0..(x1 - x0) as usize {
-                let ox = x0 as usize + col;
-                let dx = (ox as i32 - sx) as usize;
-                if dx >= table.src_x.len() {
+        } else if let Some(ref table) = table {
+            // Scaled: integer nearest scaling with precomputed steps.
+            for row in 0..(y1 - y0) {
+                let oy = y0 + row;
+                let dy = (oy as i32 - sy) as usize;
+                if dy >= table.src_y.len() {
                     break;
                 }
-                let src_x = table.src_x[dx] as usize;
-                let src_off = src_y * src_pitch_words + src_x;
-                if dst_off + col < dst.len() && src_off < src.len() {
-                    dst[dst_off + col] = src[src_off];
+                let src_y = table.src_y[dy] as usize;
+                let dst_off = oy as usize * dst_pitch_words + x0 as usize;
+                for col in 0..(x1 - x0) as usize {
+                    let ox = x0 as usize + col;
+                    let dx = (ox as i32 - sx) as usize;
+                    if dx >= table.src_x.len() {
+                        break;
+                    }
+                    let src_x = table.src_x[dx] as usize;
+                    let src_off = src_y * src_pitch_words + src_x;
+                    if dst_off + col < dst.len() && src_off < src.len() {
+                        dst[dst_off + col] = src[src_off];
+                    }
                 }
             }
         }

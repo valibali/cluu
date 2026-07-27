@@ -260,12 +260,22 @@ pub struct Compositor {
     /// Backbuffer pitch in bytes (== width_px * 4 for XRGB8888).
     pub pitch: u32,
 
-    /// Frame token for the pixel-transfer frame shared with displayd.
-    /// The compositor rasterizes into `backbuf`, then copies the dirty
-    /// region here and commits to displayd.
-    pub backbuf_frame_token: u64,
-    /// VA where `backbuf_frame_token` is mapped in the compositor's space.
-    pub backbuf_va: usize,
+    /// Double-buffered frame tokens for pixel transfer to displayd.
+    /// Ping-pong: while displayd copies frame A, compositor writes frame B.
+    /// Eliminates the frame-token reuse race without blocking the event loop.
+    pub backbuf_frame_tokens: [u64; 2],
+    /// VAs where the two `backbuf_frame_tokens` are mapped in the compositor's
+    /// space.  Index 0 → `BACKBUF_VA_0`, index 1 → `BACKBUF_VA_1`.
+    pub backbuf_vas: [usize; 2],
+    /// Index of the frame displayd is currently processing (0 or 1).
+    /// The compositor writes to `1 - backbuf_active_idx`.
+    pub backbuf_active_idx: usize,
+    /// Byte size of each backbuf frame token mapping, computed at init from
+    /// the actual displayd-reported framebuffer dimensions
+    /// (`width_px * height_px * 4`, rounded up to 4 KiB).  Used both as the
+    /// allocation size and as the upper bound for the dirty-region copy in
+    /// `flush_backbuf_to_displayd`.
+    pub backbuf_frame_bytes: usize,
 
     /// Screen dimensions in cell units.
     pub cols: u16,
@@ -343,6 +353,16 @@ pub struct Compositor {
 
     pub pixel_dirty: bool,
 
+    /// TSC value at the last frame flush. Used by the throttle in
+    /// `tick_frame` to limit frame rate during high-frequency mouse
+    /// events. Raw TSC is monotonic and cheap (single `rdtsc`), unlike
+    /// `last_clock_now_ms` which only advances on 1 Hz TIME_TICK.
+    pub last_flush_tsc: u64,
+    /// Calibrated TSC frequency in Hz, queried once at init via
+    /// `clock_frequency`. Converts raw TSC deltas to milliseconds for
+    /// the throttle comparison.
+    pub tsc_freq_hz: u64,
+
 }
 
 #[derive(Clone, Copy)]
@@ -366,12 +386,13 @@ pub struct DragState {
 pub const GLYPH_W: u32 = 8;
 pub const GLYPH_H: u32 = 16;
 
-/// VA for the compositor's backbuf frame mapping (pixel transfer to displayd).
-const BACKBUF_VA: usize = 0xB000_0000;
-/// Maximum dirty-region frame size (1 MiB — enough for ~512×512 pixels).
-/// The compositor clips dirty rects to this size and sends multiple commits
-/// if needed.  Full-screen 8 MiB allocation causes OOM at boot.
-pub const BACKBUF_FRAME_BYTES: usize = 0x10_0000;
+/// VAs for the compositor's double-buffered backbuf frame mappings
+/// (pixel transfer to displayd).  Two frames are mapped so the compositor
+/// can write to one while displayd copies from the other.
+const BACKBUF_VA_0: usize = 0xB000_0000;
+const BACKBUF_VA_1: usize = 0xB080_0000;
+/// Page size used to round up the backbuf frame allocation.
+const PAGE_SIZE: usize = 4096;
 
 impl Compositor {
     /// Connect to displayd, create a surface, allocate a backbuf frame token.
@@ -425,7 +446,7 @@ impl Compositor {
             [0, surface_token as usize, 0, 0, 0, 0],
             4,
         );
-        let geo_payload = [0u8; 5];
+        let geo_payload = [0u8, 0u8, 0u8, 0u8, 1u8];
         let _ = ipc::send_msg_with_payload(displayd_ep, &geo_msg, &geo_payload);
 
         let cols = (width_px / GLYPH_W) as u16;
@@ -433,18 +454,37 @@ impl Compositor {
         let cell_count = cols as usize * rows as usize;
         let pixel_count = (width_px * height_px) as usize;
 
-        let (backbuf_frame_token, _) = match crate::shm::alloc_frame(BACKBUF_FRAME_BYTES) {
+        // Frame size must cover the whole framebuffer (width_px * height_px
+        // pixels, 4 bytes each) so full-screen damage flushes are not
+        // silently dropped by the bounds check in `flush_backbuf_to_displayd`.
+        let backbuf_frame_bytes =
+            (pixel_count * 4 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        let (backbuf_frame_token_0, _) = match crate::shm::alloc_frame(backbuf_frame_bytes) {
             Ok(t) => t,
             Err(e) => {
                 let _ = debug_print(&alloc::format!(
-                    "COMP_FAILSTOP_OK backbuf frame alloc failed size={} err={:?}", BACKBUF_FRAME_BYTES, e
+                    "COMP_FAILSTOP_OK backbuf frame 0 alloc failed size={} err={:?}", backbuf_frame_bytes, e
                 ));
                 return Err(Error::InvalidArgument);
             }
         };
-        let _ = debug_print("compositor: backbuf frame allocated");
-        crate::shm::map_frame_rw(BACKBUF_VA, backbuf_frame_token, BACKBUF_FRAME_BYTES)?;
-        let _ = debug_print("compositor: backbuf frame mapped");
+        let _ = debug_print("compositor: backbuf frame 0 allocated");
+        crate::shm::map_frame_rw(BACKBUF_VA_0, backbuf_frame_token_0, backbuf_frame_bytes)?;
+        let _ = debug_print("compositor: backbuf frame 0 mapped");
+
+        let (backbuf_frame_token_1, _) = match crate::shm::alloc_frame(backbuf_frame_bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = debug_print(&alloc::format!(
+                    "COMP_FAILSTOP_OK backbuf frame 1 alloc failed size={} err={:?}", backbuf_frame_bytes, e
+                ));
+                return Err(Error::InvalidArgument);
+            }
+        };
+        let _ = debug_print("compositor: backbuf frame 1 allocated");
+        crate::shm::map_frame_rw(BACKBUF_VA_1, backbuf_frame_token_1, backbuf_frame_bytes)?;
+        let _ = debug_print("compositor: backbuf frame 1 mapped");
 
         let _ = debug_print(&alloc::format!(
             "compositor: displayd surface {} ({}x{} pitch={})",
@@ -457,8 +497,10 @@ impl Compositor {
             width_px,
             height_px,
             pitch,
-            backbuf_frame_token,
-            backbuf_va: BACKBUF_VA,
+            backbuf_frame_tokens: [backbuf_frame_token_0, backbuf_frame_token_1],
+            backbuf_vas: [BACKBUF_VA_0, BACKBUF_VA_1],
+            backbuf_active_idx: 0,
+            backbuf_frame_bytes,
             cols,
             rows,
             cell_grid: alloc::vec![0u64; cell_count],
@@ -475,6 +517,9 @@ impl Compositor {
             clock_ready: false,
             last_clock_now_ms: 0,
             last_flush_at: 0,
+            last_flush_tsc: 0,
+            tsc_freq_hz: libcluu::syscall::clock_frequency(libcluu::boot::clock_token_handle())
+                .unwrap_or(3_000_000_000),
             deadlines: Deadlines::new(),
             instance_id: 0,
             client_endpoint: 0,

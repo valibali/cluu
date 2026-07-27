@@ -217,8 +217,8 @@ const MAX_FRAMES: usize = 1024 * 1024;
 /// Number of u64 entries in the bitmap
 const BITMAP_LEN: usize = MAX_FRAMES / 64;
 
-/// Number of buddy orders: 0 = 4KB, 1 = 8KB, ..., 9 = 2MB
-const MAX_ORDER: usize = 11;
+/// Number of buddy orders: 0 = 4KB, 1 = 8KB, ..., 9 = 2MB, 10 = 4MB, 11 = 8MB, 12 = 16MB
+const MAX_ORDER: usize = 12;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Intrusive free list — stored in the free pages themselves via physmap

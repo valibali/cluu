@@ -1550,9 +1550,11 @@ fn build_userspace(profile: &str) -> Result<()> {
         }
 
         // Baseline instrumentation: enable bench probes in the compositor
-        // when CLUU_BENCH=1 is set. Probes are compile-time gated so
-        // non-baseline builds have zero overhead.
-        if *crate_path == "userspace/compositor" && std::env::var("CLUU_BENCH").as_deref() == Ok("1") {
+        // and displayd when CLUU_BENCH=1 is set. Probes are compile-time
+        // gated so non-baseline builds have zero overhead.
+        if std::env::var("CLUU_BENCH").as_deref() == Ok("1")
+            && (*crate_path == "userspace/compositor" || *crate_path == "userspace/displayd")
+        {
             cmd.args(["--features", "bench"]);
         }
 
@@ -2020,7 +2022,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1850x1000\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1920x1080\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])

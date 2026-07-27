@@ -78,11 +78,15 @@ impl Compositor {
             }
 
             let _ = cols;
-            self.dirty_rect = Some(PixelRect {
+            let pr_rect = PixelRect {
                 x: screen_x as u32,
                 y: screen_y as u32,
                 w: max_cols as u32,
                 h: max_rows as u32,
+            };
+            self.dirty_rect = Some(match self.dirty_rect {
+                Some(prev) => prev.extend(pr_rect),
+                None => pr_rect,
             });
         }
 
@@ -110,9 +114,28 @@ impl Compositor {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
+        // No windows = nothing to composite. Skip the initial zero flush
+        // that would send 2M black pixels to displayd before any content
+        // exists. (Bug A: stale-pixel noise at first interior row.)
+        if self.windows.is_empty() {
+            self.deadlines.next_frame_ms = u64::MAX;
+            return false;
+        }
         let cells_changed = !self.cell_dirty.is_empty() || self.prev_cell_grid != self.cell_grid;
         if !cells_changed && !self.pixel_dirty {
             self.deadlines.next_frame_ms = u64::MAX;
+            return false;
+        }
+        // Throttle using raw TSC (monotonic, cheap rdtsc) instead of
+        // last_clock_now_ms which only advances on 1 Hz TIME_TICK.
+        let now_tsc = read_tsc();
+        let elapsed_ms = if self.tsc_freq_hz > 0 {
+            now_tsc.saturating_sub(self.last_flush_tsc) / (self.tsc_freq_hz / 1000)
+        } else {
+            MIN_FRAME_MS + 1
+        };
+        if elapsed_ms < MIN_FRAME_MS {
+            self.deadlines.next_frame_ms = self.last_clock_now_ms.saturating_add(MIN_FRAME_MS);
             return false;
         }
         let was_pixel_only = self.pixel_dirty && !cells_changed;
@@ -128,6 +151,7 @@ impl Compositor {
         self.flush_backbuf_to_displayd();
         self.deadlines.next_frame_ms = u64::MAX;
         self.last_flush_at = now_ms;
+        self.last_flush_tsc = read_tsc();
 
         #[cfg(feature = "bench")]
         {
@@ -187,7 +211,16 @@ impl Compositor {
     /// if already set.
     pub fn schedule_frame(&mut self, now_ms: u64) {
         if self.deadlines.next_frame_ms == u64::MAX {
-            self.deadlines.next_frame_ms = now_ms.saturating_add(MIN_FRAME_MS);
+            // Respect the tick_frame throttle: when a flush happened less
+            // than MIN_FRAME_MS ago, arm to the throttle boundary instead of
+            // now+MIN_FRAME_MS so the loop wakes the moment flushing is
+            // allowed again (lower drag latency).
+            let throttle_until = self.last_flush_at.saturating_add(MIN_FRAME_MS);
+            self.deadlines.next_frame_ms = if throttle_until > now_ms {
+                throttle_until
+            } else {
+                now_ms.saturating_add(MIN_FRAME_MS)
+            };
         }
     }
 }
@@ -202,6 +235,24 @@ impl Compositor {
         #[cfg(feature = "bench")]
         let mut bench_cells: usize = 0;
 
+        // BENCH: Bug A diagnostics — identify the first interior row of the
+        // most recently registered window so we can trace render/skip
+        // decisions for exactly the row that exhibits stale pixel noise.
+        #[cfg(feature = "bench")]
+        let bench_trace_row: Option<(u16, u16, u16)> = {
+            self.windows.iter().max_by_key(|w| w.id).map(|w| {
+                let (y_start, x_off) = if w.modal || w.fullscreen || w.no_chrome {
+                    (w.y, 0u16)
+                } else {
+                    // CHROME_TOP=1 + PAD_TOP=0; CHROME_LEFT=1 + PAD_LEFT=1
+                    (w.y + 1, 2u16)
+                };
+                (y_start, w.x + x_off, w.x + w.w)
+            })
+        };
+        #[cfg(feature = "bench")]
+        let mut bench_trace_count: usize = 0;
+
         let cols = self.cols as usize;
         let rows = self.rows as usize;
         let pitch_words = self.width_px as usize; // contiguous backbuf
@@ -212,6 +263,26 @@ impl Compositor {
             for cx in 0..cols {
                 let idx = cy * cols + cx;
                 let cell = self.cell_grid[idx];
+
+                // BENCH: log render/skip for the first interior row of the
+                // newest window — limits to 20 cells to avoid serial flood.
+                #[cfg(feature = "bench")]
+                if let Some((trace_y, trace_x0, trace_x1)) = bench_trace_row {
+                    if cy == trace_y as usize
+                        && cx >= trace_x0 as usize
+                        && cx < trace_x1 as usize
+                        && bench_trace_count < 20
+                    {
+                        bench_trace_count += 1;
+                        let prev = self.prev_cell_grid[idx];
+                        let _ = libcluu::debug_print(&alloc::format!(
+                            "BENCH_COMP_GRID_CELL: cx={} cy={} prev={:#018x} cell={:#018x} {}",
+                            cx, cy, prev, cell,
+                            if prev == cell { "SKIP" } else { "RENDER" },
+                        ));
+                    }
+                }
+
                 if self.prev_cell_grid[idx] == cell {
                     continue;
                 }
@@ -291,9 +362,10 @@ impl Compositor {
     /// frame token.
     ///
     /// Copies the dirty region from `backbuf` into the pre-mapped
-    /// `backbuf_va` frame, then sends `DISPLAY_BUFFER_COMMIT_LABEL` with the
-    /// frame token and damage rects.  displayd maps the frame, copies pixels
-    /// into its surface buffer, and composites+flushes to the real framebuffer.
+    /// inactive backbuf frame, then sends `DISPLAY_BUFFER_COMMIT_LABEL` with
+    /// that frame's token and damage rects.  displayd maps the frame, copies
+    /// pixels into its surface buffer, and composites+flushes to the real
+    /// framebuffer.
     ///
     /// Consumes and clears `dirty_rect` via `.take()`.  If `dirty_rect` is
     /// `None` (nothing changed since the last flush) the function returns
@@ -310,9 +382,25 @@ impl Compositor {
         let h = bot - y;
 
         let pitch_words = self.width_px as usize;
-        let frame_ptr = self.backbuf_va as *mut u32;
-        let frame_max_pixels = crate::state::BACKBUF_FRAME_BYTES / 4;
+        // Double-buffered ping-pong: write to the inactive frame so displayd
+        // can finish copying the active one without being overwritten.
+        let write_idx = 1 - self.backbuf_active_idx;
+        let frame_ptr = self.backbuf_vas[write_idx] as *mut u32;
+        let frame_max_pixels = self.backbuf_frame_bytes / 4;
         let region_pixels = (w as usize) * (h as usize);
+
+        // BENCH: Bug A diagnostics — log the dirty rect and whether it
+        // fits in the frame token. A drop (return at line below) would
+        // leave displayd's surface with stale pixels.
+        #[cfg(feature = "bench")]
+        {
+            let _ = libcluu::debug_print(&alloc::format!(
+                "BENCH_COMP_FLUSH: dirty_rect x={} y={} w={} h={} region_px={} frame_max_px={} {}",
+                x, y, w, h, region_pixels, frame_max_pixels,
+                if region_pixels > frame_max_pixels { "DROP" } else { "SEND" },
+            ));
+        }
+
         if region_pixels > frame_max_pixels {
             return;
         }
@@ -327,7 +415,7 @@ impl Compositor {
             // `src_off + w <= height_px * pitch_words`. `dst_off` is
             // within the frame mapping because `region_pixels =
             // w * h <= frame_max_pixels` (checked above). Source
-            // (backbuf Vec) and dest (frame mapping at `backbuf_va`)
+            // (backbuf Vec) and dest (frame mapping at the inactive backbuf VA)
             // are disjoint. Both are u32-aligned.
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -344,19 +432,26 @@ impl Compositor {
         damage_bytes[4..8].copy_from_slice(&dr.y.to_le_bytes());
         damage_bytes[8..12].copy_from_slice(&dr.w.to_le_bytes());
         damage_bytes[12..16].copy_from_slice(&dr.h.to_le_bytes());
-        let commit_msg = Message::new(
+        let mut commit_msg = Message::new(
             DISPLAY_BUFFER_COMMIT_LABEL,
             [
                 0,
                 self.surface_token as usize,
                 0,
                 0,
-                self.backbuf_frame_token as usize,
+                self.backbuf_frame_tokens[write_idx] as usize,
                 0,
             ],
             5,
         );
+        commit_msg.words[0] = damage_bytes.len();
+        // Async one-way send. Double-buffering eliminates the frame-token
+        // reuse race without blocking: displayd copies the frame we just sent
+        // (write_idx, now active) while the next flush writes to the other
+        // frame (1 - write_idx). The previous synchronous call_with_payload
+        // fixed the pixel noise but stalled the event loop (1 Hz updates).
         let _ = ipc::send_msg_with_payload(self.displayd_ep, &commit_msg, &damage_bytes);
+        self.backbuf_active_idx = write_idx;
     }
 }
 

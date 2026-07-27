@@ -155,6 +155,27 @@ impl Compositor {
             }
         }
 
+        // BENCH: Bug A diagnostics — log window geometry + first interior
+        // SHM cells to trace stale-pixel noise at first interior row.
+        #[cfg(feature = "bench")]
+        {
+            let _ = libcluu::debug_print(&alloc::format!(
+                "BENCH_COMP_WIN_REGISTER: id={} x={} y={} w={} h={} modal={} fullscreen={}",
+                id, x, y, granted_w, granted_h, modal, fullscreen,
+            ));
+            // Read first 4 SHM cells of interior row 0 (ix=0..3, iy=0).
+            // Zero-init SHM has codepoint 0, fg=0, bg=0.
+            let win_ref = self.windows.iter().find(|w| w.id == id);
+            if let Some(win_ref) = win_ref {
+                let mut cell_dump = alloc::string::String::from("BENCH_COMP_WIN_SHM_CELLS:");
+                for ix in 0..4u16 {
+                    let cell = win_ref.mapping.read_cell(ix, 0).unwrap_or(u64::MAX);
+                    cell_dump.push_str(&alloc::format!(" [{},0]={:#018x}", ix, cell));
+                }
+                let _ = libcluu::debug_print(&cell_dump);
+            }
+        }
+
         // Notify app of initial interior dimensions via WIN_CONFIGURE.
         // Normal windows: interior = total - (chrome + padding) on each axis.
         // Modal windows: compose_cell suppresses chrome and reads SHM at
@@ -556,6 +577,14 @@ impl Compositor {
         let Some(pos) = self.windows.iter().position(|w| w.id == id) else {
             return;
         };
+        #[cfg(feature = "bench")]
+        {
+            let win = &self.windows[pos];
+            let _ = libcluu::debug_print(&alloc::format!(
+                "BENCH_COMP_WIN_DESTROY: id={} x={} y={} w={} h={}",
+                id, win.x, win.y, win.w, win.h,
+            ));
+        }
         let win = self.windows.remove(pos);
         let _ = crate::shm::free_frame(win.shm_token);
         // Mark covered cells dirty so the next compose pass repaints bg.

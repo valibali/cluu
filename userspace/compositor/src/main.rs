@@ -267,11 +267,13 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                     // Registry control messages (grant requests from subscribers) must
                     // be forwarded to the registry client so it can mint tokens.
                     if idx == REGISTRY_TOKEN_IDX {
+                        #[cfg(feature = "bench")]
                         let _ = debug_print(&alloc::format!(
                             "compositor: registry msg label=0x{:x}", msg.tag.label
                         ));
                         let result = registry::handle_incoming_message(&msg, payload);
                         if let Err(ref e) = result {
+                            #[cfg(feature = "bench")]
                             let _ = debug_print(&alloc::format!(
                                 "compositor: handle_incoming_message err={:?}", e
                             ));
@@ -461,10 +463,11 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
+                #[cfg(feature = "bench")]
                 let _ = debug_print("compositor: recv_any -> WouldBlock/Timeout");
-                // Fall through to deadline handling below.
             }
             Err(_) => {
+                #[cfg(feature = "bench")]
                 let _ = debug_print(&alloc::format!("compositor: recv_any -> Err other -> yield+continue"));
                 let _ = syscall::yield_cpu();
                 continue;

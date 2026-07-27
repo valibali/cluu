@@ -215,8 +215,8 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
         return None;
     }
     let order = ceil_log2_pages(n_pages);
-    if order > 10 {
-        return None; // buddy max = order 10 (4 MiB), PMM MAX_ORDER
+    if order > 12 {
+        return None; // buddy max = order 12 (16 MiB), PMM MAX_ORDER
     }
     let phys = crate::mm::pmm::alloc_order(order as usize)?;
     // Phase 2.5: retype EVERY constituent page as UserData. LOUD on error.
