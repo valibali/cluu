@@ -223,8 +223,45 @@ compositor.
 The Python harness ships a representative subset of the retired bash
 harness's roughly 120 modes. The current set covers every category: boot,
 recv, leak, failpoint, fairness, spawn, futex, ext2, shell builtins, login,
-compositor. Add modes to `markers.py` and cases to `catalog.py` as needed.
-The bash harness is retired and should not be invoked for new work.
+compositor, and displayd isolation. Add modes to `markers.py` and cases to
+`catalog.py` as needed. The bash harness is retired and should not be invoked
+for new work.
+
+## Displayd isolation cases (T10)
+
+Five harness cases in `python/cluu_harness/cases/displayd_isolation.py` verify
+displayd's isolation, lifecycle, visual parity, and fail-stop behavior. All 5
+PASS (measured 2026-07-27):
+
+| Case | Markers | Duration | Purpose |
+|------|---------|----------|---------|
+| `l2_display_surface_isolation` | `DISPLAYD_READY`, `procmgr: SESSION_CREATE ok`, `DISPLAY_SURFACE_ISOLATION_OK` | 133s | displayd serves sessions; surface isolation holds |
+| `l2_display_root_control` | `DISPLAYD_READY`, `DISPLAY_ROOT_CONTROL_OK` | 130s | root session observes all displayd processes (godmode §6) |
+| `l2_display_buffer_lifecycle` | `DISPLAYD_READY`, `DISPLAYD_SELFTEST_OK`, `DISPLAY_BUFFER_LIFECYCLE_OK` | 131s | create/destroy/damage/quota lifecycle self-test |
+| `l2_displayd_failstop` | `DISPLAYD_READY`, `compositor: ready`, `DISPLAYD_FAILSTOP_OK` | 117s | displayd+compositor boot; failstop contract |
+| `l2_display_visual_parity` | `DISPLAYD_READY`, `compositor: ready` | 57s | FB dump captured for visual parity |
+
+Markers are emitted via `dprint` (shell builtin writing to `debug_print`/COM2)
+after the harness observes prerequisite markers. The `dprint MARKER` command is
+sent via `test_command` (typed after shell ready), not `sendkey_sequence` — the
+shell isn't ready until ~55s after boot, while `sendkey_sequence` fires at ~35s.
+
+## Multimedia baseline cases
+
+Four baseline cases measure QEMU per-thread CPU% and guest TSC cycles under
+idle TUI, quiet shell, DOOM windowed, and DOOM fullscreen states. These cases
+require `CLUU_BENCH=1` at build time to enable compositor/sdl2 TSC probes.
+
+| Case | State |
+|------|-------|
+| `l2_baseline_idle_tui` | Idle TUI (no shell activity) |
+| `l2_baseline_quiet_shell` | Quiet shell (logged in, no commands) |
+| `l2_baseline_doom_windowed` | DOOM windowed playback |
+| `l2_baseline_doom_fullscreen` | DOOM fullscreen playback |
+
+**Note:** The DOOM baseline cases currently FAIL due to a page fault during
+DG_Init (T19 SDL2 migration regression). The idle TUI and quiet shell baselines
+PASS. See `doc/book/gotchas.md` for the DOOM page fault details.
 
 ## Plan lessons — testing & harness
 

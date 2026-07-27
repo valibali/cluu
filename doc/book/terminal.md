@@ -223,7 +223,9 @@ Modules: `context` (TtyContext), `protocol`.
 
 Owns VT4. Draws floating windows with rounded Unicode chrome, dispatches
 keyboard input to the focused window, and exposes a shared-memory cell-grid
-protocol for native apps.
+protocol for native apps. Runs as a **displayd client** — the compositor
+composites cell-grid windows and flushes to displayd surfaces via the display
+backend. displayd owns the framebuffer; the compositor owns the window layout.
 
 - **Windows**: 1 app = 1 window (v1). `WIN_REGISTER`, `WIN_DAMAGE`,
   `WIN_DESTROY`, `WIN_SET_PIXEL_REGION`.
@@ -238,6 +240,9 @@ protocol for native apps.
 - **Hotkeys**: focus next/prev, move, resize, close, spawn cluuterm.
 - **Status bar**: clock (subscribes to `TIME_TICK_LABEL`), session info.
 - **Session handoff**: `COMPOSITOR_SESSION_HANDOFF_LABEL`, `SESSION_ENDED_LABEL`.
+- **Failstop**: `COMP_FAILSTOP_OK` fires when displayd is unavailable — the
+  compositor detects displayd loss and enters a failstop state rather than
+  crashing. Verified by `l2_displayd_failstop` harness case.
 
 Modules: `compose` (composition loop), `config` (palette, keybindings),
 `hotkeys` (hotkey dispatch), `protocol` (wire protocol), `render` (framebuffer

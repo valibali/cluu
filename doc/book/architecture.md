@@ -198,12 +198,29 @@ know each other only by name, resolved via the registry:
 
 See [Terminal Stack](../terminal/index.html) for the per-service detail.
 
+### Multimedia services
+
+| Service | Role |
+|---------|------|
+| `displayd` | Display daemon. Surface protocol, compositor backend, linear-fb / virtio-gpu backends. Session-scoped via `PARAM_DISPLAYD_EP`. |
+| `audiod` | Audio daemon. N-stream mixer (i32 accumulation, single saturation), linear resampling, per-session streams via `PARAM_AUDIOD_EP`. Sole virtio-snd client. |
+| `compositor` | TUI window compositor. Runs as a displayd client — composites cell-grid windows and flushes to displayd surfaces. |
+| `sdl2` | Pinned SDL2 2.30.0 with CLUU video/events/audio backends. SDL2 apps (DOOM, cluuamp) go through displayd + audiod, not direct hardware. |
+
+**Measured behavior** (T22, 2026-07-27):
+- Linear-fb backend: WORKS. `DISPLAYD_READY 1920 1080 7680 linear_fb` on every boot.
+- Virtio-gpu backend: CANNOT BOOT. Three independent blockers (BOOTBOOT panic with `-vga none`, kernel hang with `QEMU_EXTRA_ARGS`, T11 driver no IPC dispatch). See T13 evidence.
+- displayd self-test: PASS. `DISPLAYD_SELFTEST_OK` verifies create/destroy/damage/quota lifecycle.
+- audiod unit tests: 29/29 PASS (ring 7, resample 8, mixer 10, session 4).
+- DOOM (T19 SDL2 migration): PAGE_FAULT during DG_Init. Pre-existing regression — see gotchas.
+- Display backend selection: `DisplayBackend` enum delegates to `LinearFbBackend` or `VirtioGpuBackend`. Virtio-gpu probe times out (500ms) → falls back to linear-fb.
+
 ### Utilities (each its own container)
 
 `mkdir`, `rm`, `cp`, `mv`, `cat`, `grep`, `head`, `tail`, `wc`, `ls`, `ps`,
 `touch`, `top`, `basename`, `date`, `dirname`, `env`, `kill`, `printf`,
 `sleep`, `which`, `sort`, `uniq`, `cut`, `tr`, `find`, `du`, `stat`, `edit`,
-`micropython`.
+`micropython`, `doom`, `cluuamp`, `mp3player`, `imgview`.
 
 Each ships with a `Cluufile` declaring its capability profile and mount policy.
 See [Container Encapsulation](../containers/index.html).

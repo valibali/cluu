@@ -1598,3 +1598,72 @@ not CR (13). Scancode is the stable identifier — ascii is layout-dependent
 and may differ between drivers (PS/2 kbd sends CR=13, USB HID sends LF=10).
 Map from scancode for any key where the DOOM key constant differs from
 the raw ASCII value.
+
+## doom-sdl2-page-fault-dg-init (2026-07-27)
+
+**Symptom:** DOOM crashes with PAGE_FAULT during `DG_Init` after the T19 SDL2
+migration. `l2_doom` and `l2_baseline_doom_windowed` harness cases FAIL.
+
+**Code sites:**
+- `userspace/doom-cluu/doomgeneric_sdl_cluu.c` — DG_Init (SDL2 video init)
+- `userspace/sdl2/` — CLUU video backend
+- VFS ELF mapping: `map_cached_seg vaddr=0x53b000 pages=59 flags=0x809`
+
+**Root cause (preliminary):** The page fault occurs at CR2=0x543d3b (within
+DOOM's second ELF segment at vaddr=0x53b000), error code 0x7 (page-not-present
++ write + user-mode). The segment is mapped with `flags=0x809` (read-only).
+DOOM or the SDL2 CLUU video backend writes to this read-only segment during
+SDL video initialization, before any frame is rendered.
+
+**Context:** T19 migrated DOOM from the `sdl2-shim` crate to pinned SDL2 2.30.0
+with CLUU backends. T19's evidence states "runtime verification deferred to
+T22." T22 confirms: DOOM does NOT run under the SDL2 migration. The T2/T13
+baselines (4.3 fps windowed, 3.6-3.9 fps fullscreen) were taken with the
+pre-T19 `sdl2-shim` path, which has been deleted.
+
+**Impact:** `l2_doom`, `l2_baseline_doom_windowed`, `l2_baseline_doom_fullscreen`
+all FAIL. No current DOOM performance measurement is possible. The historical
+T2/T13 DOOM numbers remain valid but cannot be re-measured until the page fault
+is fixed.
+
+**Investigation needed:** Check whether the SDL2 CLUU video backend writes to
+DOOM's read-only data segment during surface initialization, or whether the
+DOOM ELF has a segment permission mismatch (data segment marked read-only).
+
+**See also:** `.omo/evidence/task-22-cluu-multimedia-stack.md` (DOOM page fault
+section), `.omo/evidence/task-19-cluu-multimedia-stack.md` (T19 SDL2 migration,
+runtime verification deferred), `userspace/doom-cluu/doomgeneric_sdl_cluu.c`.
+
+## virtio-gpu-cannot-boot (2026-07-27)
+
+**Symptom:** The virtio-gpu display backend cannot boot CLUU. Three independent
+blockers prevent any runtime measurement of virtio-gpu benefit.
+
+**Blockers:**
+
+1. **BOOTBOOT panic with `-vga none`:** `cargo xtask run --virtio-gpu` adds
+   `-vga none -device virtio-gpu-pci`. OVMF exposes no UEFI GOP without VGA,
+   so BOOTBOOT panics before the kernel starts.
+
+2. **Kernel hang with `QEMU_EXTRA_ARGS`:** `QEMU_EXTRA_ARGS="-device
+   virtio-gpu-pci" cargo xtask run` retains default VGA (BOOTBOOT has GOP) +
+   adds virtio-gpu-pci. BOOTBOOT hands off to the kernel, but the kernel prints
+   nothing to serial for 100+ seconds — early hang in PCI enumeration or device
+   init.
+
+3. **T11 driver no IPC dispatch:** Even if the kernel booted, the T11
+   virtio-gpu driver's `run_loop` does not dispatch IPC (`driver.rs:951`:
+   "registry message — ignore for now"). `VirtioGpuBackend::new()`'s 500ms
+   probe would time out and displayd would fall back to linear-fb.
+
+**Impact:** Virtio-gpu lowers no measured host display overhead today because
+it does not run. The structural design (dirty-rect transfer+flush, direct
+scanout eligibility) is correct and verified by static analysis, but no runtime
+trace exists. displayd always falls back to linear-fb.
+
+**Workaround:** Use `cargo xtask run` (default, linear-fb). The linear-fb
+backend works correctly — verified by all 5 T10 displayd isolation cases.
+
+**See also:** `.omo/evidence/task-13-cluu-multimedia-stack.md` (full virtio-gpu
+analysis), `userspace/displayd/src/virtio_gpu_backend.rs` (dirty-rect, direct
+scanout), `userspace/virtio-gpu/` (T11 driver).

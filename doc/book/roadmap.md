@@ -408,6 +408,58 @@ Key findings:
   `I_GetEvent` call — only one release processed per tick. Not a bug for
   normal play but limits release throughput.
 
+### Interlude: multimedia stack (PARTIAL — 2026-07-27)
+
+Display daemon (displayd), audio daemon (audiod), pinned SDL2 2.30.0 with CLUU
+backends, and portability validation. Built over tasks T1-T22. Kernel freeze
+honored — zero kernel changes.
+
+Shipped:
+
+- **displayd** (`userspace/displayd/`): Display daemon with surface protocol,
+  linear-fb and virtio-gpu backends, session-scoped via `PARAM_DISPLAYD_EP`.
+  22 host unit tests pass. Self-test (`DISPLAYD_SELFTEST_OK`) verifies
+  create/destroy/damage/quota lifecycle. 5 harness cases (T10) pass:
+  surface isolation, root control, buffer lifecycle, failstop, visual parity.
+- **audiod** (`userspace/audiod/`): Audio daemon with N-stream mixer (i32
+  accumulation, single saturation), linear resampling, SPSC frame ring.
+  29/29 host unit tests pass (ring 7, resample 8, mixer 10, session 4).
+  Sole virtio-snd client. Session-scoped via `PARAM_AUDIOD_EP`.
+- **SDL2 2.30.0** (`userspace/sdl2/`): Pinned SDL2 with CLUU video, events,
+  and audio backends. `SDL_config_cluu.h` undefines all GL/EGL/Vulkan —
+  software rendering only. Transitional `sdl2-shim` retired (T19).
+- **cluu_wire**: IPC wire protocol types for display, PTS, session, spawn.
+  27 host unit tests pass.
+- **DOOM migrated to SDL2** (T19): `doomgeneric_sdl_cluu.c` is a 43-line patch
+  of upstream. Audio through SDL2 (`SDL_QueueAudio` + `SDL_AudioStream`).
+- **cluuamp migrated to audiod** (T20): Audiod stream lifecycle wired, position
+  tracking excludes padding, bounded memory preserved.
+
+Known failures (measured, not projected):
+
+- **DOOM page fault** (T19 regression): `l2_doom`, `l2_baseline_doom_windowed`
+  fail with PAGE_FAULT at CR2=0x543d3b during DG_Init. The SDL2 CLUU video
+  backend writes to a read-only ELF segment. T19 deferred runtime verification
+  to T22; T22 confirms the failure. See `doc/book/gotchas.md`.
+- **virtio-gpu cannot boot**: Three independent blockers (BOOTBOOT panic with
+  `-vga none`, kernel hang with `QEMU_EXTRA_ARGS`, T11 driver no IPC dispatch).
+  displayd always falls back to linear-fb. See T13 evidence.
+- **virtio-snd TX self-test timeout**: `l2_audio_boot` fails (missing
+  `VIRTIO_SND_TX_OK`). May be environment-specific (host audio backend).
+- **audiod not in system.toml**: audiod stream lifecycle wired but falls back
+  to direct virtio-snd mode (graceful degradation).
+- **T21 (fceux) BLOCKED**: fceux 2.6.5 requires C++ stdlib, Qt5/6, OpenGL,
+  GTK/X11 — all absent from CLUU's newlib toolchain. Escalates to architecture
+  review. See T21 evidence.
+
+Performance (T2↔T13 linear-fb regression check):
+
+- Linear-fb COMP_FRAME: T13 is 30-65% FASTER than T2. Not a regression.
+- vCPU steady-state: T2 4-5%, T13 3-4% — within run-to-run noise.
+- DOOM fps: T2 3.6-4.3, T13 3.9-4.8 — T13 slightly faster.
+- These measurements were with the pre-T19 sdl2-shim path; cannot be
+  re-measured after T19's SDL2 migration (DOOM page-faults).
+
 ### Phase 6: Ship (PENDING)
 
 Goal: a stranger can run CLUU from a download link and see it work.

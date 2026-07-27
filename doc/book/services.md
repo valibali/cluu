@@ -329,7 +329,68 @@ Cooked mode, line discipline, Ctrl-C/Ctrl-Z/Ctrl-D. Login mode
 `userspace/compositor/src/main.rs`
 
 Owns VT4. Floating windows, SHM cell-grid protocol. Status bar with clock.
-Session handoff/ended handling.
+Session handoff/ended handling. Runs as a displayd client — composites cell-grid
+windows and flushes to displayd surfaces via the display backend.
+
+## Multimedia services
+
+### displayd — Display Daemon
+
+`userspace/displayd/src/main.rs`
+
+Display daemon providing a surface protocol for compositor and SDL2 apps.
+Session-scoped via `PARAM_DISPLAYD_EP` (follows the displayd broker model).
+Root-procmgr creates per-session endpoints; session teardown revokes them
+(capability-unreachable, not runtime refusal — AGENTS.md §3).
+
+- **Backends**: `DisplayBackend` enum delegates to `LinearFbBackend` (active) or
+  `VirtioGpuBackend` (cannot boot — three independent blockers, see T13 evidence).
+  Virtio-gpu probe times out (500ms) → falls back to linear-fb.
+- **Surface protocol**: create/destroy/damage/show/hide/move/set_pixel_region.
+  Foreign token rejection, double-create rejection, z-order/occlusion.
+- **Self-test**: `DISPLAYD_SELFTEST_OK` — internal create/destroy/damage/quota
+  lifecycle verification at boot.
+- **Failstop**: compositor's `COMP_FAILSTOP_OK` fires when displayd is unavailable.
+- **IPC**: Display wire labels (cluu_wire::display). Surface operations via
+  token-protected endpoints.
+- **Measured**: `DISPLAYD_READY 1920 1080 7680 linear_fb` on every boot. 22/22
+  host unit tests pass (surface, damage, z-order, scaling, lifecycle).
+- **Container**: `containers/displayd/Cluufile` — PROFILE ipc vfs registry.
+
+### audiod — Audio Daemon
+
+`userspace/audiod/src/main.rs`
+
+Audio daemon mixing N streams from multiple sessions. Sole virtio-snd client
+(driver unregisters "snddev:main" after first AUDIO_OPEN_SESSION — AGENTS.md §3).
+Session-scoped via `PARAM_AUDIOD_EP`.
+
+- **Mixer**: i32 accumulation with single saturation, Q15 gain, N-stream support.
+- **Resampling**: linear resampling, mono→stereo, cross-boundary continuity.
+- **Ring**: SHM SPSC frame ring, monotonic counters, acquire/release ordering.
+  Overcommit returns 0 and counts xrun (no overshoot).
+- **Output**: Fixed stereo S16 at 44100 Hz, period 2048 bytes (512 frames).
+- **IPC**: Labels 0x700-0x710 for stream control (open/close/pause/resume/drain/
+  gain/status/session_destroyed).
+- **Measured**: 29/29 host unit tests pass (ring 7, resample 8, mixer 10, session 4).
+- **Known limitation**: Not in `/etc/system.toml` — audiod stream lifecycle is
+  wired but falls back to direct virtio-snd mode (graceful degradation).
+- **Container**: `containers/audiod/Cluufile` — PROFILE ipc vfs registry device.
+
+### sdl2 — Pinned SDL2 with CLUU Backends
+
+`userspace/sdl2/` (SDL2 2.30.0)
+
+Pinned SDL2 2.30.0 with custom CLUU video, events, and audio backends.
+SDL2 apps (DOOM, cluuamp) go through displayd + audiod via the CLUU backends,
+not direct hardware access. `SDL_config_cluu.h` undefines all GL/EGL/Vulkan —
+CLUU has no GPU; software rendering is the only path.
+
+- **Video backend**: `SDL_HINT_VIDEODRIVER=cluu` — displayd surface protocol.
+- **Audio backend**: `SDL_HINT_AUDIODRIVER=cluu` — audiod stream + virtio-snd.
+- **No C++ stdlib**: CLUU's newlib toolchain has no libc++/libstdc++. C-only apps.
+- **Transitional shim retired**: `userspace/sdl2-shim/` deleted (T19). All SDL2
+  apps use the pinned SDL2 with CLUU backends.
 
 ## Libraries
 
