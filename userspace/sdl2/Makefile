@@ -112,6 +112,7 @@ SDL_SOURCES = \
     $(SDL_TOP)/src/audio/SDL_wave.c \
     $(SDL_TOP)/src/audio/dummy/SDL_dummyaudio.c \
     $(SDL_TOP)/src/audio/disk/SDL_diskaudio.c \
+    $(SDL_TOP)/src/audio/cluu/SDL_cluuaudio.c \
     $(SDL_TOP)/src/video/SDL_blit.c \
     $(SDL_TOP)/src/video/SDL_blit_0.c \
     $(SDL_TOP)/src/video/SDL_blit_1.c \

@@ -1,0 +1,168 @@
+T18 — CLUU SDL2 Audio Backend Implementation Log
+=================================================
+
+Date: 2026-07-27
+Task: T18 (Plan todo, .omo/plans/cluu-multimedia-stack.md line 224)
+Status: Implementation complete, build verified
+
+## Files Created
+
+- userspace/sdl2/SDL2-2.30.0/src/audio/cluu/SDL_cluuaudio.h
+  ProcessInfo access, IPC helpers (cluu_syscall, cluu_ipc_send/call/recv_any,
+  cluu_invoke, cluu_msg_init), audiod/audio protocol labels (0x700-0x710,
+  0x600-0x603), FrameRing constants, PrivateAudioData struct.
+
+- userspace/sdl2/SDL2-2.30.0/src/audio/cluu/SDL_cluuaudio.c
+  FrameRing implementation (init, push, pop, available_read/write, xrun_count),
+  registry subscribe helper, audiod stream lifecycle (open/close/pause/resume/
+  drain), virtio-snd session (open/map/grant/submit/drain/wait/close),
+  SDL backend interface (Available, Init, OpenDevice, GetDeviceBuf, PlayDevice,
+  WaitDevice, CloseDevice, Deinitialize), CLUU_bootstrap registration.
+
+## Files Modified
+
+- userspace/sdl2/SDL2-2.30.0/include/SDL_config_cluu.h
+  Added #define SDL_AUDIO_DRIVER_CLUU 1 (line ~164).
+
+- userspace/sdl2/SDL2-2.30.0/src/audio/SDL_audio.c
+  Added &CLUU_bootstrap to bootstrap array (before DISKAUDIO/DUMMYAUDIO).
+
+- userspace/sdl2/SDL2-2.30.0/src/audio/SDL_sysaudio.h
+  Added extern AudioBootStrap CLUU_bootstrap declaration.
+
+- userspace/sdl2/Makefile
+  Added $(SDL_TOP)/src/audio/cluu/SDL_cluuaudio.c to SDL_SOURCES.
+
+## Architecture
+
+The backend talks to two services:
+
+1. audiod (via PARAM_AUDIOD_EP = param[20]):
+   - AUDIOD_STREAM_OPEN (0x700): open a stream, get stream_id + session_id
+   - AUDIOD_STREAM_CLOSE (0x701): close stream
+   - AUDIOD_STREAM_PAUSE (0x702): pause (not yet wired to SDL pause)
+   - AUDIOD_STREAM_RESUME (0x703): resume
+   - AUDIOD_STREAM_DRAIN (0x704): mark stream for drain
+   - AUDIOD_STREAM_STATUS (0x706): query state, frames, xruns
+
+2. virtio-snd (via registry "snddev:main"):
+   - AUDIO_OPEN_SESSION (0x600): open PCM session, get driver_space_token +
+     grant_target_va
+   - AUDIO_SUBMIT_PCM (0x601): submit a period (page_index + len)
+   - AUDIO_COMPLETE (0x602): completion notification (period_id + status)
+   - AUDIO_CLOSE (0x603): close session
+
+audiod is used for stream lifecycle. virtio-snd is used for actual PCM
+transport because audiod's mixer path is stubbed in T17 (the task says
+"Do NOT modify audiod source code"). When audiod's mixer is fully
+implemented in a future task, the backend can be upgraded to push to
+audiod's SHM ring instead of submitting to virtio-snd directly.
+
+## SPSC FrameRing
+
+Local FrameRing matching audiod/src/ring.rs:
+- Header: 32 bytes (magic, capacity, write_idx, read_idx, total_written,
+  total_read, xrun_count, reserved)
+- Data: capacity * 4 bytes (stereo S16 frames)
+- Capacity: 4096 frames (8 periods of 512 frames)
+- Usable: 4095 frames (one slot reserved for full/empty distinction)
+- Memory ordering: Release on write_idx/read_idx stores, Acquire on loads
+- Xrun detection: push returns 0 and increments xrun_count on full ring
+
+The ring decouples SDL callback timing from virtio-snd submit timing.
+SDL audio thread is the single producer (PlayDevice → push). The same
+thread is the single consumer (WaitDevice → pop → submit to virtio-snd).
+
+## WaitDevice Flow
+
+1. Phase 1 (non-blocking): Submit pending periods from ring to virtio-snd
+   (up to CLUU_AUDIO_VSND_SLOTS=4 in flight).
+2. Phase 2 (non-blocking): Drain completions from virtio-snd.
+3. Phase 3 (blocking): If ring cannot accept next period
+   (available_write < 512 frames), wait for a completion with 500ms
+   timeout. On timeout with no inflight, signal device disconnection.
+   Never polls, never drops.
+
+## Teardown Lock Ordering
+
+1. SDL_AtomicSet(&device->shutdown, 1) — stop callback loop
+2. Audio thread exits SDL_RunAudio
+3. CloseDevice: drain ring → submit remaining to virtio-snd
+4. CloseDevice: wait for inflight completions (bounded, up to 2s)
+5. CloseDevice: AUDIOD_STREAM_CLOSE → AUDIO_CLOSE to virtio-snd
+6. CloseDevice: free ring_buf, scratch, hidden
+
+No locks held across IPC calls. mixer_lock held only during callback
+(by SDL_RunAudio), never during WaitDevice/PlayDevice. CloseDevice runs
+after audio thread exit — no contention on hidden fields.
+
+## Output Format
+
+Fixed: stereo S16 LSB, 44100 Hz, 512-sample periods (2048 bytes).
+SDL's AudioStream converter handles application format conversion.
+Backend sets _this->spec.format/freq/channels/samples in OpenDevice.
+
+## Gotcha Compliance
+
+- cluuamp-allocator-deferred-free-two-thread-leak: Not applicable — uses
+  SDL_malloc/SDL_free, not CLUU LockedAllocator.
+- cluuamp-pcm-s16-unbounded-growth: Ring is fixed-size (4096 frames).
+  Submit-before-buffer: WaitDevice submits before blocking.
+- cluuamp-stream-buf-overshoot: No chunked reads; fixed period size.
+- cluu-cluuamp-eof-drops-last-partial-period: CloseDevice flushes partial
+  periods (cluu_submit_pending pads with silence and submits).
+- cluu-audioengine-stack-overflow-128kib: All large buffers heap-allocated
+  (ring_buf=16KB, scratch=2KB). Stack frame < 4KB (slot_buf=2KB in
+  cluu_submit_pending is the largest stack allocation).
+
+## Build Verification
+
+SDL2 library build:
+  $ cd userspace/sdl2 && make
+  [Compiling SDL2-2.30.0/src/audio/cluu/SDL_cluuaudio.c]
+  [Archiving ../../target/sysroot/lib/libSDL2.a]
+  Built libSDL2.a (104 objects)
+
+Symbol verification:
+  $ llvm-nm-14 target/sysroot/lib/libSDL2.a | grep CLUU_bootstrap
+  0000000000000000 D CLUU_bootstrap
+  0000000000000000 t CLUU_AudioInit
+  0000000000000000 t CLUU_AudioDeinitialize
+
+Full system build:
+  $ cargo xtask build
+  ✓ Build complete: target/cluu.img
+
+## Runtime Verification (requires QEMU)
+
+The following tests should be run in QEMU to verify the backend:
+
+1. SDL callback probe: Generate a 440Hz sine wave via SDL audio callback.
+   Set SDL_AUDIODRIVER=cluu before SDL_Init.
+   Expected: continuous tone at 440Hz (±2Hz via FFT).
+
+2. Queued-audio probe: Play the reference WAV file via SDL_QueueAudio.
+   Expected: audible playback, no dropouts.
+
+3. Play/pause/resume/drain/close:
+   - SDL_PauseAudioDevice(1) → silence
+   - SDL_PauseAudioDevice(0) → audio resumes
+   - SDL_CloseAudioDevice → SDL_AUDIO_CLEAN_SHUTDOWN marker
+
+4. 10-minute soak test:
+   Expected: xrun counter = 0, no teardown deadlock.
+
+5. Failure injection:
+   - Kill audiod → SDL receives bounded error/wakeup within 500ms.
+   - Fill stream → SDL blocks on completion, recovers when space frees.
+
+## Reference WAV
+
+.omo/evidence/task-18-cluu-multimedia-stack.wav
+  2 seconds, 440Hz sine wave, stereo S16, 44100Hz
+  This is the expected output of the SDL callback probe.
+
+## Marker
+
+SDL_AUDIO_CLEAN_SHUTDOWN — emitted by test harness after successful
+CloseAudioDevice (no deadlock, no xruns).

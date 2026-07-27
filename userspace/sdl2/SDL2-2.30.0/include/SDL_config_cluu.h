@@ -160,7 +160,8 @@
 /* Timer: unix backend (clock_gettime + nanosleep from libcluu/posix/time.rs). */
 #define SDL_TIMER_UNIX 1
 
-/* Audio: dummy + disk backends. Real audiod backend lands in T18. */
+/* Audio: CLUU audiod backend (T18) + dummy + disk fallbacks. */
+#define SDL_AUDIO_DRIVER_CLUU 1
 #define SDL_AUDIO_DRIVER_DUMMY 1
 #define SDL_AUDIO_DRIVER_DISK 1
 
