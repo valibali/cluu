@@ -162,11 +162,12 @@ impl LinearResampler {
 }
 
 /// Linear interpolation between two i16 samples.
-/// Returns `cur + (next - cur) * frac / FRAC_ONE` with i32 arithmetic.
+/// Returns `cur + (next - cur) * frac / FRAC_ONE` with i64 arithmetic
+/// to avoid overflow when |diff| × frac exceeds i32 range.
 #[inline]
 fn interpolate(cur: i16, next: i16, frac: u32) -> i16 {
-    let diff = (next as i32) - (cur as i32);
-    let interpolated = (cur as i32) + ((diff * frac as i32) >> FRAC_BITS);
+    let diff = (next as i64) - (cur as i64);
+    let interpolated = (cur as i64) + ((diff * frac as i64) >> FRAC_BITS);
     interpolated.clamp(-32768, 32767) as i16
 }
 

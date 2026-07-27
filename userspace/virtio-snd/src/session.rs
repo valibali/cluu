@@ -189,7 +189,8 @@ pub fn handle_submit_pcm(
         return Err(Error::Busy);
     }
 
-    let pcm_va = session.grant_target_va + page_index * session.period_bytes;
+    let slot_stride = (session.period_bytes + 4095) & !4095;
+    let pcm_va = session.grant_target_va + page_index * slot_stride;
     let pcm_phys = virt_to_phys(space_token, pcm_va)? as u64;
 
     let xfer = &session.xfer_regions[page_index];
