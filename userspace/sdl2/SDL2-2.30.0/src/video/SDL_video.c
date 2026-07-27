@@ -145,6 +145,9 @@ static VideoBootStrap *bootstrap[] = {
     &DUMMY_evdev_bootstrap,
 #endif
 #endif
+#ifdef SDL_VIDEO_DRIVER_CLUU
+    &CLUU_bootstrap,
+#endif
     NULL
 };
 

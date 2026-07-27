@@ -164,7 +164,9 @@
 #define SDL_AUDIO_DRIVER_DUMMY 1
 #define SDL_AUDIO_DRIVER_DISK 1
 
-/* Video: dummy backend for T14. Real CLUU video/events land in T16. */
+/* Video: CLUU backend (displayd surface protocol + compositor input).
+ * Dummy kept as fallback for headless/host-test paths. */
+#define SDL_VIDEO_DRIVER_CLUU 1
 #define SDL_VIDEO_DRIVER_DUMMY 1
 /* GL/EGL/Vulkan/render-gl left undefined — `#ifdef` checks in SDL source
  * treat any definition (even to 0) as enabled, so they must be left

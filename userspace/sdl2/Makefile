@@ -136,6 +136,10 @@ SDL_SOURCES = \
     $(SDL_TOP)/src/video/dummy/SDL_nullevents.c \
     $(SDL_TOP)/src/video/dummy/SDL_nullframebuffer.c \
     $(SDL_TOP)/src/video/dummy/SDL_nullvideo.c \
+    $(SDL_TOP)/src/video/cluu/SDL_cluuvideo.c \
+    $(SDL_TOP)/src/video/cluu/SDL_cluuwindow.c \
+    $(SDL_TOP)/src/video/cluu/SDL_cluuframebuffer.c \
+    $(SDL_TOP)/src/video/cluu/SDL_cluuevents.c \
     $(SDL_TOP)/src/loadso/dummy/SDL_sysloadso.c \
     $(SDL_TOP)/src/filesystem/dummy/SDL_sysfilesystem.c \
     $(SDL_TOP)/src/joystick/dummy/SDL_sysjoystick.c \

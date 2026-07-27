@@ -1,0 +1,225 @@
+# Task 16 — SDL2 CLUU Video, Software-Renderer, and Events Backends
+
+## Summary
+
+Implemented five logical video files for the SDL2 CLUU backend (spec §3.6):
+displayd surface protocol for pixel output, compositor input-forward for
+keyboard events, software renderer only (no accelerated renderer advertised).
+
+## Files Created
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/cluu/SDL_cluuvideo.h`
+  — Shared declarations: CLUU protocol constants, ProcessInfo layout
+  (#[repr(C)] at 0x7fe00100), IPC Message struct (56 bytes), inline syscall
+  helpers (x86_64 SYSCALL with explicit r10/r8/r9 register constraints),
+  IPC wrapper functions (send/call/recv_any/invoke), per-window and
+  per-device driver data structs.
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/cluu/SDL_cluuvideo.c`
+  — Bootstrap (CLUU_bootstrap), CreateDevice, VideoInit (queries displayd
+  OUTPUT_INFO for screen dimensions, creates IPC endpoint for input events,
+  creates registry control endpoint, subscribes to compositor:client for
+  keyboard input), VideoQuit. CLUU_Available() only activates when
+  SDL_VIDEODRIVER=cluu hint is set — avoids touching unmapped ProcessInfo
+  memory on non-CLUU hosts.
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/cluu/SDL_cluuwindow.c`
+  — CreateSDLWindow: creates displayd surface (SurfaceCreate + SetGeometry,
+  centered for windowed, top-left for fullscreen), registers compositor
+  window (WinRegister) for keyboard input forwarding. DestroyWindow:
+  destroys displayd surface + compositor window. ShowWindow/HideWindow/
+  RaiseWindow: state tracking. SetWindowFullscreen: composite fallback
+  (moves surface to 0,0, no VT theft, no scanout promotion).
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/cluu/SDL_cluuframebuffer.c`
+  — CreateWindowFramebuffer: allocates kernel frame token
+  (invoke FrameAllocate), maps it into process address space at 0xD2000000
+  (invoke SpaceMapRange with MAP_FRAME_TOKEN flag), returns mapped pointer
+  as SDL framebuffer (software renderer writes directly to frame token
+  memory). UpdateWindowFramebuffer: sends BUFFER_COMMIT to displayd with
+  frame token and damage rects (clipped to surface bounds, capped at 8
+  rects, bounding-box fallback for >8). DestroyWindowFramebuffer: unmaps
+  and frees frame token.
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/cluu/SDL_cluuevents.c`
+  — PumpEvents: polls input endpoint (non-blocking) for COMP_INPUT_FORWARD
+  messages from compositor. Converts PS/2 set-2 scancodes to SDL scancodes
+  (USB HID) via lookup table covering all main keys (letters, digits,
+  function keys, arrows, modifiers, keypad). Kind 99 → SDL_SendQuit.
+  Kind 0/1 → SDL_SendKeyboardKey(SDL_PRESSED/SDL_RELEASED). Also pumps
+  registry control endpoint for late grant delivery.
+
+## Files Modified
+
+- `userspace/sdl2/SDL2-2.30.0/include/SDL_config_cluu.h`
+  — Added `#define SDL_VIDEO_DRIVER_CLUU 1`. Kept
+  `#define SDL_VIDEO_DRIVER_DUMMY 1` as fallback for headless/host-test
+  paths. Updated comment to reflect T16 completion.
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/SDL_sysvideo.h`
+  — Added `extern VideoBootStrap CLUU_bootstrap;` declaration.
+
+- `userspace/sdl2/SDL2-2.30.0/src/video/SDL_video.c`
+  — Added `&CLUU_bootstrap` to the bootstrap array (after DUMMY, so DUMMY
+  is tried first for host tests without the hint, CLUU activates when
+  SDL_VIDEODRIVER=cluu is set).
+
+- `userspace/sdl2/Makefile`
+  — Added 4 CLUU video source files to SDL_SOURCES list:
+  SDL_cluuvideo.c, SDL_cluuwindow.c, SDL_cluuframebuffer.c, SDL_cluuevents.c.
+
+## Architecture
+
+The C backend talks to displayd and the compositor via raw CLUU kernel
+syscalls (inline assembly). No Rust libcluu linkage is needed at the C
+level — ProcessInfo and Message are #[repr(C)] and their memory layout
+is stable.
+
+### Pixel output path
+  SDL software renderer → mapped frame token memory (0xD2000000)
+  → UpdateWindowFramebuffer → BUFFER_COMMIT IPC to displayd
+  → displayd maps frame token, copies pixels to surface buffer, composites
+
+### Input path
+  kbd driver → compositor → COMP_INPUT_FORWARD → our IPC endpoint
+  → PumpEvents → SDL_SendKeyboardKey / SDL_SendQuit
+
+### Fullscreen
+  Composite fallback only. Surface moves to (0,0). No VT theft, no
+  scanout promotion. SDL_WINDOW_FULLSCREEN flag is honored by repositioning
+  the displayd surface — the compositor composites it.
+
+### Renderer
+  Software renderer only (SDL_VIDEO_RENDER_SW). No SDL_RENDERER_ACCELERATED
+  is advertised. SDL_CreateRenderer with ACCELERATED flag falls back to
+  software automatically (SDL's built-in behavior).
+
+## Build Verification
+
+### Cross-compile with implicit declarations as errors
+Result: PASS. 103 objects compiled (99 from T14 + 4 new CLUU video files).
+Zero errors, zero warnings.
+
+  $ cd userspace/sdl2 && make clean && make -j4
+  ... 103 × [Compiling ...] ...
+  [Archiving ../../target/sysroot/lib/libSDL2.a]
+  Built libSDL2.a (103 objects)
+
+### Link audit — zero undefined symbols in probe binary
+  $ make probe
+  $ llvm-nm-14 -u target/sdl2-build/init_quit_probe
+  (no output — zero undefined symbols)
+
+### Symbol verification — all CLUU functions defined
+  $ llvm-nm-14 target/sysroot/lib/libSDL2.a | grep " T CLUU_"
+  0000000000000000 T CLUU_VideoInit
+  0000000000000000 T CLUU_VideoQuit
+  0000000000000000 T CLUU_CreateSDLWindow
+  0000000000000000 T CLUU_DestroyWindow
+  0000000000000000 T CLUU_HideWindow
+  0000000000000000 T CLUU_RaiseWindow
+  0000000000000000 T CLUU_SetWindowFullscreen
+  0000000000000000 T CLUU_ShowWindow
+  0000000000000000 T CLUU_CreateWindowFramebuffer
+  0000000000000000 T CLUU_DestroyWindowFramebuffer
+  0000000000000000 T CLUU_UpdateWindowFramebuffer
+  0000000000000000 T CLUU_PumpEvents
+
+  $ llvm-nm-14 target/sysroot/lib/libSDL2.a | grep " D CLUU_bootstrap"
+  0000000000000000 D CLUU_bootstrap
+
+### Full system build
+  $ cargo xtask build
+  ...
+  ✓ Build complete: target/cluu.img
+
+### Runtime execution
+The probe binary is a CLUU userspace ELF that links cleanly with zero
+undefined symbols. Executing the 100-cycle loop requires the CLUU kernel
+runtime (CLUU crt0 + libcluu_syscalls make syscalls to the CLUU kernel,
+not to the host Linux kernel). Running it on the host produces a segfault
+— this is expected and is the same behavior as T14 (documented in
+.omo/evidence/task-14-cluu-multimedia-stack.txt).
+
+The CLUU backend activates only when SDL_VIDEODRIVER=cluu is set. Without
+the hint, the dummy backend is used (for host tests / headless paths).
+On CLUU, the application or init system sets the hint before SDL_Init.
+
+## Acceptance Criteria Status
+
+- [x] Five video backend files created in src/video/cluu/
+- [x] SDL window framebuffer maps displayd buffer (via frame token + SpaceMapRange)
+- [x] Built-in software renderer remains honest (SDL_RENDERER_SOFTWARE only)
+- [x] No accelerated renderer advertised (SDL_VIDEO_RENDER_SW only,
+      no SDL_VIDEO_RENDER_OGL defined)
+- [x] SDL_config_cluu.h enables CLUU video backend (SDL_VIDEO_DRIVER_CLUU 1)
+- [x] DUMMY kept as fallback (SDL_VIDEO_DRIVER_DUMMY 1)
+- [x] Makefile compiles CLUU video sources
+- [x] SDL2 library builds with zero errors, zero warnings (103 objects)
+- [x] Full system build succeeds (cargo xtask build)
+- [x] CLUU_bootstrap registered in SDL_video.c bootstrap array
+
+### Test coverage (requires QEMU + CLUU kernel runtime)
+
+The following tests require the CLUU kernel to run and are staged for
+harness execution:
+
+- [ ] Window create/destroy
+- [ ] RGB pattern render
+- [ ] Odd pitch handling
+- [ ] Partial/clipped damage
+- [ ] RenderCopy src/dst
+- [ ] Blending
+- [ ] Keyboard down/up/modifiers/focus/quit
+- [ ] Fullscreen fallback (composite, not VT theft)
+- [ ] 100 init/quit cycles with surface count returning to 0
+
+### Stopping conditions (require QEMU + CLUU kernel runtime)
+
+- [ ] Animated one-tile checker produces partial displayd damage (dirty rect ≤64×64)
+- [ ] Foreign session input → SDL error within 500ms
+- [ ] Unsupported accelerated request → SDL error within 500ms
+- [ ] Destroyed window → SDL error within 500ms
+- [ ] displayd death → SDL error within 500ms
+
+## Error Handling Design
+
+The CLUU backend returns SDL errors via SDL_SetError() for all failure
+paths:
+
+- displayd IPC failure (output info, surface create, commit) → SDL_SetError
+  with descriptive message including error codes
+- Surface token 0 (displayd refused create) → SDL_SetError with displayd
+  error code
+- Frame allocation failure → SDL_SetError with invoke return code
+- Frame map failure → SDL_SetError, frame token freed
+- Commit error code from displayd → SDL_SetError with code
+- Window destroyed check in UpdateWindowFramebuffer → SDL_SetError
+
+No hangs: all IPC calls use cluu_ipc_call (synchronous, kernel-bounded).
+No infinite loops: PumpEvents caps at 32 events per pump and uses
+non-blocking recv (timeout_ms=0). Registry subscribe has a 2-second
+timeout (200 × 10ms polls).
+
+## Known Gaps (recorded honestly)
+
+- Runtime test execution: NOT YET RUN under QEMU. The CLUU video backend
+  is compiled and linked, but executing the acceptance criteria tests
+  requires (a) a Cluufile to package a test binary as a CLUU container,
+  (b) a harness case to spawn it inside CLUU and validate serial markers.
+  Both are out of scope for T16's MUST NOT (files outside userspace/sdl2/
+  and .omo/evidence/). The tests are staged for harness execution when
+  the CLUU multimedia stack is integrated.
+
+- The CLUU backend activates only with SDL_VIDEODRIVER=cluu. Without the
+  hint, dummy is used. On CLUU, the application or init must set this
+  hint before SDL_Init. This is a deliberate safety choice to avoid
+  touching unmapped ProcessInfo memory on non-CLUU hosts.
+
+- Compositor window registration for keyboard input: if the compositor
+  is not available (comp_ep == 0), the backend still creates displayd
+  surfaces for pixel output but keyboard events won't arrive. This is
+  non-fatal — pixel rendering works independently of input.
+
+- The backend does not modify displayd or compositor source code (per
+  MUST NOT DO). All IPC is via the existing wire protocol.
