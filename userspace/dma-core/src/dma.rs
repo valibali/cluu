@@ -98,4 +98,8 @@ impl DmaPool {
     pub fn space_token(&self) -> usize {
         self.space_token
     }
+
+    pub fn reset(&mut self) {
+        self.next_offset = 0;
+    }
 }

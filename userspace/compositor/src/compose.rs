@@ -44,6 +44,7 @@ pub fn recompute_dirty(comp: &mut Compositor) {
         let out = compose_cell(comp, cx, cy);
         let idx = cy as usize * comp.cols as usize + cx as usize;
         comp.cell_grid[idx] = out;
+        comp.prev_cell_grid[idx] = u64::MAX;
     }
 }
 

@@ -1,5 +1,5 @@
 FROM minimal
-PROFILE ipc registry space_grant
+PROFILE ipc registry space_grant space_map
 PRELOAD
 ENDPOINT grantable
 PARAM session_mode

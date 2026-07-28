@@ -64,7 +64,7 @@ const MAX_SURFACES: usize = 8;
 
 /// Recv timeout cap — avoids u64::MAX, NOT a polling mechanism.
 /// 30 s matches the compositor convention.
-const RECV_TIMEOUT_MS: u64 = 30_000;
+const RECV_TIMEOUT_MS: u64 = 200;
 
 /// IPC receive buffer.
 const RECV_BUF_LEN: usize = 4096;
@@ -158,7 +158,8 @@ fn mint_token() -> u64 {
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("displayd: init");
 
-    // 1. Select backend: try virtio-gpu, fall back to linear-fb.
+    let _ = registry::init("displayd");
+
     let (mut backend, backend_name) = match select_backend() {
         Ok((b, name)) => (b, name),
         Err(e) => {
@@ -167,7 +168,6 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // 2. Create scene from output info.
     let output = backend.output_info();
     let mut scene = Scene::new(output);
 
@@ -176,7 +176,6 @@ pub extern "C" fn main() -> i32 {
         backend_name, output.width, output.height, output.pitch
     ));
 
-    // 3. Create IPC endpoint and register as "displayd:main".
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
     let endpoint = match syscall::endpoint_create(ipc_cap) {
@@ -187,10 +186,6 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    if registry::init("displayd").is_err() {
-        let _ = debug_print("displayd: registry init failed");
-        return -1;
-    }
     if registry::register_output("main", endpoint).is_err() {
         let _ = debug_print("displayd: register_output failed");
         return -1;
@@ -218,11 +213,17 @@ pub extern "C" fn main() -> i32 {
     };
     let mut buf = [0u8; RECV_BUF_LEN];
     let mut surfaces = surfaces;
+    let mut direct_fb_token: u64 = 0;
 
     loop {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, RECV_TIMEOUT_MS) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
+                    if msg.tag.label == DISPLAY_SURFACE_CREATE_LABEL {
+                        let _ = debug_print(&format!(
+                            "displayd: RECV SURFACE_CREATE idx={} len={}", idx, len
+                        ));
+                    }
                     if registry_ep != 0 && idx == 1 {
                         let _ = registry::handle_incoming_message(&msg, payload);
                         continue;
@@ -234,12 +235,20 @@ pub extern "C" fn main() -> i32 {
                         &mut scene,
                         &mut backend,
                         &mut surfaces,
+                        &mut direct_fb_token,
                         endpoint,
                     );
                 }
             }
             Err(Error::Timeout) | Err(Error::WouldBlock) => {
-                // Safety cap only — not polling. Loop back to recv.
+                if let DisplayBackend::VirtioGpu(ref mut b) = backend {
+                    if let Some(new_output) = b.poll_display_event() {
+                        scene.set_output(new_output);
+                        scene.full_damage();
+                        let frame_damage = scene.composite_frame(&mut backend);
+                        emit_flush_marker(&frame_damage);
+                    }
+                }
             }
             Err(_) => {
                 let _ = syscall::yield_cpu();
@@ -375,10 +384,15 @@ fn handle_message(
     scene: &mut Scene,
     backend: &mut DisplayBackend,
     surfaces: &mut Vec<TrackedSurface>,
+    direct_fb_token: &mut u64,
     _endpoint: usize,
 ) {
     let label = msg.tag.label;
     let reply_token = extract_reply_id(msg).unwrap_or(0);
+
+    if label == DISPLAY_SURFACE_CREATE_LABEL {
+        let _ = debug_print("displayd: HANDLE_MSG SURFACE_CREATE");
+    }
 
     match label {
         DISPLAY_OUTPUT_INFO_LABEL => {
@@ -399,13 +413,13 @@ fn handle_message(
         }
 
         DISPLAY_SURFACE_CREATE_LABEL => {
-            // Payload: postcard-encoded (width: u32, height: u32, pitch: u32)
-            // or word-based: words[1]=width, words[2]=height, words[3]=pitch
-            let width = msg.words[1] as u32;
-            let height = msg.words[2] as u32;
-            let pitch = msg.words[3] as u32;
+            let client_space_token = msg.words[0];
+            let client_grant_va = msg.words[1];
+            let width = msg.words[2] as u32;
+            let height = msg.words[3] as u32;
+            let pitch = msg.words[4] as u32;
+            let _ = debug_print("displayd: SURFACE_CREATE recv");
 
-            // Quota check.
             if surfaces.len() >= MAX_SURFACES {
                 let reply_msg = Message::new(
                     DISPLAY_SURFACE_CREATE_LABEL,
@@ -436,10 +450,33 @@ fn handle_message(
                             destroyed: false,
                         });
                     surfaces.push(TrackedSurface { token, state });
+
+                    let grant_va = if client_space_token != 0 && client_grant_va != 0 {
+                        match backend {
+                            DisplayBackend::VirtioGpu(ref b) => {
+                                match b.grant_fb_to_client(client_space_token, client_grant_va) {
+                                    Ok(va) => {
+                                        *direct_fb_token = token;
+                                        va
+                                    }
+                                    Err(e) => {
+                                        let _ = debug_print(&format!(
+                                            "displayd: grant_fb_to_client failed: {}", e
+                                        ));
+                                        0
+                                    }
+                                }
+                            }
+                            DisplayBackend::Linear(_) => 0,
+                        }
+                    } else {
+                        0
+                    };
+
                     let reply_msg = Message::new(
                         DISPLAY_SURFACE_CREATE_LABEL,
-                        [token as usize, 0, 0, 0, 0, 0],
-                        1,
+                        [token as usize, grant_va, 0, 0, 0, 0],
+                        2,
                     );
                     let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
                 }
@@ -529,6 +566,20 @@ fn handle_message(
                 off += 16;
             }
             let damage = DamageList::from_rects(&rects);
+
+            // Direct-FB path: client wrote directly to the granted FB.
+            // No copy, no composite — just TRANSFER the damage to QEMU.
+            if client_frame_token == 0 && token == *direct_fb_token && *direct_fb_token != 0 {
+                backend.flush(&damage);
+                emit_flush_marker(&damage);
+                let reply_msg = Message::new(
+                    DISPLAY_BUFFER_COMMIT_LABEL,
+                    [0, 0, 0, 0, 0, 0],
+                    1,
+                );
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                return;
+            }
 
             // Frame-token path: compositor client provides pixels via frame token.
             if client_frame_token != 0 {
@@ -669,8 +720,6 @@ fn handle_message(
         }
 
         DISPLAY_SET_GEOMETRY_LABEL => {
-            // words[1] = token, words[2] = x, words[3] = y
-            // Payload: z_order (i32) + visible (u8)
             let token = msg.words[1] as u64;
             let x = msg.words[2] as i32;
             let y = msg.words[3] as i32;
@@ -696,8 +745,10 @@ fn handle_message(
                 Err(e) => e as usize,
             };
 
-            let frame_damage = scene.composite_frame(backend);
-            emit_flush_marker(&frame_damage);
+            if token != *direct_fb_token {
+                let frame_damage = scene.composite_frame(backend);
+                emit_flush_marker(&frame_damage);
+            }
 
             let reply_msg = Message::new(
                 DISPLAY_SET_GEOMETRY_LABEL,
@@ -713,8 +764,10 @@ fn handle_message(
 
             let error_code = match scene.set_visible(token, visible) {
                 Ok(_) => {
-                    let frame_damage = scene.composite_frame(backend);
-                    emit_flush_marker(&frame_damage);
+                    if token != *direct_fb_token {
+                        let frame_damage = scene.composite_frame(backend);
+                        emit_flush_marker(&frame_damage);
+                    }
                     0
                 }
                 Err(e) => e as usize,

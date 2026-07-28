@@ -385,6 +385,7 @@ fn load_initrd_bind_rules(initrd: Option<&[u8]>) -> BindRuleTable {
         "virtio-net",
         "virtio-9p",
         "virtio-snd",
+        "virtio-gpu",
         "usb-input",
         "kbd",
         "mouse",

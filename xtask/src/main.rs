@@ -145,10 +145,9 @@ enum Commands {
         /// QEMU display backend: gtk (window) or none (headless)
         #[arg(long, default_value = "gtk")]
         display: String,
-        /// Use virtio-gpu-pci instead of default VGA (adds -vga none
-        /// -device virtio-gpu-pci,max_outputs=1,edid=on)
+        /// Disable virtio-gpu-pci (enabled by default)
         #[arg(long)]
-        virtio_gpu: bool,
+        no_virtio_gpu: bool,
     },
     /// Run all tests
     Test,
@@ -315,12 +314,12 @@ fn main() -> Result<()> {
             net,
             port,
             display,
-            virtio_gpu,
+            no_virtio_gpu,
         } => {
             if build {
                 build_pipeline(&profile, ui)?;
             }
-            run_qemu(debug, pin_core, net, port, &display, virtio_gpu)?;
+            run_qemu(debug, pin_core, net, port, &display, !no_virtio_gpu)?;
         }
         Commands::Test => {
             run_tests()?;
@@ -1799,9 +1798,8 @@ fn create_initrd(profile: &str) -> Result<()> {
         let stripped = initrd_dir.join("sys").join(prog);
         let dst_elf = initrd_dir.join("sys").join(format!("{}.elf", prog));
         if stripped.exists() {
-            fs::copy(&stripped, &dst_elf).with_context(|| {
-                format!("Failed to copy {}.elf", prog)
-            })?;
+            fs::copy(&stripped, &dst_elf)
+                .with_context(|| format!("Failed to copy {}.elf", prog))?;
             println!("  Copied sys/{}.elf", prog);
         }
     }
@@ -1820,10 +1818,11 @@ fn create_initrd(profile: &str) -> Result<()> {
             if !content.contains("[driver]") {
                 continue;
             }
-            let dst = initrd_dir.join("sys").join(format!("{}.manifest.toml", prog));
-            fs::copy(&manifest_src, &dst).with_context(|| {
-                format!("Failed to copy {}.manifest.toml", prog)
-            })?;
+            let dst = initrd_dir
+                .join("sys")
+                .join(format!("{}.manifest.toml", prog));
+            fs::copy(&manifest_src, &dst)
+                .with_context(|| format!("Failed to copy {}.manifest.toml", prog))?;
             println!("  Copied sys/{}.manifest.toml", prog);
         }
     }
@@ -2022,7 +2021,7 @@ fn create_disk_image(_profile: &str) -> Result<()> {
     // Create bootboot config file. Optional extra BOOTBOOT environment lines
     // can be injected via CLUU_BOOTBOOT_ENV (newline or ';' separated).
     let mut bootboot_config =
-        String::from("// BOOTBOOT configuration\nscreen=1920x1080\nkernel=sys/core\n");
+        String::from("// BOOTBOOT configuration\nscreen=1024x768\nkernel=sys/core\n");
     if let Ok(extra_env) = std::env::var("CLUU_BOOTBOOT_ENV") {
         for line in extra_env
             .split(['\n', ';'])
@@ -2396,10 +2395,8 @@ fn run_qemu(
 
     if virtio_gpu {
         cmd.args([
-            "-vga",
-            "none",
             "-device",
-            "virtio-gpu-pci,max_outputs=1,edid=on",
+            "virtio-vga,max_outputs=1,edid=on",
         ]);
     }
 
@@ -2910,7 +2907,7 @@ fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
 }
 
 // T21 BLOCKED — fceux requires C++ stdlib.
-const BLOCKED_CONTAINERS: &[&str] = &["fceux"];
+const BLOCKED_CONTAINERS: &[&str] = &["fceux", "doom"];
 
 fn discover_containers() -> Vec<String> {
     let containers_dir = project_root().join("containers");
@@ -3365,7 +3362,10 @@ fn build_doom() -> Result<()> {
     let doom_dir = project_root().join("userspace/doom-cluu");
     let doom_src = project_root().join("external/doomgeneric/doomgeneric/doomgeneric.h");
     if !doom_src.exists() {
-        eprintln!("  Warning: doomgeneric source not found at {}, skipping DOOM build", doom_src.display());
+        eprintln!(
+            "  Warning: doomgeneric source not found at {}, skipping DOOM build",
+            doom_src.display()
+        );
         return Ok(());
     }
 
@@ -3384,8 +3384,7 @@ fn build_doom() -> Result<()> {
     }
 
     let cluu_lib = project_root().join("target/sysroot/lib");
-    let staticlib_src = project_root()
-        .join("target/x86_64-cluu-user/debug/libdoom_cluu.a");
+    let staticlib_src = project_root().join("target/x86_64-cluu-user/debug/libdoom_cluu.a");
     let staticlib_dst = cluu_lib.join("libdoom_cluu.a");
     fs::create_dir_all(&cluu_lib).ok();
     fs::copy(&staticlib_src, &staticlib_dst).context("Failed to copy libdoom_cluu.a to sysroot")?;

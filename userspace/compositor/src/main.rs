@@ -250,7 +250,7 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
                         comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
-                        // Do NOT continue — fall through to post-recv block.
+                        comp.check_output_resize();
                     }
 
                     // Session handoff from login service. Handled with raw label match

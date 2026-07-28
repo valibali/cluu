@@ -85,7 +85,6 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Create a new scene with the given output info.
     pub fn new(output: OutputInfo) -> Self {
         Scene {
             output,
@@ -93,6 +92,19 @@ impl Scene {
             overlays: Vec::new(),
             pending_damage: DamageAccumulator::new(),
         }
+    }
+
+    pub fn set_output(&mut self, output: OutputInfo) {
+        self.output = output;
+    }
+
+    pub fn full_damage(&mut self) {
+        self.pending_damage.add(Rect {
+            x: 0,
+            y: 0,
+            w: self.output.width,
+            h: self.output.height,
+        });
     }
 
     // ----- Surface lifecycle -----

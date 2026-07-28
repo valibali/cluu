@@ -63,6 +63,7 @@ pub const DISPLAY_BUFFER_RELEASE_LABEL: u32 = 304;
 pub const DISPLAY_SET_GEOMETRY_LABEL: u32 = 305;
 pub const DISPLAY_SET_VISIBLE_LABEL: u32 = 306;
 pub const DISPLAY_SURFACE_DESTROY_LABEL: u32 = 307;
+pub const DISPLAY_OUTPUT_CHANGED_LABEL: u32 = 308;
 
 // ----- Pixel format -----
 

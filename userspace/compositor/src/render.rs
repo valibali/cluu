@@ -66,7 +66,7 @@ impl Compositor {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         pixels_ptr.add(src_off),
-                        self.backbuf.as_mut_ptr().add(dst_off),
+                        self.fb_ptr.add(dst_off),
                         max_cols,
                     );
                 }
@@ -322,6 +322,21 @@ impl Compositor {
                     core::mem::swap(&mut fg, &mut bg);
                 }
 
+                let px = cx * glyph_w;
+                let py = cy * glyph_h;
+
+                if cp == 0x2588 {
+                    for row in 0..glyph_h {
+                        let off = (py + row) * pitch_words + px;
+                        unsafe {
+                            for x in 0..glyph_w {
+                                *self.fb_ptr.add(off + x) = fg;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let glyph = match libcluu::font::glyph_alpha_for_codepoint(cp, bold, italic) {
                     Some(g) => g,
                     None => {
@@ -330,19 +345,23 @@ impl Compositor {
                     }
                 };
 
-                let px = cx * glyph_w;
-                let py = cy * glyph_h;
                 let mut row_buffer = [0u32; 8];
                 for row in 0..glyph_h {
                     let alpha_row = &glyph[row * glyph_w..(row + 1) * glyph_w];
                     libcluu::simd::blend_alpha_row(alpha_row, fg, bg, &mut row_buffer);
                     let off = (py + row) * pitch_words + px;
-                    self.backbuf[off..off + glyph_w].copy_from_slice(&row_buffer);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            row_buffer.as_ptr(),
+                            self.fb_ptr.add(off),
+                            glyph_w,
+                        );
+                    }
                 }
                 if underline {
                     let off = (py + glyph_h - 1) * pitch_words + px;
                     for x in 0..glyph_w {
-                        self.backbuf[off + x] = fg;
+                        unsafe { *self.fb_ptr.add(off + x) = fg; }
                     }
                 }
             }
@@ -381,77 +400,29 @@ impl Compositor {
         let w = right - x;
         let h = bot - y;
 
-        let pitch_words = self.width_px as usize;
-        // Double-buffered ping-pong: write to the inactive frame so displayd
-        // can finish copying the active one without being overwritten.
-        let write_idx = 1 - self.backbuf_active_idx;
-        let frame_ptr = self.backbuf_vas[write_idx] as *mut u32;
-        let frame_max_pixels = self.backbuf_frame_bytes / 4;
-        let region_pixels = (w as usize) * (h as usize);
-
-        // BENCH: Bug A diagnostics — log the dirty rect and whether it
-        // fits in the frame token. A drop (return at line below) would
-        // leave displayd's surface with stale pixels.
-        #[cfg(feature = "bench")]
-        {
-            let _ = libcluu::debug_print(&alloc::format!(
-                "BENCH_COMP_FLUSH: dirty_rect x={} y={} w={} h={} region_px={} frame_max_px={} {}",
-                x, y, w, h, region_pixels, frame_max_pixels,
-                if region_pixels > frame_max_pixels { "DROP" } else { "SEND" },
-            ));
-        }
-
-        if region_pixels > frame_max_pixels {
-            return;
-        }
-
-        for row in 0..(h as usize) {
-            let py = y as usize + row;
-            let src_off = py * pitch_words + x as usize;
-            let dst_off = row * w as usize;
-            // SAFETY: `src_off` is within `backbuf` because
-            // `py < height_px` (bounded by `h <= height_px`) and
-            // `x + w <= width_px` (clipped above), so
-            // `src_off + w <= height_px * pitch_words`. `dst_off` is
-            // within the frame mapping because `region_pixels =
-            // w * h <= frame_max_pixels` (checked above). Source
-            // (backbuf Vec) and dest (frame mapping at the inactive backbuf VA)
-            // are disjoint. Both are u32-aligned.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    self.backbuf.as_ptr().add(src_off),
-                    frame_ptr.add(dst_off),
-                    w as usize,
-                );
-            }
-        }
-
         let dr = Rect { x, y, w, h };
         let mut damage_bytes = [0u8; 16];
         damage_bytes[0..4].copy_from_slice(&dr.x.to_le_bytes());
         damage_bytes[4..8].copy_from_slice(&dr.y.to_le_bytes());
         damage_bytes[8..12].copy_from_slice(&dr.w.to_le_bytes());
         damage_bytes[12..16].copy_from_slice(&dr.h.to_le_bytes());
-        let mut commit_msg = Message::new(
+        let commit_msg = Message::new(
             DISPLAY_BUFFER_COMMIT_LABEL,
             [
-                0,
+                damage_bytes.len(),
                 self.surface_token as usize,
                 0,
                 0,
-                self.backbuf_frame_tokens[write_idx] as usize,
+                0,
                 0,
             ],
-            5,
+            2,
         );
-        commit_msg.words[0] = damage_bytes.len();
-        // Async one-way send. Double-buffering eliminates the frame-token
-        // reuse race without blocking: displayd copies the frame we just sent
-        // (write_idx, now active) while the next flush writes to the other
-        // frame (1 - write_idx). The previous synchronous call_with_payload
-        // fixed the pixel noise but stalled the event loop (1 Hz updates).
-        let _ = ipc::send_msg_with_payload(self.displayd_ep, &commit_msg, &damage_bytes);
-        self.backbuf_active_idx = write_idx;
+        let _ = ipc::send_msg_with_payload(
+            self.displayd_ep,
+            &commit_msg,
+            &damage_bytes,
+        );
     }
 }
 

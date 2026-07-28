@@ -412,7 +412,13 @@ pub fn handle_grant_requests() -> Result<()> {
         match ipc_recv_nonblocking(control_endpoint, &mut buf) {
             Ok(len) => {
                 if let Some((msg, payload)) = parse_message(&buf[..len]) {
-                    let _ = handle_incoming_message(&msg, payload)?;
+                    if let Some(event) = handle_incoming_message(&msg, payload)? {
+                        if let RegistryEvent::Grant { service_name, name, token } = event {
+                            let full = alloc::format!("{}:{}", service_name, name);
+                            let mut state = REGISTRY_STATE.lock();
+                            state.lookup_cache.insert(full, token);
+                        }
+                    }
                 }
             }
             Err(Error::WouldBlock) => return Ok(()),

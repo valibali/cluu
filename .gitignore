@@ -91,16 +91,9 @@ userfs/bin/spawnpipeprobe
 userfs/bin/stubsprobe
 userfs/bin/tlsprobe
 userfs/bin/waitprobe
-.omo/drafts/tab-completion-protocol.md
-.omo/plans/tab-completion-protocol.md
-.omo/run-continuation/ses_0de421c01ffeRloT7WHb6v0XqJ.json
-.omo/run-continuation/ses_0e0ca9fdcffeE6YuCCWqWoXYTq.json
-.omo/run-continuation/ses_0e26ae53fffevm7IfAu8Bh0wDv.json
-.omo/run-continuation/ses_0e29b4b4affeFn8rDiMB6VsXwj.json
-.omo/run-continuation/ses_0f52dfb8bffeCZVakDycaZy6f7.json
-.omo/run-continuation/ses_101f1b55dffeDGdAGYQkf4Z3A4.json
-.omo/run-continuation/ses_101fff57effeyNs8KbvoSc61NJ.json
-.omo/run-continuation/ses_10206adfeffeR6gTikYql5Z045.json
+
+# Orchestration state (boulder, plans, evidence, drafts, run-continuation)
+.omo/
 
 # Python harness artifacts
 __pycache__/
@@ -111,6 +104,3 @@ python/*.egg-info/
 
 # QEMU serial log artifact
 output.logclear
-
-# Session run-continuation files (transient agent state)
-.omo/run-continuation/

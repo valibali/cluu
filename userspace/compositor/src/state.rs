@@ -250,32 +250,15 @@ pub struct Window {
 /// Methods are split across `window_mgr` (window lifecycle + input) and
 /// `render` (glyph blit, displayd commit, frame/clock timing).
 pub struct Compositor {
-    /// displayd endpoint for IPC (resolved via PARAM_DISPLAYD_EP or registry).
     pub displayd_ep: usize,
-    /// Capability token for our displayd surface.
     pub surface_token: u64,
-    /// Screen dimensions in pixels (from displayd OUTPUT_INFO).
     pub width_px: u32,
     pub height_px: u32,
-    /// Backbuffer pitch in bytes (== width_px * 4 for XRGB8888).
     pub pitch: u32,
 
-    /// Double-buffered frame tokens for pixel transfer to displayd.
-    /// Ping-pong: while displayd copies frame A, compositor writes frame B.
-    /// Eliminates the frame-token reuse race without blocking the event loop.
-    pub backbuf_frame_tokens: [u64; 2],
-    /// VAs where the two `backbuf_frame_tokens` are mapped in the compositor's
-    /// space.  Index 0 → `BACKBUF_VA_0`, index 1 → `BACKBUF_VA_1`.
-    pub backbuf_vas: [usize; 2],
-    /// Index of the frame displayd is currently processing (0 or 1).
-    /// The compositor writes to `1 - backbuf_active_idx`.
-    pub backbuf_active_idx: usize,
-    /// Byte size of each backbuf frame token mapping, computed at init from
-    /// the actual displayd-reported framebuffer dimensions
-    /// (`width_px * height_px * 4`, rounded up to 4 KiB).  Used both as the
-    /// allocation size and as the upper bound for the dirty-region copy in
-    /// `flush_backbuf_to_displayd`.
-    pub backbuf_frame_bytes: usize,
+    pub fb_ptr: *mut u32,
+    pub fb_grant_va: usize,
+    pub fb_backing: Option<Vec<u32>>,
 
     /// Screen dimensions in cell units.
     pub cols: u16,
@@ -287,12 +270,7 @@ pub struct Compositor {
     /// Cells marked dirty since the last compose pass; drained by `recompute_dirty`.
     pub cell_dirty: Vec<(u16, u16)>,
 
-    /// xterm-256 ARGB palette; index = colour number from cell fg/bg fields.
     pub palette: [u32; 256],
-    /// Software backbuffer (width_px×height_px u32 ARGB).  Written by
-    /// `flush_grid_to_backbuf`; copied to the displayd frame token by
-    /// `flush_backbuf_to_displayd`.
-    pub backbuf: Vec<u32>,
 
     /// Pixel-level bounding box of cells blitted since the last displayd commit.
     /// `None` means nothing was redrawn; `flush_backbuf_to_displayd` is a no-op.
@@ -389,9 +367,7 @@ pub const GLYPH_H: u32 = 16;
 /// VAs for the compositor's double-buffered backbuf frame mappings
 /// (pixel transfer to displayd).  Two frames are mapped so the compositor
 /// can write to one while displayd copies from the other.
-const BACKBUF_VA_0: usize = 0xB000_0000;
-const BACKBUF_VA_1: usize = 0xB080_0000;
-/// Page size used to round up the backbuf frame allocation.
+const COMP_FB_GRANT_VA: usize = 0x5600_0000;
 const PAGE_SIZE: usize = 4096;
 
 impl Compositor {
@@ -425,10 +401,19 @@ impl Compositor {
             "compositor: displayd output {}x{} pitch={}", width_px, height_px, pitch
         ));
 
+        let compositor_space_token = libcluu::boot::space_token();
+        let pixel_count = (width_px * height_px) as usize;
         let mut create_msg = Message::new(
             DISPLAY_SURFACE_CREATE_LABEL,
-            [0, width_px as usize, height_px as usize, pitch as usize, 0, 0],
-            4,
+            [
+                compositor_space_token,
+                COMP_FB_GRANT_VA,
+                width_px as usize,
+                height_px as usize,
+                pitch as usize,
+                0,
+            ],
+            5,
         );
         if ipc::call(displayd_ep, &mut create_msg, IpcFlags::empty()).is_err() {
             let _ = debug_print("COMP_FAILSTOP_OK displayd SURFACE_CREATE call failed");
@@ -439,6 +424,19 @@ impl Compositor {
             let _ = debug_print("COMP_FAILSTOP_OK displayd SURFACE_CREATE rejected");
             return Err(Error::InvalidArgument);
         }
+        let fb_grant_va = create_msg.words[1];
+        let mut fb_backing: Option<Vec<u32>> = None;
+        let fb_ptr = if fb_grant_va != 0 {
+            let _ = debug_print(&alloc::format!(
+                "compositor: direct FB grant at VA={:#x}", fb_grant_va
+            ));
+            fb_grant_va as *mut u32
+        } else {
+            let mut v: Vec<u32> = alloc::vec![0u32; pixel_count];
+            let p = v.as_mut_ptr();
+            fb_backing = Some(v);
+            p
+        };
         let _ = debug_print("compositor: surface created");
 
         let geo_msg = Message::new(
@@ -452,39 +450,6 @@ impl Compositor {
         let cols = (width_px / GLYPH_W) as u16;
         let rows = (height_px / GLYPH_H) as u16;
         let cell_count = cols as usize * rows as usize;
-        let pixel_count = (width_px * height_px) as usize;
-
-        // Frame size must cover the whole framebuffer (width_px * height_px
-        // pixels, 4 bytes each) so full-screen damage flushes are not
-        // silently dropped by the bounds check in `flush_backbuf_to_displayd`.
-        let backbuf_frame_bytes =
-            (pixel_count * 4 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-
-        let (backbuf_frame_token_0, _) = match crate::shm::alloc_frame(backbuf_frame_bytes) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = debug_print(&alloc::format!(
-                    "COMP_FAILSTOP_OK backbuf frame 0 alloc failed size={} err={:?}", backbuf_frame_bytes, e
-                ));
-                return Err(Error::InvalidArgument);
-            }
-        };
-        let _ = debug_print("compositor: backbuf frame 0 allocated");
-        crate::shm::map_frame_rw(BACKBUF_VA_0, backbuf_frame_token_0, backbuf_frame_bytes)?;
-        let _ = debug_print("compositor: backbuf frame 0 mapped");
-
-        let (backbuf_frame_token_1, _) = match crate::shm::alloc_frame(backbuf_frame_bytes) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = debug_print(&alloc::format!(
-                    "COMP_FAILSTOP_OK backbuf frame 1 alloc failed size={} err={:?}", backbuf_frame_bytes, e
-                ));
-                return Err(Error::InvalidArgument);
-            }
-        };
-        let _ = debug_print("compositor: backbuf frame 1 allocated");
-        crate::shm::map_frame_rw(BACKBUF_VA_1, backbuf_frame_token_1, backbuf_frame_bytes)?;
-        let _ = debug_print("compositor: backbuf frame 1 mapped");
 
         let _ = debug_print(&alloc::format!(
             "compositor: displayd surface {} ({}x{} pitch={})",
@@ -497,17 +462,15 @@ impl Compositor {
             width_px,
             height_px,
             pitch,
-            backbuf_frame_tokens: [backbuf_frame_token_0, backbuf_frame_token_1],
-            backbuf_vas: [BACKBUF_VA_0, BACKBUF_VA_1],
-            backbuf_active_idx: 0,
-            backbuf_frame_bytes,
+            fb_ptr,
+            fb_grant_va,
+            fb_backing,
             cols,
             rows,
             cell_grid: alloc::vec![0u64; cell_count],
             prev_cell_grid: alloc::vec![u64::MAX; cell_count],
             cell_dirty: Vec::new(),
             palette: xterm_256_palette(),
-            backbuf: alloc::vec![0u32; pixel_count],
             dirty_rect: None,
             windows: Vec::new(),
             focused: None,
@@ -534,6 +497,91 @@ impl Compositor {
             cursor_needs_render: false,
             pixel_dirty: false,
         })
+    }
+
+    /// Poll displayd for output dimensions. If changed, resize the cell grid,
+    /// backbuf, and schedule a full redraw.
+    pub fn check_output_resize(&mut self) -> bool {
+        let mut info_msg = Message::new(DISPLAY_OUTPUT_INFO_LABEL, [0; 6], 0);
+        if ipc::call(self.displayd_ep, &mut info_msg, IpcFlags::empty()).is_err() {
+            return false;
+        }
+        let new_w = info_msg.words[0] as u32;
+        let new_h = info_msg.words[1] as u32;
+        if new_w == 0 || new_h == 0 || (new_w == self.width_px && new_h == self.height_px) {
+            return false;
+        }
+
+        let _ = debug_print(&alloc::format!(
+            "compositor: output resized {}x{} → {}x{}",
+            self.width_px, self.height_px, new_w, new_h
+        ));
+
+        let new_cols = (new_w / GLYPH_W) as u16;
+        let new_rows = (new_h / GLYPH_H) as u16;
+        let new_cell_count = new_cols as usize * new_rows as usize;
+        let new_pixel_count = (new_w * new_h) as usize;
+
+        self.width_px = new_w;
+        self.height_px = new_h;
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.cell_grid = alloc::vec![0u64; new_cell_count];
+        self.prev_cell_grid = alloc::vec![u64::MAX; new_cell_count];
+        self.dirty_rect = None;
+        self.cell_dirty.clear();
+
+        for cx in 0..self.cols {
+            self.cell_dirty.push((cx, 0));
+        }
+        for cy in 0..self.rows {
+            self.cell_dirty.push((0, cy));
+        }
+
+        // Re-request direct-FB grant for the new dimensions.  The
+        // SURFACE_CREATE message layout MUST match init(): [space_token,
+        // grant_va, width, height, pitch, 0].  The old grant mapping is
+        // overwritten page-by-page when the driver re-grants at the same
+        // VA range.
+        let compositor_space_token = libcluu::boot::space_token();
+        let new_pitch = new_w * 4;
+        let mut create_msg = Message::new(
+            DISPLAY_SURFACE_CREATE_LABEL,
+            [
+                compositor_space_token,
+                COMP_FB_GRANT_VA,
+                new_w as usize,
+                new_h as usize,
+                new_pitch as usize,
+                0,
+            ],
+            5,
+        );
+        if ipc::call(self.displayd_ep, &mut create_msg, IpcFlags::empty()).is_ok() {
+            let new_token = create_msg.words[0] as u64;
+            if new_token != 0 {
+                self.surface_token = new_token;
+                let new_grant_va = create_msg.words[1];
+                if new_grant_va != 0 {
+                    self.fb_grant_va = new_grant_va;
+                    self.fb_ptr = new_grant_va as *mut u32;
+                    self.fb_backing = None;
+                }
+                let geo_msg = Message::new(
+                    DISPLAY_SET_GEOMETRY_LABEL,
+                    [0, new_token as usize, 0, 0, 0, 0],
+                    4,
+                );
+                let geo_payload = [0u8, 0u8, 0u8, 0u8, 1u8];
+                let _ = ipc::send_msg_with_payload(self.displayd_ep, &geo_msg, &geo_payload);
+            }
+        }
+
+        self.schedule_frame(
+            libcluu::syscall::clock_now(libcluu::boot::clock_token_handle())
+                .unwrap_or(0),
+        );
+        true
     }
 }
 

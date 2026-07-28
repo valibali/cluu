@@ -17,21 +17,49 @@ use cluu_virtio_core::IrqSource;
 use libcluu::boot::{process_info, TOKEN_EXTRA_0, TOKEN_EXTRA_1, TOKEN_EXTRA_2, TOKEN_IPC, TOKEN_SPACE};
 use libcluu::ipc::PARAM_DEVICE_PATH;
 use libcluu::registry;
-use libcluu::syscall::{ipc_recv_any_with_sender, yield_cpu};
+use libcluu::ipc::{extract_reply_id, parse_message, reply};
+use libcluu::syscall::{
+    ipc_recv_any_with_sender, space_grant, space_map_range, space_unmap, virt_to_phys, yield_cpu,
+};
+use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error, Result};
+
+const PAGE_SIZE: usize = 4096;
+
+const GPU_PROBE: u32 = 0x700;
+const GPU_GET_DISPLAY_INFO: u32 = 0x701;
+const GPU_CREATE_2D: u32 = 0x702;
+const GPU_ATTACH_BACKING: u32 = 0x703;
+const GPU_SET_SCANOUT: u32 = 0x704;
+const GPU_TRANSFER_FLUSH: u32 = 0x705;
+const GPU_UNREF_RESOURCE: u32 = 0x706;
+const GPU_POLL_EVENT: u32 = 0x707;
+const GPU_RESIZE: u32 = 0x708;
+const GPU_GRANT_TO_CLIENT: u32 = 0x709;
+const GPU_PROTOCOL_VERSION: usize = 1;
+
+const GRANT_TARGET_VA: usize = 0x5600_0000;
 
 use crate::protocol;
 
-/// DMA pool VA base — virtqueue rings + control buffers + framebuffer backing.
+/// DMA pool VA base — virtqueue rings + self-test backing.
 const DMA_POOL_VA: usize = 0x5400_0000;
-/// DMA pool size: 512 pages (2 MB) — enough for a 640×480×4 framebuffer.
-const DMA_POOL_PAGES: usize = 512;
+const DMA_POOL_PAGES: usize = 64;
+
+/// Command/response transient pool (8 pages, reset per submit).
+const CMD_POOL_VA: usize = 0x5300_0000;
+const CMD_POOL_PAGES: usize = 8;
 
 /// MMIO window for the virtio PCI capability BAR.
 const MMIO_VA_BASE: usize = 0x5500_0000;
 
+/// Framebuffer VA in driver's address space. Separate from the DMA pool so
+/// resize can unmap+remap without pool fragmentation. Granted to displayd
+/// at GRANT_TARGET_VA.
+const DRIVER_FB_VA: usize = 0x5700_0000;
+
 /// Virtqueue size (QEMU virtio-gpu uses 64 for controlq and cursorq).
-const QUEUE_SIZE: u16 = 64;
+const QUEUE_SIZE: u16 = 256;
 
 /// Fence timeout — spin iterations before giving up (~2s at ~1µs/iteration).
 const FENCE_TIMEOUT_SPINS: u32 = 2_000_000;
@@ -50,10 +78,13 @@ pub struct GpuDriver {
     pub vq_cursor: Virtqueue,
     pub irq: IrqSource,
     pub pool: DmaPool,
+    pub cmd_pool: DmaPool,
     pub space_token: usize,
     pub next_fence_id: u64,
     pub next_resource_id: u32,
     pub irq_seen: bool,
+    pub fb_virt: usize,
+    pub fb_pages: usize,
 }
 
 /// Display mode queried via GET_DISPLAY_INFO.
@@ -104,6 +135,7 @@ impl GpuDriver {
 
         // ── DMA pool ─────────────────────────────────────────────────────
         let mut pool = DmaPool::new(space_token, DMA_POOL_VA, DMA_POOL_PAGES)?;
+        let cmd_pool = DmaPool::new(space_token, CMD_POOL_VA, CMD_POOL_PAGES)?;
 
         // ── Transport ────────────────────────────────────────────────────
         let mut transport = ModernPciTransport::new(
@@ -167,10 +199,13 @@ impl GpuDriver {
             vq_cursor,
             irq,
             pool,
+            cmd_pool,
             space_token,
             next_fence_id: 1,
             next_resource_id: 1,
             irq_seen: false,
+            fb_virt: 0,
+            fb_pages: 0,
         };
 
         driver.transport.set_driver_ok()?;
@@ -243,12 +278,14 @@ impl GpuDriver {
         fence: bool,
     ) -> Result<u32> {
         if self.vq_control.free_capacity() < 2 {
-            return Err(Error::Busy); // queue exhaustion
+            return Err(Error::Busy);
         }
 
+        self.cmd_pool.reset();
+
         let resp_size = resp_size.max(core::mem::size_of::<protocol::CtrlHdr>());
-        let cmd_region = self.pool.alloc(cmd_bytes.len(), 4)?;
-        let resp_region = self.pool.alloc(resp_size, 4)?;
+        let cmd_region = self.cmd_pool.alloc(cmd_bytes.len(), 4)?;
+        let resp_region = self.cmd_pool.alloc(resp_size, 4)?;
 
         // Copy command into DMA memory. If fence is requested, set the
         // VIRTIO_GPU_FLAG_FENCE bit and assign a fence_id in the header.
@@ -391,18 +428,19 @@ impl GpuDriver {
         entries: &[protocol::MemEntry],
     ) -> Result<u32> {
         let n_entries = entries.len();
-        let total_descs = 2 + n_entries; // cmd + entries + response
+        let total_descs = 2 + n_entries;
         if self.vq_control.free_capacity() < total_descs as u16 {
-            return Err(Error::Busy); // queue exhaustion
+            return Err(Error::Busy);
         }
 
-        let cmd_region = self.pool.alloc(core::mem::size_of::<protocol::ResourceAttachBacking>(), 4)?;
-        let resp_region = self.pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
+        self.cmd_pool.reset();
 
-        // Allocate one DMA region per SG entry.
+        let cmd_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::ResourceAttachBacking>(), 4)?;
+        let resp_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
+
         let mut entry_regions: Vec<DmaRegion> = Vec::with_capacity(n_entries);
         for _ in 0..n_entries {
-            entry_regions.push(self.pool.alloc(core::mem::size_of::<protocol::MemEntry>(), 4)?);
+            entry_regions.push(self.cmd_pool.alloc(core::mem::size_of::<protocol::MemEntry>(), 4)?);
         }
 
         // SAFETY: All three copies write to DMA regions allocated by
@@ -513,8 +551,10 @@ impl GpuDriver {
         };
         let resp_size = core::mem::size_of::<protocol::RespDisplayInfo>();
 
-        let cmd_region = self.pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
-        let resp_region = self.pool.alloc(resp_size, 8)?;
+        self.cmd_pool.reset();
+
+        let cmd_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
+        let resp_region = self.cmd_pool.alloc(resp_size, 8)?;
 
         // SAFETY: `cmd_region` is a DMA buffer of size >=
         // `size_of::<CtrlHdr>()`, 4-byte aligned. `resp_region` is size
@@ -683,6 +723,95 @@ impl GpuDriver {
         }
         debug_print("VIRTIO_GPU_ATTACH_BACKING")?;
         Ok(resp_type)
+    }
+
+    /// ATTACH_BACKING with a multi-entry scatter-gather list.
+    /// Used when backing memory spans non-contiguous physical pages.
+    pub fn attach_backing_sg(
+        &mut self,
+        resource_id: u32,
+        entries: &[protocol::MemEntry],
+    ) -> Result<u32> {
+        let cmd = protocol::ResourceAttachBacking {
+            hdr: protocol::CtrlHdr {
+                type_: protocol::VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+                ..Default::default()
+            },
+            resource_id,
+            nr_entries: entries.len() as u32,
+        };
+        let resp_type = self.submit_attach_backing(&cmd, entries)?;
+        if !protocol::resp_ok(resp_type) {
+            debug_print(&format!(
+                "virtio-gpu: ATTACH_BACKING_SG bad response {} ({})",
+                protocol::resp_name(resp_type),
+                resp_type
+            ))?;
+            return Err(Error::InvalidState);
+        }
+        Ok(resp_type)
+    }
+
+    /// TRANSFER_TO_HOST_2D + RESOURCE_FLUSH for a sub-rectangle (dirty rect).
+    /// `offset` is the byte offset of (0,0) in the backing store.
+    pub fn transfer_flush_rect(
+        &mut self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        offset: u64,
+    ) -> Result<()> {
+        let transfer_cmd = protocol::TransferToHost2d {
+            hdr: protocol::CtrlHdr {
+                type_: protocol::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
+                ..Default::default()
+            },
+            r: protocol::Rect { x, y, width: w, height: h },
+            offset,
+            resource_id,
+            padding: 0,
+        };
+        let cmd_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &transfer_cmd as *const protocol::TransferToHost2d as *const u8,
+                core::mem::size_of::<protocol::TransferToHost2d>(),
+            )
+        };
+        let resp_type = self.submit_command(
+            cmd_bytes,
+            core::mem::size_of::<protocol::CtrlHdr>(),
+            false,
+        )?;
+        if !protocol::resp_ok(resp_type) {
+            return Err(Error::InvalidState);
+        }
+
+        let flush_cmd = protocol::ResourceFlush {
+            hdr: protocol::CtrlHdr {
+                type_: protocol::VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+                ..Default::default()
+            },
+            r: protocol::Rect { x, y, width: w, height: h },
+            resource_id,
+            padding: 0,
+        };
+        let cmd_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &flush_cmd as *const protocol::ResourceFlush as *const u8,
+                core::mem::size_of::<protocol::ResourceFlush>(),
+            )
+        };
+        let resp_type = self.submit_command(
+            cmd_bytes,
+            core::mem::size_of::<protocol::CtrlHdr>(),
+            false,
+        )?;
+        if !protocol::resp_ok(resp_type) {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
     }
 
     /// DETACH_BACKING — detach backing from a resource.
@@ -913,80 +1042,52 @@ impl GpuDriver {
     pub fn self_test(&mut self) -> Result<()> {
         debug_print("virtio-gpu: self_test start")?;
 
-        // Check for pending display events before starting.
         if self.check_display_event()? {
             debug_print("virtio-gpu: display event pending at self_test start")?;
         }
 
-        // 1. GET_DISPLAY_INFO
         let mode = self.get_display_info()?;
-        let width = mode.width;
-        let height = mode.height;
         debug_print(&format!(
             "virtio-gpu: display {}x{} enabled={}",
-            width, height, mode.enabled
+            mode.width, mode.height, mode.enabled
         ))?;
 
-        // 2. Allocate framebuffer backing (contiguous DMA region).
-        let fb_bytes = (width as usize) * (height as usize) * 4;
+        const TEST_W: u32 = 64;
+        const TEST_H: u32 = 64;
+        let fb_bytes = (TEST_W as usize) * (TEST_H as usize) * 4;
         let fb_pages = (fb_bytes + 4095) / 4096;
-        if fb_pages > DMA_POOL_PAGES - 32 {
-            debug_print(&format!(
-                "virtio-gpu: framebuffer too large ({} pages), aborting self_test",
-                fb_pages
-            ))?;
-            return Err(Error::BufferTooSmall);
-        }
         let backing = self.pool.alloc_contiguous(fb_pages)?;
 
-        // 3. CREATE_2D — B8G8R8X8 format.
         let resource_id = self.alloc_resource_id();
-        self.create_2d(resource_id, protocol::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, width, height)?;
+        self.create_2d(resource_id, protocol::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, TEST_W, TEST_H)?;
 
-        // 4. ATTACH_BACKING — single SG entry (contiguous).
         self.attach_backing(resource_id, &backing)?;
 
-        // 5. SET_SCANOUT — bind resource to scanout 0.
-        self.set_scanout(0, resource_id, width, height)?;
+        self.set_scanout(0, resource_id, TEST_W, TEST_H)?;
 
-        // 6. Write test pattern — vertical gradient.
         let fb_ptr = backing.virt as *mut u32;
-        // SAFETY: `backing` is a contiguous DMA region of
-        // `fb_pages * 4096` bytes = `fb_bytes` rounded up, where
-        // `fb_bytes = width * height * 4`. The write index
-        // `y * width + x` is bounded by `y < height` and `x < width`,
-        // so the max index is `(height-1) * width + (width-1)` =
-        // `width * height - 1`, which is within the allocation.
-        // `fb_ptr` is 4-byte aligned (DMA pool allocations are
-        // page-aligned).
-        for y in 0..height as usize {
-            // Linear interpolation between top and bottom colors.
-            let t = y as u32 * 256 / height.max(1) as u32;
+        for y in 0..TEST_H as usize {
+            let t = y as u32 * 256 / TEST_H as u32;
             let color = lerp_color(TEST_COLOR_TOP, TEST_COLOR_BOT, t);
-            for x in 0..width as usize {
+            for x in 0..TEST_W as usize {
                 unsafe {
-                    *fb_ptr.add(y * width as usize + x) = color;
+                    *fb_ptr.add(y * TEST_W as usize + x) = color;
                 }
             }
         }
         debug_print("virtio-gpu: test pattern written")?;
 
-        // 7. TRANSFER_TO_HOST_2D — copy to host (fenced).
-        self.transfer_to_host_2d(resource_id, width, height, 0)?;
-
-        // 8. RESOURCE_FLUSH — display (fenced).
-        self.resource_flush(resource_id, width, height)?;
+        self.transfer_to_host_2d(resource_id, TEST_W, TEST_H, 0)?;
+        self.resource_flush(resource_id, TEST_W, TEST_H)?;
 
         debug_print("VIRTIO_GPU_TEST_PATTERN")?;
 
-        // 9. Check for display events after flush.
         if self.check_display_event()? {
             debug_print("virtio-gpu: display event after flush — re-querying")?;
             let _ = self.get_display_info()?;
         }
 
-        // 10. UNREF_RESOURCE — cleanup.
-        // Detach backing first (spec recommends), then unref.
+        let _ = self.set_scanout(0, 0, TEST_W, TEST_H);
         let _ = self.detach_backing(resource_id);
         self.unref_resource(resource_id)?;
 
@@ -1005,13 +1106,19 @@ impl GpuDriver {
         Ok(())
     }
 
-    /// Main event loop — listen on IRQ + registry endpoints, drain queues.
+    /// Main event loop — IPC dispatch + IRQ handling.
+    ///
+    /// Listens on: IRQ endpoint (idx 0), listen endpoint (idx 1), registry (idx 2).
+    /// IRQ: ack, drain queues, check display events.
+    /// IPC: dispatch GPU_* labels, reply to caller.
     pub fn run_loop(&mut self) -> Result<()> {
+        let info = process_info();
+        let listen_endpoint = info.tokens[TOKEN_EXTRA_0];
         let registry_endpoint = registry::control_endpoint();
         let mut buf = [0u8; 256];
         loop {
-            let tokens = [self.irq.endpoint, registry_endpoint];
-            let (idx, _len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 10) {
+            let tokens = [self.irq.endpoint, listen_endpoint, registry_endpoint];
+            let (idx, len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 10) {
                 Ok(t) => t,
                 Err(_) => {
                     self.drain_queues();
@@ -1019,21 +1126,308 @@ impl GpuDriver {
                 }
             };
 
-            let _ = self.transport.isr_status();
-            self.drain_queues();
-
             if idx == 0 {
+                let _ = self.transport.isr_status();
+                self.drain_queues();
+                self.irq.ack()?;
                 if !self.irq_seen {
                     debug_print("VIRTIO_GPU_IRQ")?;
                     self.irq_seen = true;
                 }
-                // Check for display events on every IRQ.
                 let _ = self.check_display_event();
+                continue;
+            }
+
+            let (msg, payload) = match parse_message(&buf[..len]) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let reply_token = extract_reply_id(&msg).unwrap_or(0);
+            let label = msg.tag.label;
+
+            if label == registry::REGISTRY_GRANT_REQUEST_LABEL {
+                let _ = registry::handle_incoming_message(&msg, payload);
                 self.drain_queues();
                 continue;
             }
 
-            // idx == 1: registry message — ignore for now (no IPC clients yet).
+            match label {
+                GPU_PROBE => {
+                    let rmsg = Message::new(
+                        GPU_PROBE,
+                        [0, GPU_PROTOCOL_VERSION, self.space_token, 0, 0, 0],
+                        3,
+                    );
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                }
+
+                GPU_GET_DISPLAY_INFO => {
+                    match self.get_display_info() {
+                        Ok(mode) => {
+                            let rmsg = Message::new(
+                                GPU_GET_DISPLAY_INFO,
+                                [0, mode.width as usize, mode.height as usize, mode.enabled as usize, 0, 0],
+                                4,
+                            );
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                        Err(_) => {
+                            let rmsg = Message::new(GPU_GET_DISPLAY_INFO, [1, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                    }
+                }
+
+                GPU_CREATE_2D => {
+                    let resource_id = msg.words[0] as u32;
+                    let format = msg.words[1] as u32;
+                    let width = msg.words[2] as u32;
+                    let height = msg.words[3] as u32;
+                    let displayd_space_token = msg.words[4];
+
+                    let fb_bytes = (width as usize) * (height as usize) * 4;
+                    let fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+                    if space_map_range(self.space_token, DRIVER_FB_VA, 0, 0x03, fb_pages, 0).is_err() {
+                        let rmsg = Message::new(GPU_CREATE_2D, [1, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    let mut entries: alloc::vec::Vec<protocol::MemEntry> = alloc::vec::Vec::new();
+                    let mut i = 0;
+                    while i < fb_pages {
+                        let va = DRIVER_FB_VA + i * PAGE_SIZE;
+                        let phys = match virt_to_phys(self.space_token, va) {
+                            Ok(p) => p as u64,
+                            Err(_) => break,
+                        };
+                        let mut seg_len = PAGE_SIZE as u32;
+                        while i + 1 < fb_pages {
+                            let next_va = DRIVER_FB_VA + (i + 1) * PAGE_SIZE;
+                            match virt_to_phys(self.space_token, next_va) {
+                                Ok(np) if (np as u64) == phys + seg_len as u64 => {
+                                    seg_len += PAGE_SIZE as u32;
+                                    i += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        entries.push(protocol::MemEntry { addr: phys, length: seg_len, padding: 0 });
+                        i += 1;
+                    }
+
+                    let err = self.create_2d(resource_id, format, width, height)
+                        .and_then(|_| self.attach_backing_sg(resource_id, &entries))
+                        .and_then(|_| self.set_scanout(0, resource_id, width, height));
+
+                    if let Err(_) = err {
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, fb_pages);
+                        let rmsg = Message::new(GPU_CREATE_2D, [2, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    for page_idx in 0..fb_pages {
+                        let _ = space_grant(
+                            self.space_token,
+                            displayd_space_token,
+                            DRIVER_FB_VA + page_idx * PAGE_SIZE,
+                            GRANT_TARGET_VA + page_idx * PAGE_SIZE,
+                            0x02,
+                        );
+                    }
+
+                    self.fb_virt = DRIVER_FB_VA;
+                    self.fb_pages = fb_pages;
+
+                    debug_print(&format!(
+                        "virtio-gpu: CREATE_2D {}x{} {} pages → {} SG entries, granted to displayd",
+                        width, height, fb_pages, entries.len()
+                    ))?;
+
+                    let pitch = width * 4;
+                    let rmsg = Message::new(
+                        GPU_CREATE_2D,
+                        [0, GRANT_TARGET_VA, fb_bytes, pitch as usize, width as usize, height as usize],
+                        6,
+                    );
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                }
+
+                GPU_TRANSFER_FLUSH => {
+                    let resource_id = msg.words[0] as u32;
+                    let x = msg.words[1] as u32;
+                    let y = msg.words[2] as u32;
+                    let w = msg.words[3] as u32;
+                    let h = msg.words[4] as u32;
+                    let pitch = msg.words[5] as u64;
+                    let offset = (y as u64) * pitch + (x as u64) * 4;
+                    match self.transfer_flush_rect(resource_id, x, y, w, h, offset) {
+                        Ok(_) => {
+                            let rmsg = Message::new(GPU_TRANSFER_FLUSH, [0, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                        Err(_) => {
+                            let rmsg = Message::new(GPU_TRANSFER_FLUSH, [1, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                    }
+                }
+
+                GPU_UNREF_RESOURCE => {
+                    let resource_id = msg.words[0] as u32;
+                    let _ = self.detach_backing(resource_id);
+                    match self.unref_resource(resource_id) {
+                        Ok(_) => {
+                            if self.fb_pages > 0 {
+                                let _ = space_unmap(self.space_token, self.fb_virt, self.fb_pages);
+                                self.fb_virt = 0;
+                                self.fb_pages = 0;
+                            }
+                            let rmsg = Message::new(GPU_UNREF_RESOURCE, [0, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                        Err(_) => {
+                            let rmsg = Message::new(GPU_UNREF_RESOURCE, [1, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        }
+                    }
+                }
+
+                GPU_POLL_EVENT => {
+                    let event_flags: usize = match self.check_display_event() {
+                        Ok(true) => 1,
+                        _ => 0,
+                    };
+                    let rmsg = Message::new(GPU_POLL_EVENT, [0, event_flags, 0, 0, 0, 0], 2);
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                }
+
+                GPU_RESIZE => {
+                    let resource_id = msg.words[0] as u32;
+                    let new_w = msg.words[1] as u32;
+                    let new_h = msg.words[2] as u32;
+                    let displayd_space_token = msg.words[3];
+
+                    let old_pages = self.fb_pages;
+
+                    let _ = self.detach_backing(resource_id);
+                    let _ = self.unref_resource(resource_id);
+                    if old_pages > 0 {
+                        let _ = space_unmap(self.space_token, self.fb_virt, old_pages);
+                    }
+
+                    let new_bytes = (new_w as usize) * (new_h as usize) * 4;
+                    let new_pages = (new_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+                    if space_map_range(self.space_token, DRIVER_FB_VA, 0, 0x03, new_pages, 0).is_err() {
+                        self.fb_virt = 0;
+                        self.fb_pages = 0;
+                        let rmsg = Message::new(GPU_RESIZE, [1, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    let mut entries: alloc::vec::Vec<protocol::MemEntry> = alloc::vec::Vec::new();
+                    let mut i = 0;
+                    while i < new_pages {
+                        let va = DRIVER_FB_VA + i * PAGE_SIZE;
+                        let phys = match virt_to_phys(self.space_token, va) {
+                            Ok(p) => p as u64,
+                            Err(_) => break,
+                        };
+                        let mut seg_len = PAGE_SIZE as u32;
+                        while i + 1 < new_pages {
+                            let next_va = DRIVER_FB_VA + (i + 1) * PAGE_SIZE;
+                            match virt_to_phys(self.space_token, next_va) {
+                                Ok(np) if (np as u64) == phys + seg_len as u64 => {
+                                    seg_len += PAGE_SIZE as u32;
+                                    i += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        entries.push(protocol::MemEntry { addr: phys, length: seg_len, padding: 0 });
+                        i += 1;
+                    }
+
+                    let format = protocol::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+                    let err = self.create_2d(resource_id, format, new_w, new_h)
+                        .and_then(|_| self.attach_backing_sg(resource_id, &entries))
+                        .and_then(|_| self.set_scanout(0, resource_id, new_w, new_h));
+
+                    if let Err(_) = err {
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, new_pages);
+                        self.fb_virt = 0;
+                        self.fb_pages = 0;
+                        let rmsg = Message::new(GPU_RESIZE, [2, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    for page_idx in 0..new_pages {
+                        let _ = space_grant(
+                            self.space_token,
+                            displayd_space_token,
+                            DRIVER_FB_VA + page_idx * PAGE_SIZE,
+                            GRANT_TARGET_VA + page_idx * PAGE_SIZE,
+                            0x02,
+                        );
+                    }
+
+                    self.fb_virt = DRIVER_FB_VA;
+                    self.fb_pages = new_pages;
+
+                    debug_print(&format!(
+                        "virtio-gpu: RESIZE {}x{} {} pages → {} SG entries",
+                        new_w, new_h, new_pages, entries.len()
+                    ))?;
+
+                    let pitch = new_w * 4;
+                    let rmsg = Message::new(
+                        GPU_RESIZE,
+                        [0, GRANT_TARGET_VA, new_bytes, pitch as usize, new_w as usize, new_h as usize],
+                        6,
+                    );
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                }
+
+                GPU_GRANT_TO_CLIENT => {
+                    let client_space_token = msg.words[0];
+                    let client_target_va = msg.words[1];
+                    debug_print(&format!(
+                        "virtio-gpu: GRANT_TO_CLIENT space_tok={:#x} va={:#x} fb_virt={:#x} fb_pages={}",
+                        client_space_token, client_target_va, self.fb_virt, self.fb_pages
+                    ))?;
+                    let mut ok = true;
+                    if self.fb_pages > 0 {
+                        for page_idx in 0..self.fb_pages {
+                            if space_grant(
+                                self.space_token,
+                                client_space_token,
+                                self.fb_virt + page_idx * PAGE_SIZE,
+                                client_target_va + page_idx * PAGE_SIZE,
+                                0x02,
+                            )
+                            .is_err()
+                            {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        ok = false;
+                    }
+                    let status: usize = if ok { 0 } else { 1 };
+                    let rmsg = Message::new(GPU_GRANT_TO_CLIENT, [status, 0, 0, 0, 0, 0], 1);
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                }
+
+                _ => {}
+            }
+
             self.drain_queues();
         }
     }
