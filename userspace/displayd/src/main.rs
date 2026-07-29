@@ -62,9 +62,9 @@ use virtio_gpu_backend::VirtioGpuBackend;
 /// Maximum surfaces per session (quota).
 const MAX_SURFACES: usize = 8;
 
-/// Recv timeout cap — avoids u64::MAX, NOT a polling mechanism.
-/// 30 s matches the compositor convention.
-const RECV_TIMEOUT_MS: u64 = 200;
+/// Recv timeout — displayd polls for display events (resize) on timeout.
+/// 1000ms reduces idle wakeups while keeping resize detection responsive.
+const RECV_TIMEOUT_MS: u64 = 1000;
 
 /// IPC receive buffer.
 const RECV_BUF_LEN: usize = 4096;
