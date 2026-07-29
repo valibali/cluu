@@ -151,10 +151,8 @@ static void handleKeyInput(){
 
 
 void DG_Init(){
-  /* CLUU: activate CLUU video+audio backends via hints (no env in no_std). */
   SDL_SetHint(SDL_HINT_VIDEODRIVER, "cluu");
-  SDL_SetHint(SDL_HINT_AUDIODRIVER, "cluu");
-  SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+  SDL_Init(SDL_INIT_VIDEO);
 
   Uint32 win_flags = SDL_WINDOW_SHOWN;
   if (M_CheckParm("-fullscreen") > 0) {

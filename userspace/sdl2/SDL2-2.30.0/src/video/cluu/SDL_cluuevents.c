@@ -31,7 +31,7 @@
  *   words[2] = modifiers (bit 0=shift, 1=ctrl, 2=alt)
  *   words[3] = PS/2 set-2 scancode
  *   words[4] = extended code (1=up, 2=down, 3=left, 4=right, 0=normal)
- *   words[5] = kind (0=keydown, 1=keyup, 99=close-request/quit)
+ *   words[5] = kind (0=keydown, 2=keyup, 99=close-request/quit)
  *
  * We convert PS/2 scancodes to SDL scancodes (USB HID) and call
  * SDL_SendKeyboardKey. Close requests generate SDL_SendQuit. */
@@ -206,7 +206,7 @@ void CLUU_PumpEvents(_THIS)
                     Uint8 state;
                     if (kind == 0) {
                         state = SDL_PRESSED;
-                    } else if (kind == 1) {
+                    } else if (kind == 2) {
                         state = SDL_RELEASED;
                     } else {
                         continue;  /* unknown kind */

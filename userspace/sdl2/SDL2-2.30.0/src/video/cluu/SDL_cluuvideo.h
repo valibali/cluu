@@ -126,6 +126,10 @@ typedef struct {
 #define CLUU_COMP_INPUT_FORWARD_LABEL     96u
 #define CLUU_COMP_FRAME_READY_LABEL       100u
 
+#define CLUU_COMP_WIN_FLAG_FULLSCREEN     1u
+#define CLUU_COMP_WIN_FLAG_NO_CHROME      2u
+#define CLUU_COMP_WIN_FLAG_MODAL          4u
+
 /* ── Registry protocol labels ────────────────────────────────────────── */
 
 #define CLUU_REGISTRY_SUBSCRIBE_LABEL      0x103u

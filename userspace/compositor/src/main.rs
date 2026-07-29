@@ -249,7 +249,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                     if msg.tag.label == libcluu::time::TIME_TICK_LABEL && idx != REGISTRY_TOKEN_IDX {
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
-                        comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
+                        if !comp.focused_is_fullscreen() {
+                            comp.tick_clock(now_ms_from_tick, now_ms_from_tick / 1000);
+                        }
                         comp.check_output_resize();
                     }
 
@@ -495,7 +497,12 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
         // is scheduled.  Gating on cursor_needs_render alone caused the
         // cursor to flicker/disappear over constantly-redrawing windows.
         // See [[cluu-compositor-cursor-clobbered-by-animated-win]].
-        comp.render_cursor();
+        //
+        // Skip cursor render when the focused window is fullscreen —
+        // fullscreen pixel surfaces (DOOM) handle their own cursor.
+        if !comp.focused_is_fullscreen() {
+            comp.render_cursor();
+        }
         comp.cursor_needs_render = false;
         // Arm the frame deadline if the clock tick or status render dirtied
         // the cell grid.  (The message-receive arm above only covers

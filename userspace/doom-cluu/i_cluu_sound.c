@@ -175,8 +175,9 @@ static boolean I_Cluu_InitSound(boolean use_sfx_prefix)
                                          SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
                                          SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
     if (sdl_audio_dev == 0) {
-        cluu_debug("doom-cluu: SDL_OpenAudioDevice failed");
-        return false;
+        cluu_debug("doom-cluu: SDL_OpenAudioDevice failed - continuing without sound");
+        sound_initialized = 0;
+        return true;
     }
 
     /* Create conversion stream: DOOM format → device format. */

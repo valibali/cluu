@@ -25,6 +25,8 @@ POSIX_DEFS = -D_POSIX_TIMERS=1 -D_POSIX_MONOTONIC_CLOCK=200112L \
 
 # doomgeneric config: FEATURE_SOUND, SDL2 with CLUU video/events/audio backends.
 # __CLUU__ selects SDL_config_cluu.h in SDL_config.h.
+.DEFAULT_GOAL := all
+
 DOOM_DEFS = -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 \
             -DHAVE_UNISTD_H=1 -DHAVE_SYS_STAT_H=1 -DHAVE_INTTYPES_H=1 \
             -DHAVE_STDINT_H=1 -DHAVE_STDLIB_H=1 -DHAVE_STRINGS_H=1 \

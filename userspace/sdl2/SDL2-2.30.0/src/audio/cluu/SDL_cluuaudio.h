@@ -26,36 +26,14 @@
 #include "../SDL_sysaudio.h"
 
 /*
- * CLUU SDL2 audio backend — audiod stream lifecycle + virtio-snd PCM transport.
+ * CLUU SDL2 audio backend — audiod SHM ring protocol.
  *
- * The backend talks to two services:
- *   1. audiod (via PARAM_AUDIOD_EP) for stream lifecycle: open, close, pause,
- *      resume, drain, status. audiod is the authority broker for streams.
- *   2. virtio-snd (via registry "snddev:main") for actual PCM output, since
- *      audiod's mixer path is stubbed in T17. The backend opens its own
- *      AudioSessionClient session with virtio-snd and submits S16 stereo
- *      periods via grant.
+ * Talks only to audiod (registry "audiod:main"). Opens a stream, receives
+ * a frame token for a SHM SPSC FrameRing, maps it, and pushes PCM frames.
+ * audiod handles mixing, resampling, and virtio-snd submission.
  *
- * Between the SDL callback (producer) and the virtio-snd submit (consumer),
- * a local SPSC FrameRing (matching audiod/src/ring.rs) provides bounded
- * buffering. WaitDevice drains the ring to virtio-snd and blocks on
- * completions when the ring is full — never polling, never dropping.
- *
- * Output format is fixed: stereo S16 at 44100 Hz, 512-sample periods
- * (2048 bytes). SDL's AudioStream converter handles application formats.
- *
- * # Teardown lock ordering
- *
- *   1. SDL_AtomicSet(&device->shutdown, 1)  — stop callback loop
- *   2. Audio thread exits SDL_RunAudio
- *   3. CloseDevice: drain ring → flush to virtio-snd → wait completions
- *   4. CloseDevice: AUDIOD_STREAM_CLOSE → AUDIO_CLOSE to virtio-snd
- *   5. CloseDevice: free ring, scratch, hidden
- *
- * No locks are held across IPC calls. The mixer_lock is held only during
- * the callback (by SDL_RunAudio), never during WaitDevice/PlayDevice.
- * CloseDevice runs after the audio thread has exited, so there is no
- * contention on hidden fields.
+ * Output format is fixed: stereo S16 at audiod's native rate (44100 Hz).
+ * SDL's AudioStream converter handles application format conversion.
  */
 
 /* ── ProcessInfo (at PROCESS_INFO_ADDR, #[repr(C)]) ─────────────────── */
@@ -103,8 +81,10 @@ typedef struct {
 /* ── InvokeOp numbers ────────────────────────────────────────────────── */
 
 #define CLUU_INVOKE_ENDPOINT_CREATE  40
-#define CLUU_INVOKE_SPACE_GRANT      14
-#define CLUU_INVOKE_SPACE_MAP_RANGE  15
+#define CLUU_INVOKE_SPACE_MAP_AUTO   88
+#define CLUU_INVOKE_SPACE_UNMAP      13
+
+#define CLUU_AUDIO_RING_VA           0x70000000u
 
 /* ── Audiod IPC labels (audiod/src/session.rs) ───────────────────────── */
 
@@ -142,14 +122,9 @@ typedef struct {
 
 #define CLUU_AUDIO_OUTPUT_RATE           44100
 #define CLUU_AUDIO_OUTPUT_CHANNELS       2
-#define CLUU_AUDIO_PERIOD_FRAMES         512   /* 2048 bytes / 4 bytes */
+#define CLUU_AUDIO_PERIOD_FRAMES         512
 #define CLUU_AUDIO_PERIOD_BYTES          (CLUU_AUDIO_PERIOD_FRAMES * CLUU_FRAME_BYTES)
-#define CLUU_AUDIO_RING_CAPACITY         (CLUU_AUDIO_PERIOD_FRAMES * 8)  /* 8 periods */
-#define CLUU_AUDIO_RING_BYTES            (CLUU_FRAME_RING_HEADER_BYTES + CLUU_AUDIO_RING_CAPACITY * CLUU_FRAME_BYTES)
-#define CLUU_AUDIO_VSND_SLOTS            4
-#define CLUU_AUDIO_SCRATCH_VA            0x70000000u
 #define CLUU_AUDIO_PAGE_BYTES            4096
-#define CLUU_AUDIO_COMPLETION_TIMEOUT_MS 500   /* bounded wakeup */
 
 /* ── Inline syscall (matches kernel ABI: rax=nr, rdi..r9=args) ──────── */
 
@@ -185,6 +160,15 @@ static __inline__ long cluu_ipc_call(unsigned long ep,
     return cluu_syscall(CLUU_SYS_CALL, ep,
         (unsigned long)msg, msg_len,
         (unsigned long)reply, reply_len, 0);
+}
+
+static __inline__ long cluu_ipc_call_timeout(unsigned long ep,
+    const void *msg, unsigned long msg_len,
+    void *reply, unsigned long reply_len, unsigned long timeout_ms)
+{
+    return cluu_syscall(CLUU_SYS_CALL, ep,
+        (unsigned long)msg, msg_len,
+        (unsigned long)reply, reply_len, timeout_ms);
 }
 
 static __inline__ long cluu_ipc_recv_any(
@@ -282,12 +266,10 @@ struct SDL_PrivateAudioData
     unsigned int  audiod_stream_id;
     unsigned int  audiod_session_id;
 
-    /* virtio-snd session */
-    unsigned long snddev_ep;
-    unsigned long completion_ep;
-    unsigned int  snd_session_id;
-    unsigned long snd_driver_space_token;
-    unsigned long snd_grant_target_va;
+    /* SHM ring (granted by audiod) */
+    unsigned long ring_frame_token;
+    unsigned long ring_bytes;
+    unsigned long period_bytes;
 
     /* Capability tokens */
     unsigned long ipc_cap;
@@ -295,19 +277,12 @@ struct SDL_PrivateAudioData
     unsigned long registry_ep;
     unsigned long control_ep;
 
-    /* virtio-snd ring slots */
-    unsigned int  vsnd_next_slot;
-    unsigned int  vsnd_inflight;
-    unsigned int  vsnd_next_period_id;
-
-    /* Local FrameRing */
+    /* Mapped ring buffer */
     unsigned char *ring_buf;
-    unsigned int  ring_capacity;
     unsigned int  ring_xruns;
 
     /* Scratch buffer for GetDeviceBuf (one period) */
     unsigned char *scratch;
-    unsigned int  scratch_len;
 };
 
 #endif /* SDL_cluuaudio_h_ */

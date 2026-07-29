@@ -68,12 +68,18 @@ int CLUU_CreateSDLWindow(_THIS, SDL_Window *window)
     wd->fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
     wd->visible = 1;
 
-    /* Create displayd surface. */
+    /* Create displayd surface.
+     * Word layout matches compositor's SURFACE_CREATE:
+     *   words[0] = client_space_token (0 = no direct FB grant)
+     *   words[1] = client_grant_va (0 = no direct FB)
+     *   words[2] = width
+     *   words[3] = height
+     *   words[4] = pitch */
     if (dev->displayd_ep != 0) {
         cluu_msg_init(&req, CLUU_DISPLAY_SURFACE_CREATE_LABEL,
-            0,  /* words[0] = 0 (no payload) */
+            0, 0,
             surf_w, surf_h, surf_pitch,
-            0, 0, 4);
+            0, 5);
         ret = cluu_ipc_call(dev->displayd_ep,
             &req, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
         if (ret < 0) {
@@ -130,18 +136,23 @@ int CLUU_CreateSDLWindow(_THIS, SDL_Window *window)
     }
 
     /* Register a compositor window for keyboard input.
-     * We create a minimal 1x1 cell window — pixel output goes through
+     * Compositor requires minimum 3x3 cells. Pixel output goes through
      * displayd, not the compositor. The compositor window exists only
      * to receive COMP_INPUT_FORWARD messages. */
     if (dev->comp_ep != 0 && dev->input_ep != 0) {
         char title[] = "SDL";
+        unsigned long win_flags = 0;
+        if (wd->fullscreen) {
+            win_flags = CLUU_COMP_WIN_FLAG_FULLSCREEN;
+        }
         cluu_msg_init(&req, CLUU_COMP_WIN_REGISTER_LABEL,
-            sizeof(title) - 1,  /* words[0] = title_len */
-            1,  /* words[1] = req_w (1 cell) */
-            1,  /* words[2] = req_h (1 cell) */
-            dev->input_ep,  /* words[3] = our input endpoint */
-            0,  /* words[4] = flags */
-            0, 4);
+            sizeof(title) - 1,
+            3,
+            3,
+            dev->input_ep,
+            win_flags,
+            0,
+            4);
 
         ret = cluu_call_with_payload(dev->comp_ep,
             &req, title, sizeof(title) - 1, &reply);

@@ -460,6 +460,11 @@ impl Compositor {
         self.windows.iter().any(|w| w.id == id && w.modal)
     }
 
+    pub fn focused_is_fullscreen(&self) -> bool {
+        let Some(id) = self.focused else { return false; };
+        self.windows.iter().any(|w| w.id == id && w.fullscreen)
+    }
+
     /// Forward a raw kbd event to the focused window's input endpoint.
     /// `ascii`/`mods`/`scancode`/`extended` come straight from the
     /// `KbdEvent` variant of `protocol::Incoming`.
@@ -604,6 +609,13 @@ const BTN_LEFT: u8 = 1 << 0;
 impl Compositor {
     pub fn handle_mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
         if !self.active {
+            return;
+        }
+
+        if self.focused_is_fullscreen() {
+            self.pointer_x = (self.pointer_x + dx).max(0).min(self.width_px as i32 - 1);
+            self.pointer_y = (self.pointer_y + dy).max(0).min(self.height_px as i32 - 1);
+            self.pointer_buttons = buttons;
             return;
         }
 

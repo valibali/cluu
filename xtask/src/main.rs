@@ -2907,7 +2907,7 @@ fn newlib_paths(sysroot: &Path) -> (PathBuf, PathBuf) {
 }
 
 // T21 BLOCKED — fceux requires C++ stdlib.
-const BLOCKED_CONTAINERS: &[&str] = &["fceux", "doom"];
+const BLOCKED_CONTAINERS: &[&str] = &["fceux"];
 
 fn discover_containers() -> Vec<String> {
     let containers_dir = project_root().join("containers");
@@ -3368,6 +3368,10 @@ fn build_doom() -> Result<()> {
         );
         return Ok(());
     }
+
+    // SDL2 static library is a hard dependency. Always rebuild so source
+    // changes to the CLUU video/audio backends are picked up.
+    build_sdl2()?;
 
     println!("▸ Building doom-cluu Rust staticlib...");
     let target_spec = project_root().join("triplets/x86_64-cluu-user.json");
