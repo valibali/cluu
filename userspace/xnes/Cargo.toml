@@ -1,0 +1,18 @@
+[package]
+name = "xnes"
+authors = ["Nguyễn Quý Ngọc"]
+version = "0.1.3"
+edition = "2024"
+repository = "https://github.com/ChaoswareHQ/x-nes"
+homepage = "https://github.com/ChaoswareHQ/x-nes"
+
+license = "MIT OR Apache-2.0"
+description = "A minimal NES emulator library written in Rust, targeting everything from microcontrollers to modern desktops. Vendored for CLUU."
+
+[features]
+default = []
+std = []
+
+[lib]
+name = "nes"
+crate-type = ["lib"]
