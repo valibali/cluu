@@ -736,6 +736,17 @@ impl GpuDriver {
         h: u32,
         offset: u64,
     ) -> Result<()> {
+        if self.vq_control.free_capacity() < 4 {
+            return Err(Error::Busy);
+        }
+
+        self.cmd_pool.reset();
+
+        let tc_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::TransferToHost2d>(), 4)?;
+        let tr_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
+        let fc_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::ResourceFlush>(), 4)?;
+        let fr_region = self.cmd_pool.alloc(core::mem::size_of::<protocol::CtrlHdr>(), 4)?;
+
         let transfer_cmd = protocol::TransferToHost2d {
             hdr: protocol::CtrlHdr {
                 type_: protocol::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
@@ -746,21 +757,6 @@ impl GpuDriver {
             resource_id,
             padding: 0,
         };
-        let cmd_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &transfer_cmd as *const protocol::TransferToHost2d as *const u8,
-                core::mem::size_of::<protocol::TransferToHost2d>(),
-            )
-        };
-        let resp_type = self.submit_command(
-            cmd_bytes,
-            core::mem::size_of::<protocol::CtrlHdr>(),
-            false,
-        )?;
-        if !protocol::resp_ok(resp_type) {
-            return Err(Error::InvalidState);
-        }
-
         let flush_cmd = protocol::ResourceFlush {
             hdr: protocol::CtrlHdr {
                 type_: protocol::VIRTIO_GPU_CMD_RESOURCE_FLUSH,
@@ -770,18 +766,42 @@ impl GpuDriver {
             resource_id,
             padding: 0,
         };
-        let cmd_bytes = unsafe {
-            core::slice::from_raw_parts(
+
+        // SAFETY: all 4 regions are DMA allocations with matching sizes/alignment.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &transfer_cmd as *const protocol::TransferToHost2d as *const u8,
+                tc_region.virt as *mut u8,
+                core::mem::size_of::<protocol::TransferToHost2d>(),
+            );
+            core::ptr::copy_nonoverlapping(
                 &flush_cmd as *const protocol::ResourceFlush as *const u8,
+                fc_region.virt as *mut u8,
                 core::mem::size_of::<protocol::ResourceFlush>(),
-            )
-        };
-        let resp_type = self.submit_command(
-            cmd_bytes,
-            core::mem::size_of::<protocol::CtrlHdr>(),
-            false,
-        )?;
-        if !protocol::resp_ok(resp_type) {
+            );
+            core::ptr::write_bytes(tr_region.virt as *mut u8, 0, core::mem::size_of::<protocol::CtrlHdr>());
+            core::ptr::write_bytes(fr_region.virt as *mut u8, 0, core::mem::size_of::<protocol::CtrlHdr>());
+        }
+
+        let chain1 = self.vq_control.alloc_chain(2).ok_or(Error::Busy)?;
+        self.vq_control.desc_set(chain1.head, tc_region.phys, core::mem::size_of::<protocol::TransferToHost2d>() as u32, VRING_DESC_F_NEXT, chain1.tail);
+        self.vq_control.desc_set(chain1.tail, tr_region.phys, core::mem::size_of::<protocol::CtrlHdr>() as u32, VRING_DESC_F_WRITE, 0);
+        self.vq_control.submit(chain1, 0);
+
+        let chain2 = self.vq_control.alloc_chain(2).ok_or(Error::Busy)?;
+        self.vq_control.desc_set(chain2.head, fc_region.phys, core::mem::size_of::<protocol::ResourceFlush>() as u32, VRING_DESC_F_NEXT, chain2.tail);
+        self.vq_control.desc_set(chain2.tail, fr_region.phys, core::mem::size_of::<protocol::CtrlHdr>() as u32, VRING_DESC_F_WRITE, 0);
+        self.vq_control.submit(chain2, 0);
+
+        self.transport.notify(protocol::VQ_CONTROL as u16);
+
+        self.wait_for_used()?;
+        self.wait_for_used()?;
+
+        // SAFETY: response buffers written by device via DMA.
+        let tr_type = unsafe { core::ptr::read_volatile(tr_region.virt as *const u32) };
+        let fr_type = unsafe { core::ptr::read_volatile(fr_region.virt as *const u32) };
+        if !protocol::resp_ok(tr_type) || !protocol::resp_ok(fr_type) {
             return Err(Error::InvalidState);
         }
         Ok(())
