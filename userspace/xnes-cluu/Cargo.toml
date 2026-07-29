@@ -10,6 +10,7 @@ license = "MIT"
 libcluu = { path = "../libcluu" }
 xnes = { path = "../xnes", default-features = false }
 cluu_wire = { path = "../cluu_wire" }
+audiod = { package = "cluu-audiod", path = "../audiod" }
 
 [[bin]]
 name = "xnes"

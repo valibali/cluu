@@ -14,6 +14,12 @@ use libcluu::args;
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::fs::client::VfsClient;
 use libcluu::input::ForwardedKey;
+use audiod::ring::FrameRing;
+use audiod::session::{
+    AUDIOD_STREAM_OPEN, AUDIOD_STREAM_CLOSE,
+    AUDIOD_QUERY_CAPS, CAPS_FMT_S16,
+};
+use libcluu::audio_client::PCM_FMT_S16;
 use libcluu::ipc::{
     parse_message, call_with_payload, send,
     COMP_FRAME_READY_LABEL, COMP_INPUT_FORWARD_LABEL,
@@ -50,6 +56,11 @@ const SCAN_SPACE: u8 = 0x39;
 const SCAN_ESC: u8 = 0x01;
 
 const DISPLAYD_VA: usize = 0xD200_0000;
+const AUDIO_RING_VA: usize = 0xD300_0000;
+const AUDIO_RATE: u32 = 44100;
+const AUDIO_CHANNELS: u8 = 1;
+const AUDIO_PERIOD_BYTES: usize = 4096;
+const PAGE_SIZE: usize = 4096;
 
 static PALETTE: [u32; 64] = [
     0xFF545454, 0xFF001E74, 0xFF080090, 0xFF440088, 0xFF7C005C, 0xFFA4001C, 0xFFA80000, 0xFF880000,
@@ -397,6 +408,82 @@ fn displayd_destroy(surf: &DisplaydSurface) {
     }
 }
 
+struct AudioStream {
+    ep: usize,
+    stream_id: u32,
+    session_id: u32,
+    ring_va: usize,
+    ring_bytes: usize,
+    ring_pages: usize,
+}
+
+fn open_audio_stream(audiod_ep: usize) -> Result<AudioStream> {
+    let req = Message::new(
+        AUDIOD_STREAM_OPEN,
+        [0, AUDIO_RATE as usize, AUDIO_CHANNELS as usize, AUDIO_PERIOD_BYTES, PCM_FMT_S16 as usize, 0],
+        5,
+    );
+    let mut reply_buf = [0u8; 128];
+    let bytes = libcluu::syscall::ipc_call(audiod_ep, req.as_bytes(), &mut reply_buf)?;
+    let (rmsg, _) = parse_message(&reply_buf[..bytes]).ok_or(libcluu::Error::InvalidState)?;
+    if rmsg.words[0] != 0 {
+        let _ = debug_print(&alloc::format!("xnes: audiod stream open failed err={}", rmsg.words[0]));
+        return Err(libcluu::Error::InvalidState);
+    }
+    let stream_id = rmsg.words[1] as u32;
+    let session_id = rmsg.words[2] as u32;
+    let frame_token = rmsg.words[3] as u64;
+    let ring_bytes = rmsg.words[4];
+
+    let sp = space_token();
+    let ring_pages = (ring_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    syscall::space_map_range(
+        sp,
+        AUDIO_RING_VA,
+        frame_token as usize,
+        FLAGS_USER_RW | syscall::MAP_FRAME_TOKEN,
+        ring_pages,
+        0,
+    )?;
+
+    let _ = debug_print(&alloc::format!(
+        "xnes: audio stream {} sid={} ring={}B", stream_id, session_id, ring_bytes
+    ));
+
+    Ok(AudioStream {
+        ep: audiod_ep,
+        stream_id,
+        session_id,
+        ring_va: AUDIO_RING_VA,
+        ring_bytes,
+        ring_pages,
+    })
+}
+
+fn push_audio(audio: &AudioStream, samples: &[i16]) -> usize {
+    if samples.is_empty() {
+        return 0;
+    }
+    let backing = unsafe {
+        core::slice::from_raw_parts_mut(audio.ring_va as *mut u8, audio.ring_bytes)
+    };
+    if let Some(mut ring) = FrameRing::attach(backing) {
+        ring.push_mono(samples)
+    } else {
+        0
+    }
+}
+
+fn close_audio(audio: &AudioStream) {
+    let msg = Message::new(
+        AUDIOD_STREAM_CLOSE,
+        [audio.session_id as usize, audio.stream_id as usize, 0, 0, 0, 0],
+        2,
+    );
+    let _ = send(audio.ep, &msg, IpcFlags::empty());
+    let _ = syscall::space_unmap(space_token(), audio.ring_va, audio.ring_pages);
+}
+
 fn create_input_window(title: &str) -> Result<CompWindow> {
     let info = process_info();
     let ipc_cap = info.tokens[TOKEN_IPC];
@@ -575,6 +662,14 @@ pub extern "C" fn main() -> i32 {
 
     let x_lut: Vec<u16> = (0..dst_w).map(|dx| (dx * NES_W / dst_w) as u16).collect();
 
+    let audio = registry::lookup_service("audiod:main")
+        .and_then(|ep| open_audio_stream(ep).ok());
+    if audio.is_some() {
+        let _ = debug_print("xnes: audio stream opened");
+    } else {
+        let _ = debug_print("xnes: no audio (audiod unavailable)");
+    }
+
     let mut recv_buf = [0u8; 256];
     let tokens = [win.my_ep];
     let mut running = true;
@@ -589,6 +684,22 @@ pub extern "C" fn main() -> i32 {
             let _ = emu.tick();
         }
         emu.bus.ppu.frame_complete = false;
+
+        if let Some(ref audio) = audio {
+            let n = emu.bus.apu.sample_count;
+            if n > 0 {
+                let pushed = push_audio(audio, &emu.bus.apu.audio_samples[..n]);
+                if pushed < n {
+                    let remaining = n - pushed;
+                    for i in 0..remaining {
+                        emu.bus.apu.audio_samples[i] = emu.bus.apu.audio_samples[pushed + i];
+                    }
+                    emu.bus.apu.sample_count = remaining;
+                } else {
+                    emu.bus.apu.sample_count = 0;
+                }
+            }
+        }
 
         render_frame(&mut pixel_region, &emu.bus.ppu.frame, dst_w, dst_h, &x_lut);
 
@@ -641,6 +752,9 @@ pub extern "C" fn main() -> i32 {
     );
     let _ = send(win.comp_ep, &destroy_msg, IpcFlags::empty());
     pixel_region.destroy();
+    if let Some(audio) = audio {
+        close_audio(&audio);
+    }
 
     let _ = debug_print("xnes: exit");
     0
@@ -692,6 +806,14 @@ fn run_displayd(emu: &mut Emulator) -> i32 {
         .map(|dx| (dx * NES_W / fit_w as usize) as u16)
         .collect();
 
+    let audio = registry::lookup_service("audiod:main")
+        .and_then(|ep| open_audio_stream(ep).ok());
+    if audio.is_some() {
+        let _ = debug_print("xnes: audio stream opened");
+    } else {
+        let _ = debug_print("xnes: no audio (audiod unavailable)");
+    }
+
     let mut recv_buf = [0u8; 256];
     let tokens = [win.my_ep];
     let mut running = true;
@@ -706,6 +828,22 @@ fn run_displayd(emu: &mut Emulator) -> i32 {
             let _ = emu.tick();
         }
         emu.bus.ppu.frame_complete = false;
+
+        if let Some(ref audio) = audio {
+            let n = emu.bus.apu.sample_count;
+            if n > 0 {
+                let pushed = push_audio(audio, &emu.bus.apu.audio_samples[..n]);
+                if pushed < n {
+                    let remaining = n - pushed;
+                    for i in 0..remaining {
+                        emu.bus.apu.audio_samples[i] = emu.bus.apu.audio_samples[pushed + i];
+                    }
+                    emu.bus.apu.sample_count = remaining;
+                } else {
+                    emu.bus.apu.sample_count = 0;
+                }
+            }
+        }
 
         render_frame_to_buf(
             frame_ptr,
