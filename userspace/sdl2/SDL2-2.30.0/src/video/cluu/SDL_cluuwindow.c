@@ -61,11 +61,17 @@ int CLUU_CreateSDLWindow(_THIS, SDL_Window *window)
         surf_w = dev->screen_w;
         surf_h = dev->screen_h;
     }
+    wd->fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
+    if (wd->fullscreen) {
+        surf_w = dev->screen_w;
+        surf_h = dev->screen_h;
+        window->w = (int)surf_w;
+        window->h = (int)surf_h;
+    }
     surf_pitch = surf_w * 4;  /* XRGB8888 = 4 bytes/pixel */
     wd->surf_w = surf_w;
     wd->surf_h = surf_h;
     wd->surf_pitch = surf_pitch;
-    wd->fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
     wd->visible = 1;
 
     /* Create displayd surface.
