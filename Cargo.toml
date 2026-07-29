@@ -172,6 +172,8 @@ members = [
     "userspace/imgview",
     "userspace/displayd",
     "userspace/audiod",
+    "userspace/xnes",
+    "userspace/xnes-cluu",
 
     # Language tooling
     "crates/cluu_lang",

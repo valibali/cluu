@@ -1,0 +1,16 @@
+[package]
+name = "xnes-cluu"
+version = "0.1.0"
+edition = "2021"
+description = "CLUU platform backend for x-nes NES emulator"
+authors = ["CLUU Team"]
+license = "MIT"
+
+[dependencies]
+libcluu = { path = "../libcluu" }
+xnes = { path = "../xnes", default-features = false }
+cluu_wire = { path = "../cluu_wire" }
+
+[[bin]]
+name = "xnes"
+path = "src/main.rs"

@@ -1,0 +1,8 @@
+FROM minimal
+# x-nes NES emulator — Rust no_std port. Direct compositor PixelRegion for
+# video, AudioSessionClient for audio, VfsClient for ROM loading. No SDL2,
+# no C toolchain — pure Rust like compdemo.
+PROFILE ipc registry
+MOUNT /host ro
+BUILD "cargo build --manifest-path userspace/xnes-cluu/Cargo.toml --target triplets/x86_64-cluu-user.json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem" target/x86_64-cluu-user/debug/xnes.elf /bin/xnes
+ENTRYPOINT /bin/xnes

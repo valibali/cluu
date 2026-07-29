@@ -3714,6 +3714,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xnes"
+version = "0.1.3"
+
+[[package]]
+name = "xnes-cluu"
+version = "0.1.0"
+dependencies = [
+ "cluu_wire",
+ "libcluu",
+ "xnes",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"
 dependencies = [
