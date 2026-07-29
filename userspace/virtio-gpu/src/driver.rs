@@ -61,12 +61,6 @@ const DRIVER_FB_VA: usize = 0x5700_0000;
 /// Virtqueue size (QEMU virtio-gpu uses 64 for controlq and cursorq).
 const QUEUE_SIZE: u16 = 256;
 
-/// Fence timeout — spin iterations before giving up (~2s at ~1µs/iteration).
-const FENCE_TIMEOUT_SPINS: u32 = 2_000_000;
-
-/// Response timeout for non-fenced commands (shorter — ~1s).
-const CMD_TIMEOUT_SPINS: u32 = 1_000_000;
-
 /// Test pattern colors (B8G8R8X8: bytes are B, G, R, X).
 const TEST_COLOR_TOP: u32 = 0x00_FF_55_00; // orange
 const TEST_COLOR_BOT: u32 = 0x00_00_55_FF; // blue
@@ -261,7 +255,24 @@ impl GpuDriver {
         Ok(false)
     }
 
-    /// Submit a control command and spin-wait for the response.
+    /// Wait for a used buffer on the control queue.
+    /// QEMU processes 2D commands synchronously during notify, so the
+    /// fast path (single pop_used) almost always succeeds immediately.
+    fn wait_for_used(&mut self) -> Result<()> {
+        if self.vq_control.pop_used().is_some() {
+            return Ok(());
+        }
+        for _ in 0..2000 {
+            let _ = yield_cpu();
+            if self.vq_control.pop_used().is_some() {
+                return Ok(());
+            }
+        }
+        debug_print("virtio-gpu: command timeout")?;
+        Err(Error::Timeout)
+    }
+
+    /// Submit a control command and wait for the response.
     ///
     /// Generic 2-descriptor chain: desc[0] = command (OUT), desc[1] = response (IN).
     /// The response buffer must be at least `protocol::CtrlHdr` (24 bytes).
@@ -367,57 +378,39 @@ impl GpuDriver {
         self.vq_control.submit(chain, 0);
         self.transport.notify(protocol::VQ_CONTROL as u16);
 
-        let timeout = if fence {
-            FENCE_TIMEOUT_SPINS
-        } else {
-            CMD_TIMEOUT_SPINS
+        self.wait_for_used()?;
+
+        // SAFETY: `resp_region.virt` is a DMA buffer of size >=
+        // `resp_size` >= `size_of::<u32>()`. The device wrote the
+        // response type at offset 0. `read_volatile` is used
+        // because the buffer was just written by the device via
+        // DMA (memory may be WC — volatile ensures the read is
+        // not optimized away).
+        let resp_type = unsafe {
+            core::ptr::read_volatile(resp_region.virt as *const u32)
         };
-        let mut spins = 0u32;
-        loop {
-            if let Some((_cookie, _len)) = self.vq_control.pop_used() {
-                // SAFETY: `resp_region.virt` is a DMA buffer of size >=
-                // `resp_size` >= `size_of::<u32>()`. The device wrote the
-                // response type at offset 0. `read_volatile` is used
-                // because the buffer was just written by the device via
-                // DMA (memory may be WC — volatile ensures the read is
-                // not optimized away).
-                let resp_type = unsafe {
-                    core::ptr::read_volatile(resp_region.virt as *const u32)
-                };
 
-                // Verify fence echo if fenced.
-                if let Some(expected_fid) = fence_id {
-                    // SAFETY: `resp_region.virt + 8` is within the DMA
-                    // buffer (size >= `size_of::<CtrlHdr>()` = 24 bytes,
-                    // and offset 8 is the `fence_id` field). `read_volatile`
-                    // for the same DMA reason as above.
-                    let resp_fid = unsafe {
-                        core::ptr::read_volatile(
-                            (resp_region.virt + 8) as *const u64,
-                        )
-                    };
-                    if resp_fid != expected_fid {
-                        debug_print(&format!(
-                            "virtio-gpu: fence mismatch expected={} got={}",
-                            expected_fid, resp_fid
-                        ))?;
-                        return Err(Error::InvalidState);
-                    }
-                }
-
-                return Ok(resp_type);
-            }
-            spins = spins.wrapping_add(1);
-            if spins % 1024 == 0 {
-                let _ = yield_cpu();
-            }
-            if spins > timeout {
-                if fence {
-                    debug_print("virtio-gpu: fence timeout")?;
-                }
-                return Err(Error::Timeout);
+        // Verify fence echo if fenced.
+        if let Some(expected_fid) = fence_id {
+            // SAFETY: `resp_region.virt + 8` is within the DMA
+            // buffer (size >= `size_of::<CtrlHdr>()` = 24 bytes,
+            // and offset 8 is the `fence_id` field). `read_volatile`
+            // for the same DMA reason as above.
+            let resp_fid = unsafe {
+                core::ptr::read_volatile(
+                    (resp_region.virt + 8) as *const u64,
+                )
+            };
+            if resp_fid != expected_fid {
+                debug_print(&format!(
+                    "virtio-gpu: fence mismatch expected={} got={}",
+                    expected_fid, resp_fid
+                ))?;
+                return Err(Error::InvalidState);
             }
         }
+
+        Ok(resp_type)
     }
 
     /// Submit ATTACH_BACKING with a scatter-gather list — 3+ descriptor chain:
@@ -515,25 +508,15 @@ impl GpuDriver {
         self.vq_control.submit(chain, 0);
         self.transport.notify(protocol::VQ_CONTROL as u16);
 
-        let mut spins = 0u32;
-        loop {
-            if let Some((_cookie, _len)) = self.vq_control.pop_used() {
-                // SAFETY: `resp_region.virt` is a DMA buffer of size >=
-                // `size_of::<CtrlHdr>()` >= 4. `read_volatile` because the
-                // device wrote via DMA.
-                let resp_type = unsafe {
-                    core::ptr::read_volatile(resp_region.virt as *const u32)
-                };
-                return Ok(resp_type);
-            }
-            spins = spins.wrapping_add(1);
-            if spins % 1024 == 0 {
-                let _ = yield_cpu();
-            }
-            if spins > CMD_TIMEOUT_SPINS {
-                return Err(Error::Timeout);
-            }
-        }
+        self.wait_for_used()?;
+
+        // SAFETY: `resp_region.virt` is a DMA buffer of size >=
+        // `size_of::<CtrlHdr>()` >= 4. `read_volatile` because the
+        // device wrote via DMA.
+        let resp_type = unsafe {
+            core::ptr::read_volatile(resp_region.virt as *const u32)
+        };
+        Ok(resp_type)
     }
 
     // ── High-level command wrappers ──────────────────────────────────────
@@ -590,59 +573,49 @@ impl GpuDriver {
         self.vq_control.submit(chain, 0);
         self.transport.notify(protocol::VQ_CONTROL as u16);
 
-        let mut spins = 0u32;
-        loop {
-            if let Some((_cookie, _len)) = self.vq_control.pop_used() {
-                // SAFETY: `resp_region` is a DMA buffer of size >=
-                // `resp_size` = `size_of::<RespDisplayInfo>()`, 8-byte
-                // aligned (allocated with align=8 above). `read_volatile`
-                // because the device wrote via DMA. The full struct is
-                // within bounds because `pool.alloc` guaranteed the size.
-                let resp: protocol::RespDisplayInfo = unsafe {
-                    core::ptr::read_volatile(resp_region.virt as *const protocol::RespDisplayInfo)
+        self.wait_for_used()?;
+
+        // SAFETY: `resp_region` is a DMA buffer of size >=
+        // `resp_size` = `size_of::<RespDisplayInfo>()`, 8-byte
+        // aligned (allocated with align=8 above). `read_volatile`
+        // because the device wrote via DMA. The full struct is
+        // within bounds because `pool.alloc` guaranteed the size.
+        let resp: protocol::RespDisplayInfo = unsafe {
+            core::ptr::read_volatile(resp_region.virt as *const protocol::RespDisplayInfo)
+        };
+        if resp.hdr.type_ != protocol::VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
+            debug_print(&format!(
+                "virtio-gpu: GET_DISPLAY_INFO bad response {} ({})",
+                protocol::resp_name(resp.hdr.type_),
+                resp.hdr.type_
+            ))?;
+            return Err(Error::InvalidState);
+        }
+
+        // Find the first enabled scanout.
+        for (i, pmode) in resp.pmodes.iter().enumerate() {
+            if pmode.enabled != 0 {
+                let mode = DisplayMode {
+                    width: pmode.r.width,
+                    height: pmode.r.height,
+                    enabled: true,
                 };
-                if resp.hdr.type_ != protocol::VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
-                    debug_print(&format!(
-                        "virtio-gpu: GET_DISPLAY_INFO bad response {} ({})",
-                        protocol::resp_name(resp.hdr.type_),
-                        resp.hdr.type_
-                    ))?;
-                    return Err(Error::InvalidState);
-                }
-
-                // Find the first enabled scanout.
-                for (i, pmode) in resp.pmodes.iter().enumerate() {
-                    if pmode.enabled != 0 {
-                        let mode = DisplayMode {
-                            width: pmode.r.width,
-                            height: pmode.r.height,
-                            enabled: true,
-                        };
-                        debug_print(&format!(
-                            "virtio-gpu: scanout {} {}x{} enabled={}",
-                            i, mode.width, mode.height, pmode.enabled
-                        ))?;
-                        debug_print("VIRTIO_GPU_DISPLAY_INFO")?;
-                        return Ok(mode);
-                    }
-                }
-
-                // No enabled scanout — use a default.
-                debug_print("virtio-gpu: no enabled scanout, using 640x480")?;
-                return Ok(DisplayMode {
-                    width: 640,
-                    height: 480,
-                    enabled: false,
-                });
-            }
-            spins = spins.wrapping_add(1);
-            if spins % 1024 == 0 {
-                let _ = yield_cpu();
-            }
-            if spins > CMD_TIMEOUT_SPINS {
-                return Err(Error::Timeout);
+                debug_print(&format!(
+                    "virtio-gpu: scanout {} {}x{} enabled={}",
+                    i, mode.width, mode.height, pmode.enabled
+                ))?;
+                debug_print("VIRTIO_GPU_DISPLAY_INFO")?;
+                return Ok(mode);
             }
         }
+
+        // No enabled scanout — use a default.
+        debug_print("virtio-gpu: no enabled scanout, using 640x480")?;
+        Ok(DisplayMode {
+            width: 640,
+            height: 480,
+            enabled: false,
+        })
     }
 
     /// CREATE_2D — create a 2D resource.
