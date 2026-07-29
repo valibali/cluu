@@ -1118,7 +1118,7 @@ impl GpuDriver {
         let mut buf = [0u8; 256];
         loop {
             let tokens = [self.irq.endpoint, listen_endpoint, registry_endpoint];
-            let (idx, len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 10) {
+            let (idx, len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 100) {
                 Ok(t) => t,
                 Err(_) => {
                     self.drain_queues();
