@@ -29,7 +29,7 @@
 extern crate alloc;
 
 use audiod::mixer::{saturate_i16, Gain, MAX_PERIOD_FRAMES};
-use audiod::ring::{FrameRing, FRAME_BYTES};
+use audiod::ring::{FrameRing, FRAME_BYTES_STEREO};
 use audiod::session::{
     Stream, StreamRegistry, StreamState, StreamStatus, AUDIOD_SESSION_DESTROYED,
     AUDIOD_STREAM_CLOSE, AUDIOD_STREAM_DRAIN, AUDIOD_STREAM_GAIN, AUDIOD_STREAM_OPEN,
@@ -87,6 +87,7 @@ struct Audiod {
     space_token: usize,
     mix_buf: [[i16; 2]; MAX_PERIOD_FRAMES],
     stream_buf: [[i16; 2]; MAX_PERIOD_FRAMES],
+    mono_stream_buf: [i16; MAX_PERIOD_FRAMES],
     resample_out: [[i16; 2]; MAX_PERIOD_FRAMES],
     next_period_id: u64,
     page_index: usize,
@@ -102,7 +103,7 @@ struct Audiod {
 }
 
 fn ring_bytes_for_stream() -> usize {
-    let raw = FrameRing::bytes_for_capacity(RING_CAPACITY_FRAMES);
+    let raw = FrameRing::bytes_for_capacity(RING_CAPACITY_FRAMES, FRAME_BYTES_STEREO);
     (raw + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
@@ -165,7 +166,7 @@ fn run() -> Result<()> {
     };
     let snd = AudioSessionClient::open(snd_ep, params)?;
     let period_bytes = snd.period_bytes;
-    let period_frames = period_bytes / FRAME_BYTES;
+    let period_frames = period_bytes / FRAME_BYTES_STEREO;
     let slot_stride = (period_bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let scratch_pages = RING_SLOTS * (slot_stride / PAGE_SIZE);
     debug_print(&format!("audiod: virtio-snd session open period_bytes={}", period_bytes))?;
@@ -197,6 +198,7 @@ fn run() -> Result<()> {
         space_token,
         mix_buf: [[0i16; 2]; MAX_PERIOD_FRAMES],
         stream_buf: [[0i16; 2]; MAX_PERIOD_FRAMES],
+        mono_stream_buf: [0i16; MAX_PERIOD_FRAMES],
         resample_out: [[0i16; 2]; MAX_PERIOD_FRAMES],
         next_period_id: 1,
         page_index: 0,
@@ -387,7 +389,8 @@ impl Audiod {
         let backing = unsafe {
             core::slice::from_raw_parts_mut(va as *mut u8, self.ring_total_bytes)
         };
-        FrameRing::initialize(backing, RING_CAPACITY_FRAMES);
+        let frame_bytes = (in_channels as usize) * 2;
+        FrameRing::initialize(backing, RING_CAPACITY_FRAMES, frame_bytes);
 
         let session = self.streams.ensure_session(session_id);
         let stream_id = session.alloc_stream_id();
@@ -616,14 +619,28 @@ impl Audiod {
                         Some(r) => r,
                         None => continue,
                     };
-                    ring.pop(&mut self.stream_buf[..n_frames])
+                    if stream.in_channels == 1 {
+                        ring.pop_mono(&mut self.mono_stream_buf[..n_frames])
+                    } else {
+                        ring.pop(&mut self.stream_buf[..n_frames])
+                    }
                 };
                 stream.frames_played = stream.frames_played.wrapping_add(popped as u64);
-                for i in 0..popped {
-                    let l = pan.apply_l(gain.apply(self.stream_buf[i][0]));
-                    let r = pan.apply_r(gain.apply(self.stream_buf[i][1]));
-                    accum_l[i] = accum_l[i].saturating_add(l);
-                    accum_r[i] = accum_r[i].saturating_add(r);
+                if stream.in_channels == 1 {
+                    for i in 0..popped {
+                        let s = self.mono_stream_buf[i];
+                        let l = pan.apply_l(gain.apply(s));
+                        let r = pan.apply_r(gain.apply(s));
+                        accum_l[i] = accum_l[i].saturating_add(l);
+                        accum_r[i] = accum_r[i].saturating_add(r);
+                    }
+                } else {
+                    for i in 0..popped {
+                        let l = pan.apply_l(gain.apply(self.stream_buf[i][0]));
+                        let r = pan.apply_r(gain.apply(self.stream_buf[i][1]));
+                        accum_l[i] = accum_l[i].saturating_add(l);
+                        accum_r[i] = accum_r[i].saturating_add(r);
+                    }
                 }
             } else {
                 let ring_va = stream.ring_backing.as_ptr() as usize;
@@ -631,10 +648,12 @@ impl Audiod {
                 let resampler = &mut stream.resampler;
                 let frames_played = &mut stream.frames_played;
                 let in_rate = stream.in_rate;
+                let is_mono = stream.in_channels == 1;
 
                 let mut out_filled = 0usize;
                 const CHUNK: usize = 32;
                 let mut input_frames = [[0i16; 2]; CHUNK];
+                let mut input_mono = [0i16; CHUNK];
 
                 while out_filled < n_frames {
                     let want_in = ((n_frames - out_filled) as u64 * in_rate as u64
@@ -645,17 +664,23 @@ impl Audiod {
                     let popped = match FrameRing::attach(backing) {
                         Some(mut r) => {
                             let avail = r.available_read().min(want_in);
-                            if avail == 0 { 0 } else { r.pop(&mut input_frames[..avail]) }
+                            if avail == 0 { 0 }
+                            else if is_mono { r.pop_mono(&mut input_mono[..avail]) }
+                            else { r.pop(&mut input_frames[..avail]) }
                         }
                         None => break,
                     };
                     if popped == 0 { break; }
 
-                    let input_i16: &[i16] = unsafe {
-                        core::slice::from_raw_parts(
-                            input_frames[..popped].as_ptr() as *const i16,
-                            popped * 2,
-                        )
+                    let input_i16: &[i16] = if is_mono {
+                        &input_mono[..popped]
+                    } else {
+                        unsafe {
+                            core::slice::from_raw_parts(
+                                input_frames[..popped].as_ptr() as *const i16,
+                                popped * 2,
+                            )
+                        }
                     };
                     let out_space = &mut self.resample_out[out_filled..n_frames];
                     let produced = resampler.process(input_i16, out_space);
@@ -682,7 +707,7 @@ impl Audiod {
         let slot_va = SCRATCH_VA + self.page_index * self.slot_stride;
         let scratch = unsafe { core::slice::from_raw_parts_mut(slot_va as *mut u8, self.period_bytes) };
         for i in 0..n_frames {
-            let offset = i * FRAME_BYTES;
+            let offset = i * FRAME_BYTES_STEREO;
             scratch[offset..offset + 2]
                 .copy_from_slice(&self.mix_buf[i][0].to_le_bytes());
             scratch[offset + 2..offset + 4]

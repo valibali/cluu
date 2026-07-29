@@ -1,6 +1,10 @@
 //! SHM SPSC frame ring — single-producer / single-consumer ring buffer for
-//! stereo S16 audio frames, designed to live in a shared-memory page granted
-//! between an audiod client (producer) and audiod (consumer).
+//! audio frames, designed to live in a shared-memory page granted between an
+//! audiod client (producer) and audiod (consumer).
+//!
+//! Supports both mono (2 bytes/frame) and stereo (4 bytes/frame) S16 streams.
+//! The frame size is stored in the header's `reserved` field at init time and
+//! validated on attach.
 //!
 //! # Layout
 //!
@@ -10,7 +14,7 @@
 //! └──────────────────────────────────┴──────────────────────────────┘
 //! ```
 //!
-//! Each frame is 4 bytes (stereo S16: L_low, L_high, R_low, R_high).
+//! Each frame is `frame_bytes` bytes (2 for mono S16, 4 for stereo S16 LE).
 //!
 //! # Memory ordering
 //!
@@ -35,7 +39,10 @@ use core::sync::atomic::{fence, AtomicU32, Ordering};
 const MAGIC: u32 = 0x4155_4446; // "AUDF"
 
 /// Stereo S16 frame: 2 × i16 = 4 bytes.
-pub const FRAME_BYTES: usize = 4;
+pub const FRAME_BYTES_STEREO: usize = 4;
+
+/// Mono S16 frame: 1 × i16 = 2 bytes.
+pub const FRAME_BYTES_MONO: usize = 2;
 
 /// Header stored at the start of the shared region.
 ///
@@ -50,7 +57,7 @@ pub struct FrameRingHeader {
     total_written: AtomicU32,
     total_read: AtomicU32,
     xrun_count: AtomicU32,
-    reserved: AtomicU32,
+    frame_bytes: AtomicU32,
 }
 
 impl FrameRingHeader {
@@ -68,31 +75,25 @@ pub struct FrameRing<'a> {
     header: &'a FrameRingHeader,
     data: &'a mut [u8],
     capacity: usize,
+    frame_bytes: usize,
 }
 
 /// Minimum capacity (in frames) — must hold at least one period.
 pub const MIN_CAPACITY: usize = 4;
 
 impl<'a> FrameRing<'a> {
-    /// Total bytes needed for a ring with `capacity` frames.
-    pub fn bytes_for_capacity(capacity: usize) -> usize {
-        FrameRingHeader::bytes() + capacity * FRAME_BYTES
+    /// Total bytes needed for a ring with `capacity` frames of `frame_bytes` each.
+    pub fn bytes_for_capacity(capacity: usize, frame_bytes: usize) -> usize {
+        FrameRingHeader::bytes() + capacity * frame_bytes
     }
 
-    /// Initialise a new ring in `backing`.
-    pub fn initialize(backing: &'a mut [u8], capacity: usize) -> Self {
-        assert!(backing.len() >= Self::bytes_for_capacity(capacity));
+    /// Initialise a new ring in `backing` with the given frame size.
+    pub fn initialize(backing: &'a mut [u8], capacity: usize, frame_bytes: usize) -> Self {
+        assert!(backing.len() >= Self::bytes_for_capacity(capacity, frame_bytes));
         assert!(capacity >= MIN_CAPACITY);
+        assert!(frame_bytes == FRAME_BYTES_MONO || frame_bytes == FRAME_BYTES_STEREO);
         let header_bytes = FrameRingHeader::bytes();
         let (header_slice, data_slice) = backing.split_at_mut(header_bytes);
-        // SAFETY: `FrameRingHeader` is `#[repr(C)]` containing only
-        // `AtomicU32` fields (4-byte alignment). The backing buffer in
-        // practice comes from an SHM page or `Vec<u8>`, both of which are
-        // at least 4-byte aligned (SHM pages are page-aligned; Vec<u8>'s
-        // allocation is usize-aligned on x86_64). The `assert!` above
-        // guarantees `backing.len() >= header_bytes + capacity * 4`, so
-        // the header and data regions are within bounds. The borrow
-        // lifetime is tied to `'a` (the backing borrow).
         let header = unsafe {
             &mut *(header_slice.as_mut_ptr() as *mut FrameRingHeader)
         };
@@ -103,17 +104,14 @@ impl<'a> FrameRing<'a> {
         header.total_written.store(0, Ordering::Relaxed);
         header.total_read.store(0, Ordering::Relaxed);
         header.xrun_count.store(0, Ordering::Relaxed);
-        header.reserved.store(0, Ordering::Relaxed);
+        header.frame_bytes.store(frame_bytes as u32, Ordering::Relaxed);
         fence(Ordering::Release);
-        let data_len = capacity * FRAME_BYTES;
+        let data_len = capacity * frame_bytes;
         Self {
-            // SAFETY: `header` was just fully initialised above (all fields
-            // stored). Casting `&mut` to `&` is sound — the shared reference
-            // is valid for `'a`. No mutable aliasing exists because the
-            // `&mut` binding is dropped after this cast.
             header: unsafe { &*(header as *const FrameRingHeader) },
             data: &mut data_slice[..data_len],
             capacity,
+            frame_bytes,
         }
     }
 
@@ -124,10 +122,6 @@ impl<'a> FrameRing<'a> {
         }
         let header_bytes = FrameRingHeader::bytes();
         let (header_slice, data_slice) = backing.split_at_mut(header_bytes);
-        // SAFETY: Same alignment argument as `initialize` — backing is at
-        // least 4-byte aligned (SHM page or Vec<u8>). The length check
-        // above ensures the header fits. The magic check below validates
-        // that the header was previously initialised by `initialize`.
         let header = unsafe {
             &mut *(header_slice.as_mut_ptr() as *mut FrameRingHeader)
         };
@@ -138,16 +132,19 @@ impl<'a> FrameRing<'a> {
         if capacity < MIN_CAPACITY {
             return None;
         }
-        let data_len = capacity * FRAME_BYTES;
+        let frame_bytes = header.frame_bytes.load(Ordering::Relaxed) as usize;
+        if frame_bytes != FRAME_BYTES_MONO && frame_bytes != FRAME_BYTES_STEREO {
+            return None;
+        }
+        let data_len = capacity * frame_bytes;
         if data_slice.len() < data_len {
             return None;
         }
         Some(Self {
-            // SAFETY: Same as `initialize` — `header` is valid (magic
-            // verified) and the cast from `&mut` to `&` is sound for `'a`.
             header: unsafe { &*(header as *const FrameRingHeader) },
             data: &mut data_slice[..data_len],
             capacity,
+            frame_bytes,
         })
     }
 
@@ -193,6 +190,7 @@ impl<'a> FrameRing<'a> {
     /// returns 0 and increments the xrun counter (overrun).
     /// Each frame is `[i16; 2]` (left, right).
     pub fn push(&mut self, frames: &[[i16; 2]]) -> usize {
+        debug_assert_eq!(self.frame_bytes, FRAME_BYTES_STEREO);
         if frames.is_empty() {
             return 0;
         }
@@ -204,7 +202,7 @@ impl<'a> FrameRing<'a> {
         let write = self.write_idx();
         for i in 0..to_write {
             let idx = (write + i) % self.capacity;
-            let offset = idx * FRAME_BYTES;
+            let offset = idx * self.frame_bytes;
             let frame = &frames[i];
             self.data[offset..offset + 2]
                 .copy_from_slice(&frame[0].to_le_bytes());
@@ -220,11 +218,42 @@ impl<'a> FrameRing<'a> {
         to_write
     }
 
+    /// Push up to `samples.len()` mono samples into the ring.
+    ///
+    /// Returns the number of samples actually written. If the ring is full,
+    /// returns 0 and increments the xrun counter (overrun).
+    pub fn push_mono(&mut self, samples: &[i16]) -> usize {
+        debug_assert_eq!(self.frame_bytes, FRAME_BYTES_MONO);
+        if samples.is_empty() {
+            return 0;
+        }
+        let to_write = samples.len().min(self.available_write());
+        if to_write == 0 {
+            self.header.xrun_count.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
+        let write = self.write_idx();
+        for i in 0..to_write {
+            let idx = (write + i) % self.capacity;
+            let offset = idx * self.frame_bytes;
+            self.data[offset..offset + 2]
+                .copy_from_slice(&samples[i].to_le_bytes());
+        }
+        fence(Ordering::Release);
+        let new_write = (write + to_write) % self.capacity;
+        self.header.write_idx.store(new_write as u32, Ordering::Release);
+        self.header
+            .total_written
+            .fetch_add(to_write as u32, Ordering::Relaxed);
+        to_write
+    }
+
     /// Pop up to `dst.len()` stereo frames from the ring.
     ///
     /// Returns the number of frames actually read. If the ring is empty,
     /// returns 0 (underrun — caller should feed silence).
     pub fn pop(&mut self, dst: &mut [[i16; 2]]) -> usize {
+        debug_assert_eq!(self.frame_bytes, FRAME_BYTES_STEREO);
         if dst.is_empty() {
             return 0;
         }
@@ -235,9 +264,37 @@ impl<'a> FrameRing<'a> {
         let read = self.read_idx();
         for i in 0..to_read {
             let idx = (read + i) % self.capacity;
-            let offset = idx * FRAME_BYTES;
+            let offset = idx * self.frame_bytes;
             dst[i][0] = i16::from_le_bytes([self.data[offset], self.data[offset + 1]]);
             dst[i][1] = i16::from_le_bytes([self.data[offset + 2], self.data[offset + 3]]);
+        }
+        fence(Ordering::Release);
+        let new_read = (read + to_read) % self.capacity;
+        self.header.read_idx.store(new_read as u32, Ordering::Release);
+        self.header
+            .total_read
+            .fetch_add(to_read as u32, Ordering::Relaxed);
+        to_read
+    }
+
+    /// Pop up to `dst.len()` mono samples from the ring.
+    ///
+    /// Returns the number of samples actually read. If the ring is empty,
+    /// returns 0 (underrun — caller should feed silence).
+    pub fn pop_mono(&mut self, dst: &mut [i16]) -> usize {
+        debug_assert_eq!(self.frame_bytes, FRAME_BYTES_MONO);
+        if dst.is_empty() {
+            return 0;
+        }
+        let to_read = dst.len().min(self.available_read());
+        if to_read == 0 {
+            return 0;
+        }
+        let read = self.read_idx();
+        for i in 0..to_read {
+            let idx = (read + i) % self.capacity;
+            let offset = idx * self.frame_bytes;
+            dst[i] = i16::from_le_bytes([self.data[offset], self.data[offset + 1]]);
         }
         fence(Ordering::Release);
         let new_read = (read + to_read) % self.capacity;
@@ -275,9 +332,16 @@ mod tests {
     use alloc::vec::Vec;
 
     fn make_ring(capacity: usize) -> Vec<u8> {
-        let bytes = FrameRing::bytes_for_capacity(capacity);
+        let bytes = FrameRing::bytes_for_capacity(capacity, FRAME_BYTES_STEREO);
         let mut buf = vec![0u8; bytes];
-        FrameRing::initialize(&mut buf, capacity);
+        FrameRing::initialize(&mut buf, capacity, FRAME_BYTES_STEREO);
+        buf
+    }
+
+    fn make_mono_ring(capacity: usize) -> Vec<u8> {
+        let bytes = FrameRing::bytes_for_capacity(capacity, FRAME_BYTES_MONO);
+        let mut buf = vec![0u8; bytes];
+        FrameRing::initialize(&mut buf, capacity, FRAME_BYTES_MONO);
         buf
     }
 
@@ -383,5 +447,53 @@ mod tests {
         // Only 2 more fit (capacity-1=7, 5 used, 2 left).
         assert_eq!(ring.push(&second), 2);
         assert_eq!(ring.available_read(), 7);
+    }
+
+    #[test]
+    fn ring_mono_push_pop() {
+        let capacity = 8;
+        let mut buf = make_mono_ring(capacity);
+        let mut ring = FrameRing::attach(&mut buf).unwrap();
+        let samples = [100i16, -200, 300, 0, 500, -600];
+        assert_eq!(ring.push_mono(&samples), 6);
+        assert_eq!(ring.available_read(), 6);
+
+        let mut out = [0i16; 4];
+        assert_eq!(ring.pop_mono(&mut out), 4);
+        assert_eq!(out, [100, -200, 300, 0]);
+
+        let mut rest = [0i16; 2];
+        assert_eq!(ring.pop_mono(&mut rest), 2);
+        assert_eq!(rest, [500, -600]);
+        assert_eq!(ring.available_read(), 0);
+    }
+
+    #[test]
+    fn ring_mono_overrun_counts_xrun() {
+        let capacity = 8;
+        let mut buf = make_mono_ring(capacity);
+        let mut ring = FrameRing::attach(&mut buf).unwrap();
+        let full = [1i16; 7];
+        assert_eq!(ring.push_mono(&full), 7);
+        let extra = [2i16; 4];
+        assert_eq!(ring.push_mono(&extra), 0);
+        assert_eq!(ring.xrun_count(), 1);
+    }
+
+    #[test]
+    fn ring_mono_wraps() {
+        let capacity = 8;
+        let mut buf = make_mono_ring(capacity);
+        let mut ring = FrameRing::attach(&mut buf).unwrap();
+        let first = [1i16, 2, 3, 4, 5];
+        assert_eq!(ring.push_mono(&first), 5);
+        let mut out = [0i16; 3];
+        assert_eq!(ring.pop_mono(&mut out), 3);
+        assert_eq!(out, [1, 2, 3]);
+
+        let second = [6i16, 7, 8, 9];
+        assert_eq!(ring.push_mono(&second), 4);
+        assert_eq!(ring.total_written(), 9);
+        assert_eq!(ring.total_read(), 3);
     }
 }
