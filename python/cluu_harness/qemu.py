@@ -217,6 +217,7 @@ class QemuController:
             "-device", "virtio-9p-pci,fsdev=hostshare,mount_tag=hostshare,addr=0x7,disable-legacy=on,disable-modern=off",
             "-audiodev", "pa,id=snd0",
             "-device", "virtio-sound-pci,audiodev=snd0,addr=0x6,disable-legacy=on,disable-modern=off",
+            "-device", "virtio-vga,max_outputs=1,edid=on,xres=1280,yres=800",
             "-device", "usb-ehci,id=ehci",
             "-device", "usb-kbd,bus=ehci.0",
             "-device", "usb-mouse,bus=ehci.0",
