@@ -19,7 +19,8 @@ use libcluu::ipc::PARAM_DEVICE_PATH;
 use libcluu::registry;
 use libcluu::ipc::{extract_reply_id, parse_message, reply};
 use libcluu::syscall::{
-    ipc_recv_any_with_sender, space_grant, space_map_range, space_unmap, virt_to_phys, yield_cpu,
+    ipc_recv_any_with_sender, ipc_recv_timeout, space_grant, space_map_range, space_unmap,
+    virt_to_phys, yield_cpu,
 };
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error, Result};
@@ -79,6 +80,7 @@ pub struct GpuDriver {
     pub irq_seen: bool,
     pub fb_virt: usize,
     pub fb_pages: usize,
+    pub fb_pitch: u64,
 }
 
 /// Display mode queried via GET_DISPLAY_INFO.
@@ -200,6 +202,7 @@ impl GpuDriver {
             irq_seen: false,
             fb_virt: 0,
             fb_pages: 0,
+            fb_pitch: 0,
         };
 
         driver.transport.set_driver_ok()?;
@@ -258,12 +261,24 @@ impl GpuDriver {
     /// Wait for a used buffer on the control queue.
     /// QEMU processes 2D commands synchronously during notify, so the
     /// fast path (single pop_used) almost always succeeds immediately.
+    ///
+    /// Fallback: block on the IRQ endpoint (kernel HLTs the thread)
+    /// instead of spinning. Each iteration waits up to 5 ms; bounded
+    /// to 200 iterations (1 s max). If an IRQ arrives we ack it (EOI)
+    /// so the PIC delivers future IRQs; the run_loop will handle
+    /// subsequent IRQs on its recv_any path.
     fn wait_for_used(&mut self) -> Result<()> {
         if self.vq_control.pop_used().is_some() {
             return Ok(());
         }
-        for _ in 0..2000 {
-            let _ = yield_cpu();
+        let mut irq_buf = [0u8; 32];
+        for _ in 0..200 {
+            match ipc_recv_timeout(self.irq.endpoint, &mut irq_buf, 5) {
+                Ok(_) => {
+                    let _ = self.irq.ack();
+                }
+                Err(_) => {}
+            }
             if self.vq_control.pop_used().is_some() {
                 return Ok(());
             }
@@ -1111,7 +1126,7 @@ impl GpuDriver {
         let mut buf = [0u8; 256];
         loop {
             let tokens = [self.irq.endpoint, listen_endpoint, registry_endpoint];
-            let (idx, len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 100) {
+            let (idx, len, _sender) = match ipc_recv_any_with_sender(&tokens, &mut buf, 1000) {
                 Ok(t) => t,
                 Err(_) => {
                     self.drain_queues();
@@ -1234,6 +1249,7 @@ impl GpuDriver {
 
                     self.fb_virt = DRIVER_FB_VA;
                     self.fb_pages = fb_pages;
+                    self.fb_pitch = (width as u64) * 4;
 
                     debug_print(&format!(
                         "virtio-gpu: CREATE_2D {}x{} {} pages → {} SG entries, granted to displayd",
@@ -1255,7 +1271,7 @@ impl GpuDriver {
                     let y = msg.words[2] as u32;
                     let w = msg.words[3] as u32;
                     let h = msg.words[4] as u32;
-                    let pitch = msg.words[5] as u64;
+                    let pitch = self.fb_pitch;
                     let offset = (y as u64) * pitch + (x as u64) * 4;
                     match self.transfer_flush_rect(resource_id, x, y, w, h, offset) {
                         Ok(_) => {
@@ -1372,6 +1388,7 @@ impl GpuDriver {
 
                     self.fb_virt = DRIVER_FB_VA;
                     self.fb_pages = new_pages;
+                    self.fb_pitch = (new_w as u64) * 4;
 
                     debug_print(&format!(
                         "virtio-gpu: RESIZE {}x{} {} pages → {} SG entries",

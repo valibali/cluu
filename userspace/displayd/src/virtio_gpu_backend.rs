@@ -401,13 +401,13 @@ impl VirtioGpuBackend {
             GPU_TRANSFER_FLUSH,
             [
                 self.resource_id as usize,
+                rect.x as usize,
+                rect.y as usize,
+                rect.w as usize,
+                rect.h as usize,
                 0,
-                0,
-                self.info.width as usize,
-                self.info.height as usize,
-                self.info.pitch as usize,
             ],
-            6,
+            5,
         );
         let mut reply_buf = [0u8; 128];
         let _ = ipc_call_timeout(
