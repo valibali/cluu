@@ -246,10 +246,16 @@ fn register_pts(my_ep: usize, session_id: Option<u32>) -> Result<(u32, usize), i
             .map_err(|_| 8)?;
 
     let reply_start = core::mem::size_of::<Message>();
-    let reply_payload = &reply_buf[reply_start..reply_start + reply_payload_len];
-
     let reply: VfsRegisterPtsReply =
-        postcard::from_bytes(reply_payload).map_err(|_| 9)?;
+        postcard::from_bytes(&reply_buf[reply_start..reply_start + reply_payload_len])
+            .map_err(|_| 9)?;
+    if reply.errno != 0 {
+        let _ = debug_print(&alloc::format!(
+            "cluuterm: VFS PTS registration rejected errno={}",
+            reply.errno
+        ));
+        return Err(12);
+    }
 
     Ok((reply.assigned_id, vfs_ep))
 }

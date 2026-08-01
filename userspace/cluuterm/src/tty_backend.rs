@@ -9,6 +9,7 @@ use libcluu::ansi::{Attr, EraseMode, Event, Parser};
 use libcluu::ipc::{
     self, COMP_INPUT_FORWARD_LABEL, COMP_WIN_CONFIGURE_LABEL,
     COMP_WIN_DAMAGE_LABEL, COMP_WIN_DESTROY_LABEL, COMP_WIN_RESIZE_LABEL,
+    PTS_UNREGISTER_LABEL,
 };
 use libcluu::ipc::{COMP_CLOSE_REQUEST_LABEL, PROCMGR_PG_SIGNAL_LABEL};
 use libcluu::registry::RegistryEvent;
@@ -1070,6 +1071,17 @@ impl Cluuterm {
         let _ = debug_print("cluuterm: shutdown");
         // Mark pts closed; wake pending readers.
         self.pts.handle_pts_closed();
+        let unregister = Message::new(
+            PTS_UNREGISTER_LABEL,
+            [self.pts_id as usize, 0, 0, 0, 0, 0],
+            1,
+        );
+        if ipc::send(self.vfs_ep, &unregister, IpcFlags::empty()).is_err() {
+            let _ = debug_print(&alloc::format!(
+                "cluuterm: PTS unregister failed id={}",
+                self.pts_id
+            ));
+        }
         // Destroy compositor window.
         let destroy = Message::new(
             COMP_WIN_DESTROY_LABEL,
