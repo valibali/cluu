@@ -3,7 +3,7 @@
 //! Modifier model — CLUU kbd has no Super bit, so we map "Super" hotkeys
 //! onto Ctrl+Alt. Ctrl+Alt+F1..F4 (the VT switch) is consumed by kbd
 //! BEFORE the compositor sees the event, so there is no collision with
-//! our Ctrl+Alt+Q/N/Arrow hotkeys (different scancodes).
+//! our Ctrl+Alt+X/N/Arrow hotkeys (different scancodes).
 
 const MOD_SHIFT: u8 = 1 << 0;
 const MOD_CTRL: u8 = 1 << 1;
@@ -11,7 +11,7 @@ const MOD_ALT: u8 = 1 << 2;
 
 /// PS/2 set-1 scancodes (press/release bit already stripped by kbd).
 pub const SCAN_TAB: u8 = 0x0F;
-pub const SCAN_Q: u8 = 0x10;
+pub const SCAN_X: u8 = 0x2D;
 pub const SCAN_N: u8 = 0x31;
 pub const SCAN_ESC: u8 = 0x01;
 
@@ -70,8 +70,9 @@ pub fn match_hotkey(mods: u8, scancode: u8, extended: u8) -> Option<Hotkey> {
         });
     }
 
-    // Ctrl+Alt+Q: request close of focused window.
-    if supr && scancode == SCAN_Q {
+    // Ctrl+Alt+X: request close of focused window. Ctrl+Alt+Q is reserved
+    // by QEMU as a host-level quit shortcut.
+    if supr && scancode == SCAN_X {
         return Some(Hotkey::CloseRequest);
     }
 
@@ -81,4 +82,22 @@ pub fn match_hotkey(mods: u8, scancode: u8, extended: u8) -> Option<Hotkey> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_alt_x_requests_close() {
+        assert!(matches!(
+            match_hotkey(MOD_CTRL | MOD_ALT, SCAN_X, EXT_NONE),
+            Some(Hotkey::CloseRequest)
+        ));
+    }
+
+    #[test]
+    fn ctrl_alt_q_is_not_a_compositor_hotkey() {
+        assert!(match_hotkey(MOD_CTRL | MOD_ALT, 0x10, EXT_NONE).is_none());
+    }
 }

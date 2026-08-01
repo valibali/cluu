@@ -36,15 +36,12 @@ pub const fn pack_cell(cp: u32, fg: u8, bg: u8, attrs: u8) -> u64 {
 
 /// Walk the compositor's dirty cell list and refresh `cell_grid` accordingly.
 pub fn recompute_dirty(comp: &mut Compositor) {
-    let dirty = core::mem::take(&mut comp.cell_dirty);
-    for (cx, cy) in dirty {
-        if cx >= comp.cols || cy >= comp.rows {
-            continue;
-        }
-        let out = compose_cell(comp, cx, cy);
+    let fullscreen_mode = focused_is_fullscreen(comp);
+    while let Some((cx, cy)) = comp.cell_dirty.pop() {
+        let out = compose_cell(comp, cx, cy, fullscreen_mode);
         let idx = cy as usize * comp.cols as usize + cx as usize;
         comp.cell_grid[idx] = out;
-        comp.prev_cell_grid[idx] = u64::MAX;
+        comp.render_dirty.push((cx, cy));
     }
 }
 
@@ -54,8 +51,7 @@ fn focused_is_fullscreen(comp: &Compositor) -> bool {
     comp.windows.iter().any(|w| w.id == id && w.fullscreen)
 }
 
-fn compose_cell(comp: &Compositor, cx: u16, cy: u16) -> u64 {
-    let fullscreen_mode = focused_is_fullscreen(comp);
+fn compose_cell(comp: &Compositor, cx: u16, cy: u16, fullscreen_mode: bool) -> u64 {
     // Walk top→bottom (last is top).
     for win in comp.windows.iter().rev() {
         if cx < win.x || cx >= win.x.saturating_add(win.w) {
@@ -222,26 +218,35 @@ fn pack_chrome_cell(cp: u32, focused: bool) -> u64 {
     pack_cell(cp, fg, 0, attrs)
 }
 
-/// Lay the status bar string into cell row 0 of the compositor's cell_grid.
+/// Lay cached status cells into row 0 of the compositor's cell grid.
 /// Called after recompute_dirty so it overwrites any chrome/interior that
 /// landed on row 0.
 /// Skipped entirely when a fullscreen window is focused — the fullscreen
 /// window's content (row 0 of its SHM buffer) is already in cell_grid[row 0].
-pub fn render_status_row(comp: &mut Compositor) {
+pub fn render_status_row(comp: &mut Compositor, status_cache: &mut crate::status::StatusCache) {
     if focused_is_fullscreen(comp) {
         return;
     }
-    let s = crate::status::render_status(comp);
-    let bytes = s.as_bytes();
+    let focused_title = comp.focused
+        .and_then(|id| comp.windows.iter().find(|w| w.id == id))
+        .map(|w| w.title.as_str())
+        .unwrap_or("(none)");
+    status_cache.update(crate::status::StatusState {
+        cols: comp.cols,
+        clock_ready: comp.clock_ready,
+        clock_seconds: comp.clock_seconds,
+        focused_title,
+        window_count: comp.windows.len(),
+    });
+    let bytes = status_cache.cells();
     for cx in 0..comp.cols {
-        let cp = if (cx as usize) < bytes.len() {
-            bytes[cx as usize] as u32
-        } else {
-            b' ' as u32
-        };
+        let cp = bytes[cx as usize] as u32;
         let cell = pack_cell(cp, 7, 0, 0);
         let idx = cx as usize;
-        comp.cell_grid[idx] = cell;
+        if comp.cell_grid[idx] != cell {
+            comp.cell_grid[idx] = cell;
+            comp.render_dirty.push((cx, 0));
+        }
     }
 }
 
