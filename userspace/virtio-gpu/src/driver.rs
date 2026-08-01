@@ -37,7 +37,11 @@ const GPU_UNREF_RESOURCE: u32 = 0x706;
 const GPU_POLL_EVENT: u32 = 0x707;
 const GPU_RESIZE: u32 = 0x708;
 const GPU_GRANT_TO_CLIENT: u32 = 0x709;
+const GPU_TRANSFER_FLUSH_BATCH: u32 = 0x70A;
 const GPU_PROTOCOL_VERSION: usize = 1;
+const GPU_CAP_DAMAGE_BATCH: usize = 1 << 0;
+const GPU_BATCH_LAYOUT_VERSION: usize = 1;
+const GPU_BATCH_MAX_RECTS: usize = 12;
 
 const GRANT_TARGET_VA: usize = 0x5600_0000;
 
@@ -81,6 +85,9 @@ pub struct GpuDriver {
     pub fb_virt: usize,
     pub fb_pages: usize,
     pub fb_pitch: u64,
+    pub fb_resource_id: u32,
+    pub fb_width: u32,
+    pub fb_height: u32,
 }
 
 /// Display mode queried via GET_DISPLAY_INFO.
@@ -203,6 +210,9 @@ impl GpuDriver {
             fb_virt: 0,
             fb_pages: 0,
             fb_pitch: 0,
+            fb_resource_id: 0,
+            fb_width: 0,
+            fb_height: 0,
         };
 
         driver.transport.set_driver_ok()?;
@@ -822,6 +832,14 @@ impl GpuDriver {
         Ok(())
     }
 
+    fn valid_fb_rect(&self, resource_id: u32, x: u32, y: u32, w: u32, h: u32) -> bool {
+        resource_id == self.fb_resource_id
+            && w != 0
+            && h != 0
+            && x.checked_add(w).is_some_and(|end| end <= self.fb_width)
+            && y.checked_add(h).is_some_and(|end| end <= self.fb_height)
+    }
+
     /// DETACH_BACKING — detach backing from a resource.
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<u32> {
         let cmd = protocol::ResourceDetachBacking {
@@ -1164,8 +1182,15 @@ impl GpuDriver {
                 GPU_PROBE => {
                     let rmsg = Message::new(
                         GPU_PROBE,
-                        [0, GPU_PROTOCOL_VERSION, self.space_token, 0, 0, 0],
-                        3,
+                        [
+                            0,
+                            GPU_PROTOCOL_VERSION,
+                            self.space_token,
+                            GPU_CAP_DAMAGE_BATCH,
+                            GPU_BATCH_LAYOUT_VERSION,
+                            0,
+                        ],
+                        5,
                     );
                     let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                 }
@@ -1194,8 +1219,25 @@ impl GpuDriver {
                     let height = msg.words[3] as u32;
                     let displayd_space_token = msg.words[4];
 
-                    let fb_bytes = (width as usize) * (height as usize) * 4;
-                    let fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+                    let fb_bytes = match (width as usize)
+                        .checked_mul(height as usize)
+                        .and_then(|pixels| pixels.checked_mul(4))
+                    {
+                        Some(bytes) => bytes,
+                        None => {
+                            let rmsg = Message::new(GPU_CREATE_2D, [3, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                            continue;
+                        }
+                    };
+                    let fb_pages = match fb_bytes.checked_add(PAGE_SIZE - 1) {
+                        Some(bytes) => bytes / PAGE_SIZE,
+                        None => {
+                            let rmsg = Message::new(GPU_CREATE_2D, [3, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                            continue;
+                        }
+                    };
 
                     if space_map_range(self.space_token, DRIVER_FB_VA, 0, 0x03, fb_pages, 0).is_err() {
                         let rmsg = Message::new(GPU_CREATE_2D, [1, 0, 0, 0, 0, 0], 1);
@@ -1226,6 +1268,13 @@ impl GpuDriver {
                         i += 1;
                     }
 
+                    if i != fb_pages {
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, fb_pages);
+                        let rmsg = Message::new(GPU_CREATE_2D, [4, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
                     let err = self.create_2d(resource_id, format, width, height)
                         .and_then(|_| self.attach_backing_sg(resource_id, &entries))
                         .and_then(|_| self.set_scanout(0, resource_id, width, height));
@@ -1237,19 +1286,36 @@ impl GpuDriver {
                         continue;
                     }
 
+                    let mut granted = true;
                     for page_idx in 0..fb_pages {
-                        let _ = space_grant(
+                        if space_grant(
                             self.space_token,
                             displayd_space_token,
                             DRIVER_FB_VA + page_idx * PAGE_SIZE,
                             GRANT_TARGET_VA + page_idx * PAGE_SIZE,
                             0x02,
-                        );
+                        )
+                        .is_err()
+                        {
+                            granted = false;
+                            break;
+                        }
+                    }
+                    if !granted {
+                        let _ = self.detach_backing(resource_id);
+                        let _ = self.unref_resource(resource_id);
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, fb_pages);
+                        let rmsg = Message::new(GPU_CREATE_2D, [5, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
                     }
 
                     self.fb_virt = DRIVER_FB_VA;
                     self.fb_pages = fb_pages;
                     self.fb_pitch = (width as u64) * 4;
+                    self.fb_resource_id = resource_id;
+                    self.fb_width = width;
+                    self.fb_height = height;
 
                     debug_print(&format!(
                         "virtio-gpu: CREATE_2D {}x{} {} pages → {} SG entries, granted to displayd",
@@ -1273,7 +1339,12 @@ impl GpuDriver {
                     let h = msg.words[4] as u32;
                     let pitch = self.fb_pitch;
                     let offset = (y as u64) * pitch + (x as u64) * 4;
-                    match self.transfer_flush_rect(resource_id, x, y, w, h, offset) {
+                    let result = if self.valid_fb_rect(resource_id, x, y, w, h) {
+                        self.transfer_flush_rect(resource_id, x, y, w, h, offset)
+                    } else {
+                        Err(Error::InvalidState)
+                    };
+                    match result {
                         Ok(_) => {
                             let rmsg = Message::new(GPU_TRANSFER_FLUSH, [0, 0, 0, 0, 0, 0], 1);
                             let _ = reply(reply_token, &rmsg, IpcFlags::empty());
@@ -1283,6 +1354,64 @@ impl GpuDriver {
                             let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                         }
                     }
+                }
+
+                GPU_TRANSFER_FLUSH_BATCH => {
+                    let resource_id = msg.words[1] as u32;
+                    let count = msg.words[2];
+                    let version = msg.words[3];
+                    let expected_len = count.checked_mul(16);
+                    let valid = version == GPU_BATCH_LAYOUT_VERSION
+                        && (1..=GPU_BATCH_MAX_RECTS).contains(&count)
+                        && expected_len == Some(payload.len())
+                        && msg.words[0] == payload.len()
+                        && resource_id == self.fb_resource_id;
+
+                    if !valid {
+                        let rmsg = Message::new(
+                            GPU_TRANSFER_FLUSH_BATCH,
+                            [1, 0, 0, 0, 0, 0],
+                            1,
+                        );
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    let mut completed = 0;
+                    let mut failed = false;
+                    while completed < count {
+                        let base = completed * 16;
+                        let x = u32::from_le_bytes([
+                            payload[base], payload[base + 1], payload[base + 2], payload[base + 3],
+                        ]);
+                        let y = u32::from_le_bytes([
+                            payload[base + 4], payload[base + 5], payload[base + 6], payload[base + 7],
+                        ]);
+                        let w = u32::from_le_bytes([
+                            payload[base + 8], payload[base + 9], payload[base + 10], payload[base + 11],
+                        ]);
+                        let h = u32::from_le_bytes([
+                            payload[base + 12], payload[base + 13], payload[base + 14], payload[base + 15],
+                        ]);
+                        if !self.valid_fb_rect(resource_id, x, y, w, h) {
+                            failed = true;
+                            break;
+                        }
+                        let offset = (y as u64) * self.fb_pitch + (x as u64) * 4;
+                        if self.transfer_flush_rect(resource_id, x, y, w, h, offset).is_err() {
+                            failed = true;
+                            break;
+                        }
+                        completed += 1;
+                    }
+
+                    let status = if failed { 1 } else { 0 };
+                    let rmsg = Message::new(
+                        GPU_TRANSFER_FLUSH_BATCH,
+                        [status, completed, completed, 0, 0, 0],
+                        3,
+                    );
+                    let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                 }
 
                 GPU_UNREF_RESOURCE => {
@@ -1295,6 +1424,9 @@ impl GpuDriver {
                                 self.fb_virt = 0;
                                 self.fb_pages = 0;
                             }
+                            self.fb_resource_id = 0;
+                            self.fb_width = 0;
+                            self.fb_height = 0;
                             let rmsg = Message::new(GPU_UNREF_RESOURCE, [0, 0, 0, 0, 0, 0], 1);
                             let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                         }
@@ -1320,6 +1452,32 @@ impl GpuDriver {
                     let new_h = msg.words[2] as u32;
                     let displayd_space_token = msg.words[3];
 
+                    if resource_id != self.fb_resource_id || new_w == 0 || new_h == 0 {
+                        let rmsg = Message::new(GPU_RESIZE, [4, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
+                    let new_bytes = match (new_w as usize)
+                        .checked_mul(new_h as usize)
+                        .and_then(|pixels| pixels.checked_mul(4))
+                    {
+                        Some(bytes) => bytes,
+                        None => {
+                            let rmsg = Message::new(GPU_RESIZE, [3, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                            continue;
+                        }
+                    };
+                    let new_pages = match new_bytes.checked_add(PAGE_SIZE - 1) {
+                        Some(bytes) => bytes / PAGE_SIZE,
+                        None => {
+                            let rmsg = Message::new(GPU_RESIZE, [3, 0, 0, 0, 0, 0], 1);
+                            let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                            continue;
+                        }
+                    };
+
                     let old_pages = self.fb_pages;
 
                     let _ = self.detach_backing(resource_id);
@@ -1327,9 +1485,12 @@ impl GpuDriver {
                     if old_pages > 0 {
                         let _ = space_unmap(self.space_token, self.fb_virt, old_pages);
                     }
-
-                    let new_bytes = (new_w as usize) * (new_h as usize) * 4;
-                    let new_pages = (new_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+                    self.fb_virt = 0;
+                    self.fb_pages = 0;
+                    self.fb_pitch = 0;
+                    self.fb_resource_id = 0;
+                    self.fb_width = 0;
+                    self.fb_height = 0;
 
                     if space_map_range(self.space_token, DRIVER_FB_VA, 0, 0x03, new_pages, 0).is_err() {
                         self.fb_virt = 0;
@@ -1362,6 +1523,13 @@ impl GpuDriver {
                         i += 1;
                     }
 
+                    if i != new_pages {
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, new_pages);
+                        let rmsg = Message::new(GPU_RESIZE, [4, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
+
                     let format = protocol::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
                     let err = self.create_2d(resource_id, format, new_w, new_h)
                         .and_then(|_| self.attach_backing_sg(resource_id, &entries))
@@ -1376,19 +1544,36 @@ impl GpuDriver {
                         continue;
                     }
 
+                    let mut granted = true;
                     for page_idx in 0..new_pages {
-                        let _ = space_grant(
+                        if space_grant(
                             self.space_token,
                             displayd_space_token,
                             DRIVER_FB_VA + page_idx * PAGE_SIZE,
                             GRANT_TARGET_VA + page_idx * PAGE_SIZE,
                             0x02,
-                        );
+                        )
+                        .is_err()
+                        {
+                            granted = false;
+                            break;
+                        }
+                    }
+                    if !granted {
+                        let _ = self.detach_backing(resource_id);
+                        let _ = self.unref_resource(resource_id);
+                        let _ = space_unmap(self.space_token, DRIVER_FB_VA, new_pages);
+                        let rmsg = Message::new(GPU_RESIZE, [5, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
                     }
 
                     self.fb_virt = DRIVER_FB_VA;
                     self.fb_pages = new_pages;
                     self.fb_pitch = (new_w as u64) * 4;
+                    self.fb_resource_id = resource_id;
+                    self.fb_width = new_w;
+                    self.fb_height = new_h;
 
                     debug_print(&format!(
                         "virtio-gpu: RESIZE {}x{} {} pages → {} SG entries",

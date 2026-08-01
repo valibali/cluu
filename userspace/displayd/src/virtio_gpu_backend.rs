@@ -56,15 +56,7 @@
 //! updates its output info. The main loop may call this periodically;
 //! it is a non-blocking best-effort poll.
 //!
-//! # Wire protocol (displayd → gpudev:main)
-//!
-//! The driver (T11) ships a self-test-only run loop without IPC dispatch.
-//! The labels below are the displayd-side contract; the driver-side
-//! dispatch is a future task. Until then, the probe times out and
-//! displayd falls back to linear-fb.
-
 use alloc::format;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use cluu_wire::display::{DamageList, OutputInfo, PixelFormat, Rect};
@@ -75,7 +67,7 @@ use displayd::surface::Surface;
 use libcluu::ipc::parse_message;
 use libcluu::registry;
 use libcluu::syscall::{ipc_call_timeout, ipc_recv_any, space_unmap};
-use libcluu::types::{IpcFlags, Message};
+use libcluu::types::Message;
 use libcluu::{debug_print, Error};
 
 // ── IPC labels (displayd ↔ gpudev:main) ───────────────────────────────
@@ -100,9 +92,14 @@ pub const GPU_UNREF_RESOURCE: u32 = 0x706;
 pub const GPU_POLL_EVENT: u32 = 0x707;
 pub const GPU_RESIZE: u32 = 0x708;
 pub const GPU_GRANT_TO_CLIENT: u32 = 0x709;
+/// Batched transfer+flush. Payload contains `count` little-endian rectangles.
+pub const GPU_TRANSFER_FLUSH_BATCH: u32 = 0x70A;
 
 /// Protocol version the backend expects from the driver.
 pub const GPU_PROTOCOL_VERSION: usize = 1;
+const GPU_CAP_DAMAGE_BATCH: usize = 1 << 0;
+const GPU_BATCH_LAYOUT_VERSION: usize = 1;
+const GPU_BATCH_MAX_RECTS: usize = 12;
 
 // ── Timeouts ──────────────────────────────────────────────────────────
 
@@ -142,6 +139,8 @@ pub struct VirtioGpuBackend {
     direct_scanout_active: bool,
     direct_scanout_token: u64,
     first_frame_seen: bool,
+    batch_enabled: bool,
+    batch_layout_version: usize,
 }
 
 impl VirtioGpuBackend {
@@ -170,8 +169,8 @@ impl VirtioGpuBackend {
             None => return Err("displayd: gpudev:main not registered"),
         };
 
-        let driver_space_token = match probe_driver(driver_endpoint) {
-            Some(tok) => tok,
+        let (driver_space_token, batch_layout_version) = match probe_driver(driver_endpoint) {
+            Some(info) => info,
             None => return Err("displayd: gpudev:main probe timeout"),
         };
 
@@ -222,9 +221,15 @@ impl VirtioGpuBackend {
             Err(_) => return Err("displayd: virtio-gpu CREATE_2D failed"),
         };
 
-        let fb_bytes = (width as usize) * (height as usize) * 4;
+        let fb_bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("displayd: framebuffer size overflow")?;
         let compose_len = fb_bytes / 4;
-        let fb_pages = (fb_bytes + 4095) / 4096;
+        let fb_pages = fb_bytes
+            .checked_add(4095)
+            .ok_or("displayd: framebuffer page count overflow")?
+            / 4096;
         let compose_ptr = grant_target_va as *mut u32;
         let own_space_token = libcluu::boot::space_token();
 
@@ -242,6 +247,8 @@ impl VirtioGpuBackend {
             direct_scanout_active: false,
             direct_scanout_token: 0,
             first_frame_seen: false,
+            batch_enabled: batch_layout_version == GPU_BATCH_LAYOUT_VERSION,
+            batch_layout_version,
         };
 
         let _ = debug_print(&format!(
@@ -288,10 +295,15 @@ impl VirtioGpuBackend {
             let _ = space_unmap(self.own_space_token, self.grant_target_va, self.fb_pages);
         }
 
+        let old_resource_id = self.resource_id;
+        self.resource_id = 0;
+        self.fb_pages = 0;
+        self.compose_len = 0;
+
         let req = Message::new(
             GPU_RESIZE,
             [
-                self.resource_id as usize,
+                old_resource_id as usize,
                 new_w as usize,
                 new_h as usize,
                 self.own_space_token,
@@ -310,14 +322,32 @@ impl VirtioGpuBackend {
 
         if let Ok(bytes) = r {
             if let Some((msg, _)) = parse_message(&reply_buf[..bytes]) {
-                if msg.words[0] == 0 {
+                let expected_bytes = (new_w as usize)
+                    .checked_mul(new_h as usize)
+                    .and_then(|pixels| pixels.checked_mul(4));
+                let expected_pitch = new_w.checked_mul(4);
+                if msg.tag.label == GPU_RESIZE
+                    && msg.words[0] == 0
+                    && msg.words[1] == self.grant_target_va
+                    && expected_bytes == Some(msg.words[2])
+                    && expected_pitch == Some(msg.words[3] as u32)
+                    && msg.words[4] == new_w as usize
+                    && msg.words[5] == new_h as usize
+                {
                     let new_bytes = msg.words[2];
                     let new_pitch = msg.words[3] as u32;
+                    let new_pages = new_bytes
+                        .checked_add(4095)
+                        .map(|bytes| bytes / 4096);
+                    let Some(new_pages) = new_pages else {
+                        return None;
+                    };
                     self.info.width = new_w;
                     self.info.height = new_h;
                     self.info.pitch = new_pitch;
                     self.compose_len = new_bytes / 4;
-                    self.fb_pages = (new_bytes + 4095) / 4096;
+                    self.fb_pages = new_pages;
+                    self.resource_id = old_resource_id;
                     let _ = debug_print(&format!(
                         "displayd: virtio-gpu resized to {}x{} pitch={}",
                         new_w, new_h, new_pitch
@@ -396,7 +426,7 @@ impl VirtioGpuBackend {
     /// (no downstream IPC), so this cannot form a deadlock cycle. The
     /// result is discarded — a failed flush is non-fatal; the next flush
     /// retries.
-    fn transfer_flush_rect(&self, rect: Rect) {
+    fn transfer_flush_rect(&self, rect: Rect) -> bool {
         let req = Message::new(
             GPU_TRANSFER_FLUSH,
             [
@@ -410,12 +440,74 @@ impl VirtioGpuBackend {
             5,
         );
         let mut reply_buf = [0u8; 128];
-        let _ = ipc_call_timeout(
+        let Ok(bytes) = ipc_call_timeout(
             self.driver_endpoint,
             req.as_bytes(),
             &mut reply_buf,
             CMD_TIMEOUT_MS,
+        ) else {
+            return false;
+        };
+        let Some((msg, _)) = parse_message(&reply_buf[..bytes]) else {
+            return false;
+        };
+        msg.tag.label == GPU_TRANSFER_FLUSH && msg.words[0] == 0
+    }
+
+    fn transfer_flush_batch(&self, rects: &[Rect]) -> Option<usize> {
+        if rects.is_empty() || rects.len() > GPU_BATCH_MAX_RECTS {
+            return None;
+        }
+
+        let payload_len = rects.len().checked_mul(16)?;
+        let mut payload = Vec::with_capacity(payload_len);
+        for rect in rects {
+            payload.extend_from_slice(&rect.x.to_le_bytes());
+            payload.extend_from_slice(&rect.y.to_le_bytes());
+            payload.extend_from_slice(&rect.w.to_le_bytes());
+            payload.extend_from_slice(&rect.h.to_le_bytes());
+        }
+
+        let req = Message::new(
+            GPU_TRANSFER_FLUSH_BATCH,
+            [
+                payload.len(),
+                self.resource_id as usize,
+                rects.len(),
+                self.batch_layout_version,
+                0,
+                0,
+            ],
+            5,
         );
+        let mut reply_buf = [0u8; 256];
+        let bytes = ipc_call_timeout(
+            self.driver_endpoint,
+            &{
+                let mut request = Vec::with_capacity(req.as_bytes().len() + payload.len());
+                request.extend_from_slice(req.as_bytes());
+                request.extend_from_slice(&payload);
+                request
+            },
+            &mut reply_buf,
+            CMD_TIMEOUT_MS,
+        )
+        .ok()?;
+        let (msg, _) = parse_message(&reply_buf[..bytes])?;
+        let completed = msg.words[2];
+        if msg.tag.label != GPU_TRANSFER_FLUSH_BATCH {
+            return None;
+        }
+        if msg.words[0] == 0 && msg.words[1] == rects.len() && completed == rects.len() {
+            Some(completed)
+        } else if msg.words[0] != 0
+            && msg.words[1] == completed
+            && completed < rects.len()
+        {
+            Some(msg.words[1])
+        } else {
+            None
+        }
     }
 }
 
@@ -435,9 +527,36 @@ impl Backend for VirtioGpuBackend {
             w: self.info.width,
             h: self.info.height,
         };
+        let mut rects = Vec::new();
         for r in damage.rects() {
             if let Some(clipped) = r.clip_to(bounds) {
-                self.transfer_flush_rect(clipped);
+                rects.push(clipped);
+            }
+        }
+
+        if rects.is_empty() {
+            return;
+        }
+        if !self.batch_enabled {
+            for rect in rects {
+                let _ = self.transfer_flush_rect(rect);
+            }
+            return;
+        }
+
+        match self.transfer_flush_batch(&rects) {
+            Some(completed) if completed < rects.len() => {
+                self.batch_enabled = false;
+                for rect in &rects[completed..] {
+                    let _ = self.transfer_flush_rect(*rect);
+                }
+            }
+            Some(_) => {}
+            None => {
+                self.batch_enabled = false;
+                for rect in rects {
+                    let _ = self.transfer_flush_rect(rect);
+                }
             }
         }
     }
@@ -512,7 +631,7 @@ impl Drop for VirtioGpuBackend {
 
 /// Probe the driver with a short-timeout handshake.
 /// Returns true if the driver replied with a valid protocol version.
-fn probe_driver(driver_endpoint: usize) -> Option<usize> {
+fn probe_driver(driver_endpoint: usize) -> Option<(usize, usize)> {
     let req = Message::new(GPU_PROBE, [0, 0, 0, 0, 0, 0], 0);
     let mut reply_buf = [0u8; 128];
     let r = ipc_call_timeout(
@@ -525,7 +644,12 @@ fn probe_driver(driver_endpoint: usize) -> Option<usize> {
         Ok(bytes) => {
             if let Some((msg, _)) = parse_message(&reply_buf[..bytes]) {
                 if msg.words[0] == 0 && msg.words[1] >= GPU_PROTOCOL_VERSION {
-                    return Some(msg.words[2]);
+                    let batch_layout_version = if msg.words[3] & GPU_CAP_DAMAGE_BATCH != 0 {
+                        msg.words[4]
+                    } else {
+                        0
+                    };
+                    return Some((msg.words[2], batch_layout_version));
                 }
             }
             None
