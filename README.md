@@ -16,7 +16,7 @@ This repo is at a "Show & Tell" stage. The kernel is solid. Userspace is thin bu
 - `/bin/mkdir`, `/bin/rm` (with `-r`), `/bin/cp`, `/bin/mv` — each shipping as its own container with a declared capability profile.
 - Job control: Ctrl-C, fg/bg, jobs listing.
 - Two virtual terminals (Alt-F1 / Alt-F2), TTY scrollback.
-- **Framebuffer console** — text is rendered to the GPU framebuffer (not legacy VGA). Userspace programs can `framebuffer_acquire()` to grab the FB and write raw pixels (`fbprobe` demonstrates this). There's no compositor / windowing system yet; that's the v2 GUI work.
+- **Framebuffer console and compositor** — text and application surfaces are rendered through displayd's userspace GPU path (not legacy VGA). Userspace programs can use compositor `PixelRegion` grants for windowed or fullscreen surfaces; direct display ownership for arbitrary clients remains future lease work.
 - A live `/proc` filesystem (per-PID `stat`/`status`/`cmdline`).
 - `top` reads `/proc` and gives you a live process list.
 - Graceful shutdown (Ctrl-Alt-Del → reboot/poweroff).

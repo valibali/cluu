@@ -17,7 +17,7 @@ audiod owns:
 
 - **Per-stream SHM rings** — one `FrameRing` per client, allocated by
   audiod via `FrameAllocate` + `space_map_auto`, granted to the client.
-  The client writes stereo S16 frames; audiod reads them. Frame-based,
+  The client writes negotiated mono or stereo S16 frames; audiod reads them. Frame-based,
   not period-based — clients push arbitrary chunk sizes.
 - **Resampling** — `LinearResampler` converts each stream's input rate
   to the negotiated output rate. Fixed-point i64 arithmetic (no float
@@ -121,7 +121,7 @@ that sounds like robotic distortion. See
 |----------|-------|-------|
 | `OUTPUT_RATE_PREFERRED` | 44100 | music-native |
 | `OUTPUT_RATE_FALLBACK` | 48000 | if 44100 unsupported |
-| `OUTPUT_CHANNELS` | 2 | stereo only |
+| `OUTPUT_CHANNELS` | 2 | mixed output is stereo; inputs may be mono or stereo |
 | `PERIOD_BYTES` | 2048 | requested from virtio-snd (may be clamped) |
 | `RING_SLOTS` | 8 | scratch pages granted to virtio-snd |
 | `RING_CAPACITY_FRAMES` | 6144 | SHM ring capacity (~128 ms at 48k) |

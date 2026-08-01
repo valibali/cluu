@@ -384,7 +384,8 @@ Session-scoped via `PARAM_AUDIOD_EP`.
 Pinned SDL2 2.30.0 with custom CLUU video, events, and audio backends.
 SDL2 apps (DOOM, cluuamp) go through displayd + audiod via the CLUU backends,
 not direct hardware access. `SDL_config_cluu.h` undefines all GL/EGL/Vulkan —
-CLUU has no GPU; software rendering is the only path.
+CLUU has no 3D GPU API; software rendering is the only 3D path, while
+displayd owns 2D scanout and virtio-gpu transfer/flush.
 
 - **Video backend**: `SDL_HINT_VIDEODRIVER=cluu` — displayd surface protocol.
 - **Audio backend**: `SDL_HINT_AUDIODRIVER=cluu` — audiod stream + virtio-snd.
