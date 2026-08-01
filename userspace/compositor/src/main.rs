@@ -151,6 +151,9 @@ pub extern "C" fn main() -> i32 {
         Ok(ep) => ep,
         Err(_) => { let _ = debug_print("compositor: input endpoint failed"); return -1; }
     };
+    let _ = debug_print(&alloc::format!(
+        "compositor: input endpoint={}", comp.input_endpoint_global
+    ));
     comp.control_endpoint = match syscall::endpoint_create(ipc_cap) {
         Ok(ep) => ep,
         Err(_) => { let _ = debug_print("compositor: control endpoint failed"); return -1; }
@@ -211,6 +214,8 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
     let mut time_ep: usize = 0;
     let mut requested_timeserver = false;
     let mut reap_counter: u64 = 0;
+    let mut status_cache = status::StatusCache::new();
+    let mut mouse_batch = window_mgr::MouseBatch::new();
 
     // Subscribe to timeserver:main up-front so we get a Grant when it registers.
     if registry::request_subscription("timeserver", "main").is_ok() {
@@ -238,14 +243,8 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, timeout_ms) {
             Ok((idx, len, sender_tid)) => {
                 if let Some((msg, payload)) = libcluu::ipc::parse_message(&buf[..len]) {
-                    // TIME_TICK from timeserver push-mode subscription.
-                    // Arrives on input_endpoint_global (idx=1). Update the
-                    // cached clock and fire tick_clock (which marks row 0
-                    // dirty in cell_dirty), then FALL THROUGH so the
-                    // post-recv block runs recompute_dirty + render_status_row
-                    // to actually rewrite the clock string into cell_grid.
-                    // Without falling through, cells stay dirty but the grid
-                    // is never updated → status bar shows stale "--:--:--".
+                    // TIME_TICK must fall through to status composition or the
+                    // visible clock remains stale until another message arrives.
                     if msg.tag.label == libcluu::time::TIME_TICK_LABEL && idx != REGISTRY_TOKEN_IDX {
                         let now_ms_from_tick = msg.words[1] as u64;
                         comp.last_clock_now_ms = now_ms_from_tick;
@@ -336,6 +335,9 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                                 flags,
                             ) {
                                 Ok((id, token, gw, gh)) => {
+                                    let _ = debug_print(&alloc::format!(
+                                        "compositor: window id={} input endpoint={}", id, input_endpoint
+                                    ));
                                     let reply_msg = Message::new(
                                         COMP_WIN_REGISTER_REPLY,
                                         [id as usize, token as usize, gw as usize, gh as usize, 0, 0],
@@ -415,33 +417,52 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                         protocol::Incoming::KbdEvent { ascii, modifiers, scancode, extended, kind } => {
                             if !comp.active {
                                 comp.forward_input_event(ascii, modifiers, scancode, extended, kind);
-                            } else if scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
+                            } else if kind == 0 && scancode == hotkeys::SCAN_ESC && comp.focused_is_modal() {
                                 comp.forward_close_request();
-                            } else if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
-                                match hk {
-                                    hotkeys::Hotkey::FocusNext  => comp.focus_next(),
-                                    hotkeys::Hotkey::FocusPrev  => comp.focus_prev(),
-                                    hotkeys::Hotkey::MoveLeft   => comp.move_focused(-1, 0),
-                                    hotkeys::Hotkey::MoveRight  => comp.move_focused( 1, 0),
-                                    hotkeys::Hotkey::MoveUp     => comp.move_focused( 0,-1),
-                                    hotkeys::Hotkey::MoveDown   => comp.move_focused( 0, 1),
-                                    hotkeys::Hotkey::ResizeLeft  => comp.resize_focused(-1, 0),
-                                    hotkeys::Hotkey::ResizeRight => comp.resize_focused( 1, 0),
-                                    hotkeys::Hotkey::ResizeUp    => comp.resize_focused( 0,-1),
-                                    hotkeys::Hotkey::ResizeDown  => comp.resize_focused( 0, 1),
-                                    hotkeys::Hotkey::CloseRequest => {
-                                        comp.forward_close_request();
+                            } else if kind == 0 {
+                                if let Some(hk) = hotkeys::match_hotkey(modifiers, scancode, extended) {
+                                    match hk {
+                                        hotkeys::Hotkey::FocusNext  => comp.focus_next(),
+                                        hotkeys::Hotkey::FocusPrev  => comp.focus_prev(),
+                                        hotkeys::Hotkey::MoveLeft   => comp.move_focused(-1, 0),
+                                        hotkeys::Hotkey::MoveRight  => comp.move_focused( 1, 0),
+                                        hotkeys::Hotkey::MoveUp     => comp.move_focused( 0,-1),
+                                        hotkeys::Hotkey::MoveDown   => comp.move_focused( 0, 1),
+                                        hotkeys::Hotkey::ResizeLeft  => comp.resize_focused(-1, 0),
+                                        hotkeys::Hotkey::ResizeRight => comp.resize_focused( 1, 0),
+                                        hotkeys::Hotkey::ResizeUp    => comp.resize_focused( 0,-1),
+                                        hotkeys::Hotkey::ResizeDown  => comp.resize_focused( 0, 1),
+                                        hotkeys::Hotkey::CloseRequest => {
+                                            comp.forward_close_request();
+                                        }
+                                        hotkeys::Hotkey::SpawnCluuterm => {
+                                            comp.spawn_cluuterm();
+                                        }
                                     }
-                                    hotkeys::Hotkey::SpawnCluuterm => {
-                                        comp.spawn_cluuterm();
-                                    }
+                                } else {
+                                    comp.forward_input_event(ascii, modifiers, scancode, extended, kind);
                                 }
                             } else {
                                 comp.forward_input_event(ascii, modifiers, scancode, extended, kind);
                             }
                         }
                         protocol::Incoming::MouseEvent { dx, dy, buttons } => {
-                            comp.handle_mouse_event(dx, dy, buttons);
+                            let previous_buttons = match mouse_batch.buttons() {
+                                Some(buttons) => buttons,
+                                None => comp.pointer_buttons,
+                            };
+                            if buttons != previous_buttons {
+                                if let Some(event) = mouse_batch.take() {
+                                    comp.handle_mouse_event(event.dx, event.dy, event.buttons);
+                                }
+                                comp.handle_mouse_event(dx, dy, buttons);
+                            } else {
+                                mouse_batch.push(
+                                    window_mgr::MouseMotion { dx, dy, buttons },
+                                    comp.pointer_position(),
+                                );
+                                comp.schedule_frame(now_ms);
+                            }
                         }
                         protocol::Incoming::VtActivate => {
                             // displayd owns the VT — no-op.
@@ -484,8 +505,14 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
             }
         }
 
+        if comp.frame_boundary_reached() {
+            if let Some(event) = mouse_batch.take() {
+                comp.handle_mouse_event(event.dx, event.dy, event.buttons);
+            }
+        }
+
         compose::recompute_dirty(&mut comp);
-        compose::render_status_row(&mut comp);
+        compose::render_status_row(&mut comp, &mut status_cache);
 
         // Always re-apply the mouse cursor after recompute_dirty.  Animated
         // clients (e.g. cluuamp) continuously WIN_DAMAGE the cell under the
@@ -501,13 +528,18 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
         // Skip cursor render when the focused window is fullscreen —
         // fullscreen pixel surfaces (DOOM) handle their own cursor.
         if !comp.focused_is_fullscreen() {
+            let (cx, cy) = comp.cursor_cell();
             comp.render_cursor();
+            let idx = cy as usize * comp.cols as usize + cx as usize;
+            if comp.prev_cell_grid.get(idx) != comp.cell_grid.get(idx) {
+                comp.render_dirty.push((cx, cy));
+            }
         }
         comp.cursor_needs_render = false;
         // Arm the frame deadline if the clock tick or status render dirtied
         // the cell grid.  (The message-receive arm above only covers
         // protocol-message-driven dirt; clock-tick dirt arrives here.)
-        if comp.prev_cell_grid != comp.cell_grid {
+        if !comp.render_dirty.is_empty() {
             comp.schedule_frame(now_ms);
         }
 

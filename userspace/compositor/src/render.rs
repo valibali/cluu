@@ -9,6 +9,19 @@ use libcluu::ipc;
 use libcluu::types::Message;
 
 impl Compositor {
+    pub fn frame_boundary_reached(&self) -> bool {
+        if self.deadlines.next_frame_ms == u64::MAX {
+            return false;
+        }
+
+        let ticks_per_ms = self.tsc_freq_hz / 1000;
+        if ticks_per_ms == 0 {
+            return true;
+        }
+
+        read_tsc().saturating_sub(self.last_flush_tsc) / ticks_per_ms >= MIN_FRAME_MS
+    }
+
     /// Blit pixel regions from SHM into the backbuffer.
     ///
     /// For each window that has a pixel region, copy the ARGB32 pixel data
@@ -18,7 +31,7 @@ impl Compositor {
     /// Called from `tick_frame` before `flush_grid_to_backbuf` so that
     /// pixel content overwrites the BG_CELL placeholder that the compose
     /// pass wrote for pixel-region cells.
-    pub fn flush_pixel_regions_to_backbuf(&mut self) {
+    pub fn flush_pixel_regions_to_backbuf(&mut self, pixel_content_dirty: bool) {
         #[cfg(feature = "bench")]
         let _bench_start = read_tsc();
         #[cfg(feature = "bench")]
@@ -31,6 +44,14 @@ impl Compositor {
 
         for win in self.windows.iter() {
             let Some(ref pr) = win.pixel_region else { continue; };
+
+            let x0 = win.x.saturating_add(pr.cell_x);
+            let y0 = win.y.saturating_add(pr.cell_y);
+            let x1 = x0.saturating_add(pr.cell_w);
+            let y1 = y0.saturating_add(pr.cell_h);
+            if !pixel_content_dirty && !self.render_dirty.intersects_rect(x0, y0, x1, y1) {
+                continue;
+            }
 
             let base_cell_x = win.x.saturating_add(pr.cell_x) as usize;
             let base_cell_y = win.y.saturating_add(pr.cell_y) as usize;
@@ -114,18 +135,11 @@ impl Compositor {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
-        // No windows = nothing to composite. Skip the initial zero flush
-        // that would send 2M black pixels to displayd before any content
-        // exists. (Bug A: stale-pixel noise at first interior row.)
-        if self.windows.is_empty() {
+        if self.render_dirty.is_empty() && !self.pixel_dirty {
             self.deadlines.next_frame_ms = u64::MAX;
             return false;
         }
-        let cells_changed = !self.cell_dirty.is_empty() || self.prev_cell_grid != self.cell_grid;
-        if !cells_changed && !self.pixel_dirty {
-            self.deadlines.next_frame_ms = u64::MAX;
-            return false;
-        }
+        let cells_changed = !self.render_dirty.is_empty();
         // Throttle using raw TSC (monotonic, cheap rdtsc) instead of
         // last_clock_now_ms which only advances on 1 Hz TIME_TICK.
         let now_tsc = read_tsc();
@@ -139,12 +153,13 @@ impl Compositor {
             return false;
         }
         let was_pixel_only = self.pixel_dirty && !cells_changed;
+        let pixel_content_dirty = self.pixel_dirty;
         self.pixel_dirty = false;
 
         #[cfg(feature = "bench")]
         let _bench_frame_start = read_tsc();
 
-        self.flush_pixel_regions_to_backbuf();
+        self.flush_pixel_regions_to_backbuf(pixel_content_dirty);
         if !was_pixel_only {
             self.flush_grid_to_backbuf();
         }
@@ -191,8 +206,6 @@ impl Compositor {
         true
     }
 
-    /// Update `clock_seconds` and dirty row 0 so the status bar re-blits.
-    ///
     /// Push-mode: this is called from the TIME_TICK recv arm whenever
     /// timeserver delivers a tick. No internal rate-limit guard — each
     /// invocation corresponds to one logical second.
@@ -201,9 +214,6 @@ impl Compositor {
             self.clock_ready = true;
         }
         self.clock_seconds = now_secs;
-        for cx in 0..self.cols {
-            self.cell_dirty.push((cx, 0));
-        }
     }
 
     /// Set the frame deadline to now+MIN_FRAME_MS (next loop iteration flushes)
@@ -253,116 +263,111 @@ impl Compositor {
         #[cfg(feature = "bench")]
         let mut bench_trace_count: usize = 0;
 
-        let cols = self.cols as usize;
-        let rows = self.rows as usize;
         let pitch_words = self.width_px as usize; // contiguous backbuf
         let glyph_w = libcluu::atlas::GLYPH_W;
         let glyph_h = libcluu::atlas::GLYPH_H;
 
-        for cy in 0..rows {
-            for cx in 0..cols {
-                let idx = cy * cols + cx;
-                let cell = self.cell_grid[idx];
+        while let Some((cx, cy)) = self.render_dirty.pop() {
+            let idx = cy as usize * self.cols as usize + cx as usize;
+            let cell = self.cell_grid[idx];
 
-                // BENCH: log render/skip for the first interior row of the
-                // newest window — limits to 20 cells to avoid serial flood.
-                #[cfg(feature = "bench")]
-                if let Some((trace_y, trace_x0, trace_x1)) = bench_trace_row {
-                    if cy == trace_y as usize
-                        && cx >= trace_x0 as usize
-                        && cx < trace_x1 as usize
-                        && bench_trace_count < 20
-                    {
-                        bench_trace_count += 1;
-                        let prev = self.prev_cell_grid[idx];
-                        let _ = libcluu::debug_print(&alloc::format!(
-                            "BENCH_COMP_GRID_CELL: cx={} cy={} prev={:#018x} cell={:#018x} {}",
-                            cx, cy, prev, cell,
-                            if prev == cell { "SKIP" } else { "RENDER" },
-                        ));
-                    }
+            // BENCH: log render/skip for the first interior row of the
+            // newest window — limits to 20 cells to avoid serial flood.
+            #[cfg(feature = "bench")]
+            if let Some((trace_y, trace_x0, trace_x1)) = bench_trace_row {
+                if cy == trace_y && cx >= trace_x0 && cx < trace_x1 && bench_trace_count < 20 {
+                    bench_trace_count += 1;
+                    let prev = self.prev_cell_grid[idx];
+                    let _ = libcluu::debug_print(&alloc::format!(
+                        "BENCH_COMP_GRID_CELL: cx={} cy={} prev={:#018x} cell={:#018x} {}",
+                        cx,
+                        cy,
+                        prev,
+                        cell,
+                        if prev == cell { "SKIP" } else { "RENDER" },
+                    ));
                 }
+            }
 
-                if self.prev_cell_grid[idx] == cell {
-                    continue;
-                }
-                self.prev_cell_grid[idx] = cell;
+            if self.prev_cell_grid[idx] == cell {
+                continue;
+            }
+            self.prev_cell_grid[idx] = cell;
 
-                #[cfg(feature = "bench")]
-                {
-                    bench_cells += 1;
-                }
+            #[cfg(feature = "bench")]
+            {
+                bench_cells += 1;
+            }
 
-                let cell_pr = PixelRect {
-                    x: (cx as u32) * glyph_w as u32,
-                    y: (cy as u32) * glyph_h as u32,
-                    w: glyph_w as u32,
-                    h: glyph_h as u32,
-                };
-                self.dirty_rect = Some(match self.dirty_rect {
-                    Some(prev) => prev.extend(cell_pr),
-                    None => cell_pr,
-                });
+            let cell_pr = PixelRect {
+                x: (cx as u32) * glyph_w as u32,
+                y: (cy as u32) * glyph_h as u32,
+                w: glyph_w as u32,
+                h: glyph_h as u32,
+            };
+            self.dirty_rect = Some(match self.dirty_rect {
+                Some(prev) => prev.extend(cell_pr),
+                None => cell_pr,
+            });
 
-                if cell == crate::compose::PIXEL_CELL {
-                    continue;
-                }
+            if cell == crate::compose::PIXEL_CELL {
+                continue;
+            }
 
-                let cp = (cell & 0x1F_FFFF) as u32;
-                let fg_idx = ((cell >> 21) & 0xFF) as u8;
-                let bg_idx = ((cell >> 29) & 0xFF) as u8;
-                let attrs = ((cell >> 37) & 0x0F) as u8;
-                let bold = (attrs & 0b0001) != 0;
-                let underline = (attrs & 0b0010) != 0;
-                let reverse = (attrs & 0b0100) != 0;
-                let italic = (attrs & 0b1000) != 0;
-                let mut fg = self.palette[fg_idx as usize];
-                let mut bg = self.palette[bg_idx as usize];
-                if reverse {
-                    core::mem::swap(&mut fg, &mut bg);
-                }
+            let cp = (cell & 0x1F_FFFF) as u32;
+            let fg_idx = ((cell >> 21) & 0xFF) as u8;
+            let bg_idx = ((cell >> 29) & 0xFF) as u8;
+            let attrs = ((cell >> 37) & 0x0F) as u8;
+            let bold = (attrs & 0b0001) != 0;
+            let underline = (attrs & 0b0010) != 0;
+            let reverse = (attrs & 0b0100) != 0;
+            let italic = (attrs & 0b1000) != 0;
+            let mut fg = self.palette[fg_idx as usize];
+            let mut bg = self.palette[bg_idx as usize];
+            if reverse {
+                core::mem::swap(&mut fg, &mut bg);
+            }
 
-                let px = cx * glyph_w;
-                let py = cy * glyph_h;
+            let px = cx as usize * glyph_w;
+            let py = cy as usize * glyph_h;
 
-                if cp == 0x2588 {
-                    for row in 0..glyph_h {
-                        let off = (py + row) * pitch_words + px;
-                        unsafe {
-                            for x in 0..glyph_w {
-                                *self.fb_ptr.add(off + x) = fg;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                let glyph = match libcluu::font::glyph_alpha_for_codepoint(cp, bold, italic) {
-                    Some(g) => g,
-                    None => {
-                        let ch = unicode_to_cp437(cp);
-                        font_glyph_alpha(ch, bold, italic)
-                    }
-                };
-
-                let mut row_buffer = [0u32; 8];
+            if cp == 0x2588 {
                 for row in 0..glyph_h {
-                    let alpha_row = &glyph[row * glyph_w..(row + 1) * glyph_w];
-                    libcluu::simd::blend_alpha_row(alpha_row, fg, bg, &mut row_buffer);
                     let off = (py + row) * pitch_words + px;
                     unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            row_buffer.as_ptr(),
-                            self.fb_ptr.add(off),
-                            glyph_w,
-                        );
+                        for x in 0..glyph_w {
+                            *self.fb_ptr.add(off + x) = fg;
+                        }
                     }
                 }
-                if underline {
-                    let off = (py + glyph_h - 1) * pitch_words + px;
-                    for x in 0..glyph_w {
-                        unsafe { *self.fb_ptr.add(off + x) = fg; }
-                    }
+                continue;
+            }
+
+            let glyph = match libcluu::font::glyph_alpha_for_codepoint(cp, bold, italic) {
+                Some(g) => g,
+                None => {
+                    let ch = unicode_to_cp437(cp);
+                    font_glyph_alpha(ch, bold, italic)
+                }
+            };
+
+            let mut row_buffer = [0u32; 8];
+            for row in 0..glyph_h {
+                let alpha_row = &glyph[row * glyph_w..(row + 1) * glyph_w];
+                libcluu::simd::blend_alpha_row(alpha_row, fg, bg, &mut row_buffer);
+                let off = (py + row) * pitch_words + px;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        row_buffer.as_ptr(),
+                        self.fb_ptr.add(off),
+                        glyph_w,
+                    );
+                }
+            }
+            if underline {
+                let off = (py + glyph_h - 1) * pitch_words + px;
+                for x in 0..glyph_w {
+                    unsafe { *self.fb_ptr.add(off + x) = fg; }
                 }
             }
         }

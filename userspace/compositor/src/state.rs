@@ -43,6 +43,72 @@ pub struct PixelRect {
     pub h: u32,
 }
 
+/// Bounded, deduplicated cell work queue.
+pub struct DirtyCells {
+    cols: u16,
+    rows: u16,
+    cells: Vec<(u16, u16)>,
+    marked: Vec<u64>,
+}
+
+impl DirtyCells {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        let cell_count = cols as usize * rows as usize;
+        let word_count = cell_count.div_ceil(u64::BITS as usize);
+        Self {
+            cols,
+            rows,
+            cells: Vec::new(),
+            marked: alloc::vec![0; word_count],
+        }
+    }
+
+    pub fn push(&mut self, cell: (u16, u16)) {
+        let (cx, cy) = cell;
+        if cx >= self.cols || cy >= self.rows {
+            return;
+        }
+        let index = cy as usize * self.cols as usize + cx as usize;
+        let word_index = index / u64::BITS as usize;
+        let bit = 1u64 << (index % u64::BITS as usize);
+        if self.marked[word_index] & bit != 0 {
+            return;
+        }
+        self.marked[word_index] |= bit;
+        self.cells.push(cell);
+    }
+
+    pub fn pop(&mut self) -> Option<(u16, u16)> {
+        let cell = self.cells.pop()?;
+        let index = cell.1 as usize * self.cols as usize + cell.0 as usize;
+        let word_index = index / u64::BITS as usize;
+        self.marked[word_index] &= !(1u64 << (index % u64::BITS as usize));
+        Some(cell)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn intersects_rect(&self, x0: u16, y0: u16, x1: u16, y1: u16) -> bool {
+        self.cells
+            .iter()
+            .any(|&(cx, cy)| cx >= x0 && cx < x1 && cy >= y0 && cy < y1)
+    }
+
+    pub fn reset(&mut self, cols: u16, rows: u16) {
+        *self = Self::new(cols, rows);
+    }
+
+    pub fn mark_all(&mut self) {
+        for cy in 0..self.rows {
+            for cx in 0..self.cols {
+                self.push((cx, cy));
+            }
+        }
+    }
+}
+
 impl PixelRect {
     /// Return the smallest rect that contains both `self` and `other`.
     pub fn extend(self, other: Self) -> Self {
@@ -268,7 +334,9 @@ pub struct Compositor {
     /// Shadow copy of the last-flushed grid; used to skip unchanged cells.
     pub prev_cell_grid: Vec<u64>,
     /// Cells marked dirty since the last compose pass; drained by `recompute_dirty`.
-    pub cell_dirty: Vec<(u16, u16)>,
+    pub cell_dirty: DirtyCells,
+    /// Recomputed cells awaiting glyph blitting; drained by `flush_grid_to_backbuf`.
+    pub render_dirty: DirtyCells,
 
     pub palette: [u32; 256],
 
@@ -469,7 +537,8 @@ impl Compositor {
             rows,
             cell_grid: alloc::vec![0u64; cell_count],
             prev_cell_grid: alloc::vec![u64::MAX; cell_count],
-            cell_dirty: Vec::new(),
+            cell_dirty: DirtyCells::new(cols, rows),
+            render_dirty: DirtyCells::new(cols, rows),
             palette: xterm_256_palette(),
             dirty_rect: None,
             windows: Vec::new(),
@@ -522,22 +591,6 @@ impl Compositor {
         let new_cell_count = new_cols as usize * new_rows as usize;
         let new_pixel_count = (new_w * new_h) as usize;
 
-        self.width_px = new_w;
-        self.height_px = new_h;
-        self.cols = new_cols;
-        self.rows = new_rows;
-        self.cell_grid = alloc::vec![0u64; new_cell_count];
-        self.prev_cell_grid = alloc::vec![u64::MAX; new_cell_count];
-        self.dirty_rect = None;
-        self.cell_dirty.clear();
-
-        for cx in 0..self.cols {
-            self.cell_dirty.push((cx, 0));
-        }
-        for cy in 0..self.rows {
-            self.cell_dirty.push((0, cy));
-        }
-
         // Re-request direct-FB grant for the new dimensions.  The
         // SURFACE_CREATE message layout MUST match init(): [space_token,
         // grant_va, width, height, pitch, 0].  The old grant mapping is
@@ -557,25 +610,46 @@ impl Compositor {
             ],
             5,
         );
-        if ipc::call(self.displayd_ep, &mut create_msg, IpcFlags::empty()).is_ok() {
-            let new_token = create_msg.words[0] as u64;
-            if new_token != 0 {
-                self.surface_token = new_token;
-                let new_grant_va = create_msg.words[1];
-                if new_grant_va != 0 {
-                    self.fb_grant_va = new_grant_va;
-                    self.fb_ptr = new_grant_va as *mut u32;
-                    self.fb_backing = None;
-                }
-                let geo_msg = Message::new(
-                    DISPLAY_SET_GEOMETRY_LABEL,
-                    [0, new_token as usize, 0, 0, 0, 0],
-                    4,
-                );
-                let geo_payload = [0u8, 0u8, 0u8, 0u8, 1u8];
-                let _ = ipc::send_msg_with_payload(self.displayd_ep, &geo_msg, &geo_payload);
-            }
+        if ipc::call(self.displayd_ep, &mut create_msg, IpcFlags::empty()).is_err() {
+            return false;
         }
+        let new_token = create_msg.words[0] as u64;
+        if new_token == 0 {
+            return false;
+        }
+        let new_grant_va = create_msg.words[1];
+        let mut new_fb_backing = None;
+        let new_fb_ptr = if new_grant_va != 0 {
+            new_grant_va as *mut u32
+        } else {
+            let mut backing = alloc::vec![0u32; new_pixel_count];
+            let ptr = backing.as_mut_ptr();
+            new_fb_backing = Some(backing);
+            ptr
+        };
+
+        self.width_px = new_w;
+        self.height_px = new_h;
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.cell_grid = alloc::vec![0u64; new_cell_count];
+        self.prev_cell_grid = alloc::vec![u64::MAX; new_cell_count];
+        self.dirty_rect = None;
+        self.cell_dirty.reset(new_cols, new_rows);
+        self.render_dirty.reset(new_cols, new_rows);
+        self.cell_dirty.mark_all();
+        self.surface_token = new_token;
+        self.fb_grant_va = new_grant_va;
+        self.fb_ptr = new_fb_ptr;
+        self.fb_backing = new_fb_backing;
+
+        let geo_msg = Message::new(
+            DISPLAY_SET_GEOMETRY_LABEL,
+            [0, new_token as usize, 0, 0, 0, 0],
+            4,
+        );
+        let geo_payload = [0u8, 0u8, 0u8, 0u8, 1u8];
+        let _ = ipc::send_msg_with_payload(self.displayd_ep, &geo_msg, &geo_payload);
 
         self.schedule_frame(
             libcluu::syscall::clock_now(libcluu::boot::clock_token_handle())
@@ -615,4 +689,45 @@ pub fn xterm_256_palette() -> [u32; 256] {
         p[232 + i] = 0xFF00_0000 | (v << 16) | (v << 8) | v;
     }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirtyCells;
+
+    #[test]
+    fn dirty_cells_deduplicate_and_pop_only_marked_cells() {
+        // Given: a 3×2 grid with one cell marked repeatedly.
+        let mut dirty = DirtyCells::new(3, 2);
+        dirty.push((1, 1));
+        dirty.push((1, 1));
+        dirty.push((2, 0));
+
+        // When: the renderer drains its targeted cells.
+        let first = dirty.pop();
+        let second = dirty.pop();
+        let third = dirty.pop();
+
+        // Then: each marked cell appears once and unrelated cells never appear.
+        assert_eq!(first, Some((2, 0)));
+        assert_eq!(second, Some((1, 1)));
+        assert_eq!(third, None);
+    }
+
+    #[test]
+    fn dirty_cells_mark_all_after_resize() {
+        // Given: a dirty queue reset to a resized 2×2 cell grid.
+        let mut dirty = DirtyCells::new(1, 1);
+        dirty.reset(2, 2);
+
+        // When: the resize path requests a complete redraw.
+        dirty.mark_all();
+
+        // Then: every cell is queued exactly once.
+        assert_eq!(dirty.pop(), Some((1, 1)));
+        assert_eq!(dirty.pop(), Some((0, 1)));
+        assert_eq!(dirty.pop(), Some((1, 0)));
+        assert_eq!(dirty.pop(), Some((0, 0)));
+        assert_eq!(dirty.pop(), None);
+    }
 }

@@ -468,7 +468,7 @@ impl Compositor {
     /// Forward a raw kbd event to the focused window's input endpoint.
     /// `ascii`/`mods`/`scancode`/`extended` come straight from the
     /// `KbdEvent` variant of `protocol::Incoming`.
-    pub fn forward_input_event(&self, ascii: u8, mods: u8, scancode: u8, extended: u8, kind: u32) {
+    pub fn forward_input_event(&mut self, ascii: u8, mods: u8, scancode: u8, extended: u8, kind: u32) {
         let Some(id) = self.focused else { return; };
         let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
         if win.input_endpoint == 0 { return; }
@@ -488,7 +488,7 @@ impl Compositor {
     }
 
     /// Send a close-request to the focused window's input endpoint.
-    pub fn forward_close_request(&self) {
+    pub fn forward_close_request(&mut self) {
         let Some(id) = self.focused else { return; };
         let Some(win) = self.windows.iter().find(|w| w.id == id) else { return; };
         if win.input_endpoint == 0 { return; }
@@ -592,6 +592,27 @@ impl Compositor {
         }
         let win = self.windows.remove(pos);
         let _ = crate::shm::free_frame(win.shm_token);
+        if let Some(pixel) = win.pixel_region {
+            let pixel_bytes = pixel.pixel_w as usize * pixel.pixel_h as usize * 4;
+            let pixel_pages = (pixel_bytes + 0xFFF) / 0x1000;
+            let _ = libcluu::syscall::space_unmap(
+                libcluu::boot::space_token(),
+                pixel.mapping.as_ptr() as usize,
+                pixel_pages,
+            );
+            if pixel.shm_token != 0 {
+                unsafe {
+                    let _ = libcluu::syscall::invoke(
+                        pixel.shm_token as usize,
+                        libcluu::syscall::InvokeOp::FrameFree,
+                        0,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+        }
         // Mark covered cells dirty so the next compose pass repaints bg.
         for cy in win.y..win.y.saturating_add(win.h) {
             for cx in win.x..win.x.saturating_add(win.w) {
@@ -606,7 +627,121 @@ impl Compositor {
 
 const BTN_LEFT: u8 = 1 << 0;
 
+pub struct MouseBatch {
+    start_x: i32,
+    start_y: i32,
+    final_x: i32,
+    final_y: i32,
+    buttons: Option<u8>,
+}
+
+pub struct MouseMotion {
+    pub dx: i32,
+    pub dy: i32,
+    pub buttons: u8,
+}
+
+#[derive(Clone, Copy)]
+pub struct PointerPosition {
+    x: i32,
+    y: i32,
+    max_x: i32,
+    max_y: i32,
+}
+
+impl MouseBatch {
+    pub const fn new() -> Self {
+        Self {
+            start_x: 0,
+            start_y: 0,
+            final_x: 0,
+            final_y: 0,
+            buttons: None,
+        }
+    }
+
+    pub fn push(&mut self, event: MouseMotion, pointer: PointerPosition) {
+        if self.buttons.is_none() {
+            self.start_x = pointer.x;
+            self.start_y = pointer.y;
+            self.final_x = pointer.x;
+            self.final_y = pointer.y;
+        }
+        self.final_x = (self.final_x + event.dx).max(0).min(pointer.max_x);
+        self.final_y = (self.final_y + event.dy).max(0).min(pointer.max_y);
+        self.buttons = Some(event.buttons);
+    }
+
+    pub fn buttons(&self) -> Option<u8> {
+        self.buttons
+    }
+
+    pub fn take(&mut self) -> Option<MouseMotion> {
+        let buttons = self.buttons.take()?;
+        Some(MouseMotion {
+            dx: self.final_x - self.start_x,
+            dy: self.final_y - self.start_y,
+            buttons,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MouseBatch, MouseMotion, PointerPosition};
+
+    #[test]
+    fn mouse_batch_retains_last_buttons_and_combined_motion() {
+        // Given: several motion events arrive before a frame boundary.
+        let mut batch = MouseBatch::new();
+        let pointer = PointerPosition {
+            x: 0,
+            y: 2,
+            max_x: 10,
+            max_y: 10,
+        };
+        batch.push(
+            MouseMotion {
+                dx: -4,
+                dy: -2,
+                buttons: 0,
+            },
+            pointer,
+        );
+        batch.push(
+            MouseMotion {
+                dx: 3,
+                dy: 5,
+                buttons: 3,
+            },
+            pointer,
+        );
+
+        // When: the frame consumes the pending input.
+        let event = batch.take();
+
+        // Then: one event preserves total movement and final buttons.
+        assert!(matches!(
+            event,
+            Some(MouseMotion {
+                dx: 3,
+                dy: 3,
+                buttons: 3,
+            })
+        ));
+    }
+}
+
 impl Compositor {
+    pub fn pointer_position(&self) -> PointerPosition {
+        PointerPosition {
+            x: self.pointer_x,
+            y: self.pointer_y,
+            max_x: self.width_px as i32 - 1,
+            max_y: self.height_px as i32 - 1,
+        }
+    }
+
     pub fn handle_mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
         if !self.active {
             return;
@@ -814,13 +949,11 @@ impl Compositor {
             let win = &self.windows[pos];
             (win.x, win.y, win.w, win.h)
         };
-        let min_x = old_x.min(new_x);
-        let min_y = old_y.min(new_y);
-        let max_x = (old_x.saturating_add(old_w)).max(new_x.saturating_add(new_w));
-        let max_y = (old_y.saturating_add(old_h)).max(new_y.saturating_add(new_h));
-        for cy in min_y..max_y {
-            for cx in min_x..max_x {
-                self.cell_dirty.push((cx, cy));
+        for (x, y, w, h) in [(old_x, old_y, old_w, old_h), (new_x, new_y, new_w, new_h)] {
+            for cy in y..y.saturating_add(h) {
+                for cx in x..x.saturating_add(w) {
+                    self.cell_dirty.push((cx, cy));
+                }
             }
         }
     }
@@ -841,8 +974,17 @@ impl Compositor {
     ) -> libcluu::Result<()> {
         let pos = self.windows.iter().position(|w| w.id == window_id);
         let Some(pos) = pos else {
+            let _ = crate::shm::free_frame(pixel_token);
             return Err(libcluu::Error::NotFound);
         };
+
+        if self.windows[pos]
+            .pixel_region
+            .as_ref()
+            .is_some_and(|old| old.shm_token == pixel_token)
+        {
+            return Err(libcluu::Error::InvalidArgument);
+        }
 
         if let Some(old) = self.windows[pos].pixel_region.take() {
             let old_bytes = old.pixel_w as usize * old.pixel_h as usize * 4;
@@ -869,6 +1011,7 @@ impl Compositor {
         }
 
         if cell_w == 0 || cell_h == 0 {
+            let _ = crate::shm::free_frame(pixel_token);
             return Ok(());
         }
 
@@ -883,17 +1026,30 @@ impl Compositor {
         let pixel_va: usize = 0xC800_0000 + (window_id as usize) * 0x40_0000;
 
         let flags = 0x07 | libcluu::syscall::MAP_FRAME_TOKEN;
-        libcluu::syscall::space_map_range(
+        if let Err(err) = libcluu::syscall::space_map_range(
             libcluu::boot::space_token(),
             pixel_va,
             pixel_token as usize,
             flags,
             num_pages,
             0,
-        )?;
+        ) {
+            let _ = crate::shm::free_frame(pixel_token);
+            return Err(err);
+        }
 
-        let mapping = ShmMapping::new(pixel_va, rounded)
-            .ok_or(libcluu::Error::InvalidArgument)?;
+        let mapping = match ShmMapping::new(pixel_va, rounded) {
+            Some(mapping) => mapping,
+            None => {
+                let _ = libcluu::syscall::space_unmap(
+                    libcluu::boot::space_token(),
+                    pixel_va,
+                    num_pages,
+                );
+                let _ = crate::shm::free_frame(pixel_token);
+                return Err(libcluu::Error::InvalidArgument);
+            }
+        };
 
         self.windows[pos].pixel_region = Some(WindowPixelRegion {
             cell_x,
