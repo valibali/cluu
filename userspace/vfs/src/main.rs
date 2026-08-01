@@ -1870,8 +1870,11 @@ impl VfsServer {
         let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
 
         if sender_tid == 0 {
-            let reply_bytes = postcard::to_allocvec(&Error::PermissionDenied.to_errno())
-                .unwrap_or_default();
+            let reply = libcluu::proto::pts::VfsRegisterPtsReply {
+                assigned_id: 0,
+                errno: Error::PermissionDenied.to_errno() as i32,
+            };
+            let reply_bytes = postcard::to_allocvec(&reply).unwrap_or_default();
             let reply_msg = Message::new(
                 libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
                 [Error::PermissionDenied.to_errno() as usize, 0, 0, 0, 0, 0],
@@ -1884,8 +1887,11 @@ impl VfsServer {
             match postcard::from_bytes(payload) {
                 Ok(r) => r,
                 Err(_) => {
-                    let reply_bytes = postcard::to_allocvec(&Error::InvalidArgument.to_errno())
-                        .unwrap_or_default();
+                    let reply = libcluu::proto::pts::VfsRegisterPtsReply {
+                        assigned_id: 0,
+                        errno: Error::InvalidArgument.to_errno() as i32,
+                    };
+                    let reply_bytes = postcard::to_allocvec(&reply).unwrap_or_default();
                     let reply_msg = Message::new(
                         libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
                         [Error::InvalidArgument.to_errno() as usize, 0, 0, 0, 0, 0],
@@ -1907,7 +1913,10 @@ impl VfsServer {
                     "vfs: vfs_register_pts session={:?} owner_tid={} id={}",
                     req.session_id, sender_tid, assigned_id
                 ));
-                let reply = libcluu::proto::pts::VfsRegisterPtsReply { assigned_id };
+                let reply = libcluu::proto::pts::VfsRegisterPtsReply {
+                    assigned_id,
+                    errno: 0,
+                };
                 let reply_bytes =
                     postcard::to_allocvec(&reply).unwrap_or_default();
                 let reply_msg = Message::new(
@@ -1919,8 +1928,11 @@ impl VfsServer {
             }
             None => {
                 let _ = debug_print("vfs: vfs_register_pts pool exhausted");
-                let reply_bytes = postcard::to_allocvec(&Error::OutOfMemory.to_errno())
-                    .unwrap_or_default();
+                let reply = libcluu::proto::pts::VfsRegisterPtsReply {
+                    assigned_id: 0,
+                    errno: Error::OutOfMemory.to_errno() as i32,
+                };
+                let reply_bytes = postcard::to_allocvec(&reply).unwrap_or_default();
                 let reply_msg = Message::new(
                     libcluu::proto::pts::VFS_REGISTER_PTS_LABEL,
                     [Error::OutOfMemory.to_errno() as usize, 0, 0, 0, 0, 0],
@@ -1941,8 +1953,12 @@ impl VfsServer {
     /// Reply:
     ///   words[0] = errno (0 = ok)
     fn handle_pts_unregister(&mut self, msg: &Message, sender_tid: usize) -> Result<()> {
-        let reply_token = extract_reply_id(msg).unwrap_or(self.endpoint);
+        let reply_token = extract_reply_id(msg);
         let mut reply_msg = Message::new(PTS_UNREGISTER_LABEL, [0; 6], 1);
+        let send_reply = |reply: &Message| match reply_token {
+            Some(token) => ipc::reply(token, reply, IpcFlags::empty()),
+            None => Ok(()),
+        };
 
         let id = msg.words[0] as u32;
 
@@ -1958,7 +1974,7 @@ impl VfsServer {
                     id, owner, sender_tid
                 ));
                 reply_msg.words[0] = Error::PermissionDenied.to_errno() as usize;
-                return ipc::reply(reply_token, &reply_msg, IpcFlags::empty());
+                return send_reply(&reply_msg);
             }
             _ => {
                 self.pts_registry.unregister(id);
@@ -1967,7 +1983,7 @@ impl VfsServer {
             }
         }
 
-        ipc::reply(reply_token, &reply_msg, IpcFlags::empty())
+        send_reply(&reply_msg)
     }
 
     /// Handle `PTS_READ_DELIVER_LABEL` (112) — cluuterm pushes cooked bytes for a
