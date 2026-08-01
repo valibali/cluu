@@ -1,11 +1,10 @@
 //! x-nes NES emulator — CLUU platform backend.
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(feature = "host-test"), no_std)]
+#![cfg_attr(not(feature = "host-test"), no_main)]
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use nes::rom::Rom;
@@ -15,14 +14,11 @@ use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::fs::client::VfsClient;
 use libcluu::input::ForwardedKey;
 use audiod::ring::FrameRing;
-use audiod::session::{
-    AUDIOD_STREAM_OPEN, AUDIOD_STREAM_CLOSE,
-    AUDIOD_QUERY_CAPS, CAPS_FMT_S16,
-};
+use audiod::session::{AUDIOD_STREAM_CLOSE, AUDIOD_STREAM_OPEN};
 use libcluu::audio_client::PCM_FMT_S16;
 use libcluu::ipc::{
     parse_message, call_with_payload, send,
-    COMP_FRAME_READY_LABEL, COMP_INPUT_FORWARD_LABEL,
+    COMP_INPUT_FORWARD_LABEL,
     COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
     COMP_WIN_SET_PIXEL_REGION_LABEL, COMP_WIN_DESTROY_LABEL,
     COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_FLAG_FULLSCREEN, COMP_WIN_FLAG_NO_CHROME,
@@ -61,6 +57,8 @@ const AUDIO_RATE: u32 = 44100;
 const AUDIO_CHANNELS: u8 = 1;
 const AUDIO_PERIOD_BYTES: usize = 4096;
 const PAGE_SIZE: usize = 4096;
+const NTSC_FRAME_NS: u64 = 16_639_267;
+const INPUT_DRAIN_LIMIT: usize = 32;
 
 static PALETTE: [u32; 64] = [
     0xFF545454, 0xFF001E74, 0xFF080090, 0xFF440088, 0xFF7C005C, 0xFFA4001C, 0xFFA80000, 0xFF880000,
@@ -168,7 +166,7 @@ fn create_window(title: &str, cell_w: u32, cell_h: u32, flags: u32) -> Result<Co
     let req = Message::new(
         COMP_WIN_REGISTER_LABEL,
         [title.len(), cell_w as usize, cell_h as usize, my_ep, flags as usize, 0],
-        4,
+        5,
     );
     let mut reply = Message::new(0, [0; 6], 0);
     call_with_payload(comp_ep, &req, title.as_bytes(), &mut reply)?;
@@ -234,12 +232,20 @@ fn handle_key(emu: &mut Emulator, key: &ForwardedKey) -> bool {
     }
 }
 
-fn render_frame(pr: &mut PixelRegion, nes_frame: &[u8; 61440], dst_w: usize, dst_h: usize, x_lut: &[u16]) {
+fn render_frame(
+    pr: &mut PixelRegion,
+    nes_frame: &[u8; 61440],
+    dst_w: usize,
+    dst_h: usize,
+    off_x: usize,
+    off_y: usize,
+    x_lut: &[u16],
+) {
     let ptr = pr.as_ptr();
     for dy in 0..dst_h {
         let sy = dy * NES_H / dst_h;
         let src_row = sy * NES_W;
-        let dst_row = dy * dst_w;
+        let dst_row = (dy + off_y) * pr.pixel_w + off_x;
         for dx in 0..dst_w {
             let argb = nes_color(nes_frame[src_row + x_lut[dx] as usize]);
             unsafe { core::ptr::write_volatile(ptr.add(dst_row + dx), argb); }
@@ -352,7 +358,7 @@ fn displayd_create_surface(
     let geo_msg = Message::new(
         DISPLAY_SET_GEOMETRY_LABEL,
         [0, token as usize, 0, 0, 0, 0],
-        4,
+        5,
     );
     let mut geo_payload = [0u8; 5];
     geo_payload[0..4].copy_from_slice(&100i32.to_le_bytes());
@@ -374,7 +380,7 @@ fn displayd_create_surface(
     })
 }
 
-fn displayd_commit_frame(surf: &DisplaydSurface) {
+fn displayd_commit_frame(surf: &DisplaydSurface) -> Result<()> {
     let mut damage_bytes = [0u8; 16];
     damage_bytes[0..4].copy_from_slice(&0u32.to_le_bytes());
     damage_bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
@@ -382,10 +388,15 @@ fn displayd_commit_frame(surf: &DisplaydSurface) {
     damage_bytes[12..16].copy_from_slice(&surf.height.to_le_bytes());
     let commit_msg = Message::new(
         DISPLAY_BUFFER_COMMIT_LABEL,
-        [0, surf.token as usize, 0, 0, surf.frame_token as usize, 0],
+        [damage_bytes.len(), surf.token as usize, 0, 0, surf.frame_token as usize, 0],
         5,
     );
-    let _ = libcluu::ipc::send_msg_with_payload(surf.ep, &commit_msg, &damage_bytes);
+    let mut reply = Message::new(0, [0; 6], 0);
+    call_with_payload(surf.ep, &commit_msg, &damage_bytes, &mut reply)?;
+    if reply.words[0] != 0 {
+        return Err(libcluu::Error::InvalidState);
+    }
+    Ok(())
 }
 
 fn displayd_destroy(surf: &DisplaydSurface) {
@@ -437,27 +448,31 @@ fn open_audio_stream(audiod_ep: usize) -> Result<AudioStream> {
 
     let sp = space_token();
     let ring_pages = (ring_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-    syscall::space_map_range(
-        sp,
-        AUDIO_RING_VA,
-        frame_token as usize,
-        FLAGS_USER_RW | syscall::MAP_FRAME_TOKEN,
-        ring_pages,
-        0,
-    )?;
-
-    let _ = debug_print(&alloc::format!(
-        "xnes: audio stream {} sid={} ring={}B", stream_id, session_id, ring_bytes
-    ));
-
-    Ok(AudioStream {
+    let audio = AudioStream {
         ep: audiod_ep,
         stream_id,
         session_id,
         ring_va: AUDIO_RING_VA,
         ring_bytes,
         ring_pages,
-    })
+    };
+    if let Err(err) = syscall::space_map_range(
+        sp,
+        audio.ring_va,
+        frame_token as usize,
+        FLAGS_USER_RW | syscall::MAP_FRAME_TOKEN,
+        audio.ring_pages,
+        0,
+    ) {
+        close_audio(&audio);
+        return Err(err);
+    }
+
+    let _ = debug_print(&alloc::format!(
+        "xnes: audio stream {} sid={} ring={}B", stream_id, session_id, ring_bytes
+    ));
+
+    Ok(audio)
 }
 
 fn push_audio(audio: &AudioStream, samples: &[i16]) -> usize {
@@ -484,40 +499,243 @@ fn close_audio(audio: &AudioStream) {
     let _ = syscall::space_unmap(space_token(), audio.ring_va, audio.ring_pages);
 }
 
-fn create_input_window(title: &str) -> Result<CompWindow> {
-    let info = process_info();
-    let ipc_cap = info.tokens[TOKEN_IPC];
-    let my_ep = syscall::endpoint_create(ipc_cap)?;
-
-    let comp_ep = match registry::lookup_service("compositor:client") {
-        Some(ep) => ep,
-        None => {
-            let _ = debug_print("xnes: no compositor:client in registry");
-            return Err(libcluu::Error::InvalidState);
-        }
-    };
-
-    let req = Message::new(
-        COMP_WIN_REGISTER_LABEL,
-        [title.len(), 3, 3, my_ep, COMP_WIN_FLAG_NO_CHROME as usize, 0],
-        5,
-    );
-    let mut reply = Message::new(0, [0; 6], 0);
-    call_with_payload(comp_ep, &req, title.as_bytes(), &mut reply)?;
-    if reply.tag.label != COMP_WIN_REGISTER_REPLY {
-        let _ = debug_print("xnes: unexpected register reply label");
-        return Err(libcluu::Error::InvalidState);
-    }
-    let win_id = reply.words[0];
-    let err = reply.words[4];
-    if err != 0 {
-        let _ = debug_print("xnes: compositor denied input-only WIN_REGISTER");
-        return Err(libcluu::Error::InvalidState);
-    }
-    let _ = debug_print(&alloc::format!("xnes: input-only window id={}", win_id));
-    Ok(CompWindow { comp_ep, win_id, my_ep, cell_w: 3, cell_h: 3 })
+struct FramePacer {
+    clock_token: usize,
+    clock_hz: u64,
+    next_deadline: u64,
+    frame_ticks_numerator: u128,
+    tick_remainder: u128,
 }
 
+impl FramePacer {
+    fn new(clock_token: usize, clock_hz: u64) -> Option<Self> {
+        if clock_hz == 0 {
+            return None;
+        }
+        let now = syscall::clock_now(clock_token).ok()?;
+        Some(Self {
+            clock_token,
+            clock_hz,
+            next_deadline: now,
+            frame_ticks_numerator: (clock_hz as u128) * (NTSC_FRAME_NS as u128),
+            tick_remainder: 0,
+        })
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        let now = syscall::clock_now(self.clock_token).unwrap_or(self.next_deadline);
+        if now >= self.next_deadline {
+            return 0;
+        }
+        let remaining = (self.next_deadline - now) as u128;
+        let millis = (remaining * 1_000 + self.clock_hz as u128 - 1)
+            / self.clock_hz as u128;
+        millis.max(1).min(u64::MAX as u128) as u64
+    }
+
+    fn advance(&mut self) {
+        let now = syscall::clock_now(self.clock_token).unwrap_or(self.next_deadline);
+        let total = self.tick_remainder + self.frame_ticks_numerator;
+        let step = total / 1_000_000_000;
+        self.tick_remainder = total % 1_000_000_000;
+        self.next_deadline = self.next_deadline.saturating_add(step as u64);
+
+        let late_limit = step.saturating_mul(4) as u64;
+        if now > self.next_deadline.saturating_add(late_limit) {
+            self.next_deadline = now;
+            self.tick_remainder = 0;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputExitPolicy {
+    CloseOnly,
+    CloseOrEscape,
+}
+
+impl InputExitPolicy {
+    fn should_exit(self, key: &ForwardedKey) -> bool {
+        matches!(key, ForwardedKey::Close)
+            || matches!(
+                (self, key),
+                (Self::CloseOrEscape, ForwardedKey::Press { scancode: SCAN_ESC, .. })
+            )
+    }
+}
+
+fn process_input_message(emu: &mut Emulator, exit_policy: InputExitPolicy, msg: &Message) -> bool {
+    if msg.tag.label != COMP_INPUT_FORWARD_LABEL {
+        return true;
+    }
+    let Some(key) = ForwardedKey::from_message(&msg.words) else {
+        return true;
+    };
+    let _ = debug_print(&alloc::format!("xnes: key {:?}", key));
+    if exit_policy.should_exit(&key) {
+        false
+    } else {
+        let handled = handle_key(emu, &key);
+        let _ = debug_print(&alloc::format!("xnes: key handled={}", handled));
+        true
+    }
+}
+
+fn wait_for_inputs(
+    emu: &mut Emulator,
+    exit_policy: InputExitPolicy,
+    tokens: &[usize],
+    recv_buf: &mut [u8],
+    first_timeout_ms: u64,
+) -> bool {
+    for index in 0..INPUT_DRAIN_LIMIT {
+        let timeout_ms = if index == 0 { first_timeout_ms } else { 0 };
+        let Ok((_idx, len)) = syscall::ipc_recv_any(tokens, recv_buf, timeout_ms) else {
+            break;
+        };
+        let Some((msg, _)) = parse_message(&recv_buf[..len]) else {
+            continue;
+        };
+        if index == 0 {
+            let _ = debug_print(&alloc::format!(
+                "xnes: input recv label={} words={}", msg.tag.label, msg.tag.words
+            ));
+        }
+        if !process_input_message(emu, exit_policy, &msg) {
+            return false;
+        }
+    }
+    true
+}
+
+fn wait_for_next_frame(
+    emu: &mut Emulator,
+    exit_policy: InputExitPolicy,
+    tokens: &[usize],
+    recv_buf: &mut [u8],
+    pacer: &mut FramePacer,
+) -> bool {
+    let keep_running = wait_for_inputs(
+        emu,
+        exit_policy,
+        tokens,
+        recv_buf,
+        pacer.timeout_ms(),
+    );
+    pacer.advance();
+    keep_running
+}
+
+fn retain_unpushed_samples(samples: &mut [i16], pushed: usize) -> usize {
+    let pushed = pushed.min(samples.len());
+    samples.copy_within(pushed.., 0);
+    samples.len() - pushed
+}
+
+fn pump_audio(emu: &mut Emulator, audio: Option<&AudioStream>, frame_count: u64) {
+    let Some(audio) = audio else {
+        return;
+    };
+    let sample_count = emu.bus.apu.sample_count;
+    if sample_count == 0 {
+        return;
+    }
+    let peak = emu.bus.apu.audio_samples[..sample_count]
+        .iter()
+        .map(|sample| i32::from(*sample).abs())
+        .max()
+        .unwrap_or(0);
+    let pushed = push_audio(audio, &emu.bus.apu.audio_samples[..sample_count]);
+    emu.bus.apu.sample_count =
+        retain_unpushed_samples(&mut emu.bus.apu.audio_samples[..sample_count], pushed);
+    if frame_count % 60 == 0 {
+        let (available, written, read, xruns) = unsafe {
+            let backing = core::slice::from_raw_parts_mut(audio.ring_va as *mut u8, audio.ring_bytes);
+            match FrameRing::attach(backing) {
+                Some(ring) => (ring.available_read(), ring.total_written(), ring.total_read(), ring.xrun_count()),
+                None => (0, 0, 0, 0),
+            }
+        };
+        let _ = debug_print(&alloc::format!(
+            "xnes: audio frame={} samples={} pushed={} remain={} peak={} avail={} written={} read={} xruns={}",
+            frame_count,
+            sample_count,
+            pushed,
+            emu.bus.apu.sample_count,
+            peak,
+            available,
+            written,
+            read,
+            xruns,
+        ));
+    }
+}
+
+fn run_emulator_loop(
+    emu: &mut Emulator,
+    exit_policy: InputExitPolicy,
+    tokens: &[usize],
+    mut presenter: impl FnMut(&[u8; 61440]),
+) -> Option<AudioStream> {
+    let audio = registry::lookup_service("audiod:main")
+        .and_then(|ep| open_audio_stream(ep).ok());
+    if audio.is_some() {
+        let _ = debug_print("xnes: audio stream opened");
+    } else {
+        let _ = debug_print("xnes: no audio (audiod unavailable)");
+    }
+
+    let mut recv_buf = [0u8; 256];
+    let mut running = true;
+    let mut frame_count: u64 = 0;
+    let mut fps_start: u64 = 0;
+    let mut fps_frames: u64 = 0;
+    let clk_tok = libcluu::boot::token_clock();
+    let clk_hz = syscall::clock_frequency(clk_tok).unwrap_or(1000);
+    let mut pacer = FramePacer::new(clk_tok, clk_hz);
+
+    while running {
+        while !emu.bus.ppu.frame_complete {
+            let _ = emu.tick();
+        }
+        emu.bus.ppu.frame_complete = false;
+
+        pump_audio(emu, audio.as_ref(), frame_count + 1);
+        presenter(&emu.bus.ppu.frame);
+
+        frame_count = frame_count.wrapping_add(1);
+        fps_frames += 1;
+
+        if fps_frames == 1 {
+            fps_start = syscall::clock_now(clk_tok).unwrap_or(0);
+        }
+        if frame_count % 60 == 0 {
+            let now = syscall::clock_now(clk_tok).unwrap_or(0);
+            let elapsed = now.saturating_sub(fps_start);
+            if elapsed > 0 {
+                let fps = fps_frames * clk_hz / elapsed;
+                let _ = debug_print(&alloc::format!("xnes: {} fps (frame {})", fps, frame_count));
+            }
+            fps_frames = 0;
+            fps_start = now;
+        }
+
+        running = match pacer.as_mut() {
+            Some(pacer) => wait_for_next_frame(
+                emu,
+                exit_policy,
+                tokens,
+                &mut recv_buf,
+                pacer,
+            ),
+            None => wait_for_inputs(emu, exit_policy, tokens, &mut recv_buf, 16),
+        };
+    }
+
+    audio
+}
+
+#[cfg(not(feature = "host-test"))]
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     let _ = debug_print("xnes: start");
@@ -571,9 +789,13 @@ pub extern "C" fn main() -> i32 {
     let _ = debug_print("xnes: emulator initialized");
 
     if fullscreen {
-        return run_displayd(&mut emu);
+        run_windowed(&mut emu, true)
+    } else {
+        run_windowed(&mut emu, false)
     }
+}
 
+fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
     let (win_cell_w, win_cell_h, pr_cell_x, pr_cell_y, pr_cell_w, pr_cell_h) = {
         let comp_ep = match registry::lookup_service("compositor:client") {
             Some(ep) => ep,
@@ -588,35 +810,26 @@ pub extern "C" fn main() -> i32 {
                     "xnes: screen {}x{} cells", cols, rows
                 ));
                 if fullscreen {
-                    let (fit_w, fit_h) = compute_aspect_fit(cols, rows);
-                    let off_x = (cols.saturating_sub(fit_w)) / 2;
-                    let off_y = (rows.saturating_sub(fit_h)) / 2;
-                    let _ = debug_print(&alloc::format!(
-                        "xnes: fullscreen {}x{} → fit {}x{} offset ({},{})",
-                        cols, rows, fit_w, fit_h, off_x, off_y
-                    ));
-                    (cols, rows, off_x, off_y, fit_w, fit_h)
+                    (cols, rows, 0u16, 0u16, cols, rows)
                 } else {
                     let (w, h) = compute_aspect_fit(cols, rows);
-                    let _ = debug_print(&alloc::format!(
-                        "xnes: windowed fit {}x{}", w, h
-                    ));
+                    let _ = debug_print(&alloc::format!("xnes: windowed fit {}x{}", w, h));
                     (w, h, 0u16, 0u16, w, h)
                 }
             }
             Err(_) => {
                 let _ = debug_print("xnes: screen query failed, using 64x30");
-                if fullscreen {
-                    (100, 37, 4u16, 1u16, 64, 30)
-                } else {
-                    (64, 30, 0u16, 0u16, 64, 30)
-                }
+                (64, 30, 0u16, 0u16, 64, 30)
             }
         }
     };
 
-    let win_flags = if fullscreen { COMP_WIN_FLAG_FULLSCREEN } else { 0 };
-    let win = match create_window("xnes", win_cell_w as u32, win_cell_h as u32, win_flags) {
+    let flags = if fullscreen {
+        COMP_WIN_FLAG_FULLSCREEN | COMP_WIN_FLAG_NO_CHROME
+    } else {
+        0
+    };
+    let win = match create_window("xnes", win_cell_w as u32, win_cell_h as u32, flags) {
         Ok(w) => w,
         Err(e) => {
             let _ = debug_print(&alloc::format!("xnes: window creation failed {:?}", e));
@@ -652,106 +865,63 @@ pub extern "C" fn main() -> i32 {
     );
     if send(win.comp_ep, &set_pr, IpcFlags::empty()).is_err() {
         let _ = debug_print("xnes: SET_PIXEL_REGION send failed");
+        pixel_region.destroy();
+        let destroy_msg = Message::new(
+            COMP_WIN_DESTROY_LABEL,
+            [win.win_id, 0, 0, 0, 0, 0],
+            1,
+        );
+        let _ = send(win.comp_ep, &destroy_msg, IpcFlags::empty());
         return 1;
     }
     let _ = debug_print("xnes: PixelRegion attached to window");
 
-    let dst_w = pixel_region.pixel_w;
-    let dst_h = pixel_region.pixel_h;
+    let (dst_w, dst_h) = if fullscreen {
+        let (w, h) = compute_pixel_aspect_fit(
+            pixel_region.pixel_w as u32,
+            pixel_region.pixel_h as u32,
+        );
+        (w as usize, h as usize)
+    } else {
+        (pixel_region.pixel_w, pixel_region.pixel_h)
+    };
+    let off_x = (pixel_region.pixel_w.saturating_sub(dst_w)) / 2;
+    let off_y = (pixel_region.pixel_h.saturating_sub(dst_h)) / 2;
     let _ = debug_print(&alloc::format!("xnes: render target {}x{}", dst_w, dst_h));
 
     let x_lut: Vec<u16> = (0..dst_w).map(|dx| (dx * NES_W / dst_w) as u16).collect();
 
-    let audio = registry::lookup_service("audiod:main")
-        .and_then(|ep| open_audio_stream(ep).ok());
-    if audio.is_some() {
-        let _ = debug_print("xnes: audio stream opened");
-    } else {
-        let _ = debug_print("xnes: no audio (audiod unavailable)");
-    }
-
-    let mut recv_buf = [0u8; 256];
     let tokens = [win.my_ep];
-    let mut running = true;
-    let mut frame_count: u64 = 0;
-    let mut fps_start: u64 = 0;
-    let mut fps_frames: u64 = 0;
-    let clk_tok = libcluu::boot::token_clock();
-    let clk_hz = syscall::clock_frequency(clk_tok).unwrap_or(1000);
-
-    while running {
-        while !emu.bus.ppu.frame_complete {
-            let _ = emu.tick();
-        }
-        emu.bus.ppu.frame_complete = false;
-
-        if let Some(ref audio) = audio {
-            let n = emu.bus.apu.sample_count;
-            if n > 0 {
-                let pushed = push_audio(audio, &emu.bus.apu.audio_samples[..n]);
-                if pushed < n {
-                    let remaining = n - pushed;
-                    for i in 0..remaining {
-                        emu.bus.apu.audio_samples[i] = emu.bus.apu.audio_samples[pushed + i];
-                    }
-                    emu.bus.apu.sample_count = remaining;
-                } else {
-                    emu.bus.apu.sample_count = 0;
-                }
-            }
-        }
-
-        render_frame(&mut pixel_region, &emu.bus.ppu.frame, dst_w, dst_h, &x_lut);
-
+    let exit_policy = if fullscreen {
+        InputExitPolicy::CloseOrEscape
+    } else {
+        InputExitPolicy::CloseOnly
+    };
+    let audio = run_emulator_loop(emu, exit_policy, &tokens, |frame| {
+        render_frame(
+            &mut pixel_region,
+            frame,
+            dst_w,
+            dst_h,
+            off_x,
+            off_y,
+            &x_lut,
+        );
         let dmg = Message::new(
             COMP_WIN_DAMAGE_LABEL,
             [win.win_id, 0, 0, win.cell_w as usize, win.cell_h as usize, 0],
             5,
         );
         let _ = send(win.comp_ep, &dmg, IpcFlags::empty());
-
-        frame_count = frame_count.wrapping_add(1);
-        fps_frames += 1;
-
-        if fps_frames == 1 {
-            fps_start = syscall::clock_now(libcluu::boot::token_clock()).unwrap_or(0);
-        }
-        if frame_count % 60 == 0 {
-            let now = syscall::clock_now(clk_tok).unwrap_or(0);
-            let elapsed = now.saturating_sub(fps_start);
-            if elapsed > 0 {
-                let fps = fps_frames * clk_hz / elapsed;
-                let _ = debug_print(&alloc::format!("xnes: {} fps (frame {})", fps, frame_count));
-            }
-            fps_frames = 0;
-            fps_start = syscall::clock_now(clk_tok).unwrap_or(0);
-        }
-
-        match syscall::ipc_recv_any(&tokens, &mut recv_buf, 16) {
-            Ok((_idx, len)) => {
-                if let Some((msg, _)) = parse_message(&recv_buf[..len]) {
-                    if msg.tag.label == COMP_INPUT_FORWARD_LABEL {
-                        if let Some(key) = ForwardedKey::from_message(&msg.words) {
-                            if key == ForwardedKey::Close {
-                                running = false;
-                            } else {
-                                handle_key(&mut emu, &key);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
+    });
 
     let destroy_msg = Message::new(
         COMP_WIN_DESTROY_LABEL,
         [win.win_id, 0, 0, 0, 0, 0],
         1,
     );
+    pixel_region.unmap();
     let _ = send(win.comp_ep, &destroy_msg, IpcFlags::empty());
-    pixel_region.destroy();
     if let Some(audio) = audio {
         close_audio(&audio);
     }
@@ -760,145 +930,42 @@ pub extern "C" fn main() -> i32 {
     0
 }
 
-fn run_displayd(emu: &mut Emulator) -> i32 {
-    let displayd_ep = match registry::lookup_service("displayd:main") {
-        Some(ep) => ep,
-        None => {
-            let _ = debug_print("xnes: no displayd:main in registry");
-            return 1;
-        }
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let (screen_w, screen_h, _screen_pitch) = match query_displayd_output(displayd_ep) {
-        Ok(dims) => dims,
-        Err(e) => {
-            let _ = debug_print(&alloc::format!("xnes: displayd OUTPUT_INFO failed {:?}", e));
-            return 1;
-        }
-    };
-    let _ = debug_print(&alloc::format!("xnes: displayd output {}x{}", screen_w, screen_h));
-
-    let (fit_w, fit_h) = compute_pixel_aspect_fit(screen_w, screen_h);
-    let _ = debug_print(&alloc::format!(
-        "xnes: NES {}x{} → fit {}x{} on {}x{}",
-        NES_W, NES_H, fit_w, fit_h, screen_w, screen_h
-    ));
-
-    let surf = match displayd_create_surface(displayd_ep, screen_w, screen_h) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = debug_print(&alloc::format!("xnes: displayd surface create failed {:?}", e));
-            return 1;
-        }
-    };
-
-    let win = match create_input_window("xnes") {
-        Ok(w) => w,
-        Err(e) => {
-            let _ = debug_print(&alloc::format!("xnes: input window failed {:?}", e));
-            displayd_destroy(&surf);
-            return 1;
-        }
-    };
-
-    let frame_ptr = surf.frame_va as *mut u32;
-    let x_lut: Vec<u16> = (0..fit_w as usize)
-        .map(|dx| (dx * NES_W / fit_w as usize) as u16)
-        .collect();
-
-    let audio = registry::lookup_service("audiod:main")
-        .and_then(|ep| open_audio_stream(ep).ok());
-    if audio.is_some() {
-        let _ = debug_print("xnes: audio stream opened");
-    } else {
-        let _ = debug_print("xnes: no audio (audiod unavailable)");
+    #[test]
+    fn close_only_policy_ignores_escape() {
+        let key = ForwardedKey::Press {
+            ascii: 0,
+            modifiers: 0,
+            scancode: SCAN_ESC,
+            extended: 0,
+        };
+        assert!(!InputExitPolicy::CloseOnly.should_exit(&key));
     }
 
-    let mut recv_buf = [0u8; 256];
-    let tokens = [win.my_ep];
-    let mut running = true;
-    let mut frame_count: u64 = 0;
-    let mut fps_start: u64 = 0;
-    let mut fps_frames: u64 = 0;
-    let clk_tok = libcluu::boot::token_clock();
-    let clk_hz = syscall::clock_frequency(clk_tok).unwrap_or(1000);
-
-    while running {
-        while !emu.bus.ppu.frame_complete {
-            let _ = emu.tick();
-        }
-        emu.bus.ppu.frame_complete = false;
-
-        if let Some(ref audio) = audio {
-            let n = emu.bus.apu.sample_count;
-            if n > 0 {
-                let pushed = push_audio(audio, &emu.bus.apu.audio_samples[..n]);
-                if pushed < n {
-                    let remaining = n - pushed;
-                    for i in 0..remaining {
-                        emu.bus.apu.audio_samples[i] = emu.bus.apu.audio_samples[pushed + i];
-                    }
-                    emu.bus.apu.sample_count = remaining;
-                } else {
-                    emu.bus.apu.sample_count = 0;
-                }
-            }
-        }
-
-        render_frame_to_buf(
-            frame_ptr,
-            surf.width as usize,
-            surf.height as usize,
-            &emu.bus.ppu.frame,
-            fit_w as usize,
-            fit_h as usize,
-            &x_lut,
-        );
-        displayd_commit_frame(&surf);
-
-        frame_count = frame_count.wrapping_add(1);
-        fps_frames += 1;
-
-        if fps_frames == 1 {
-            fps_start = syscall::clock_now(clk_tok).unwrap_or(0);
-        }
-        if frame_count % 60 == 0 {
-            let now = syscall::clock_now(clk_tok).unwrap_or(0);
-            let elapsed = now.saturating_sub(fps_start);
-            if elapsed > 0 {
-                let fps = fps_frames * clk_hz / elapsed;
-                let _ = debug_print(&alloc::format!("xnes: {} fps (frame {})", fps, frame_count));
-            }
-            fps_frames = 0;
-            fps_start = now;
-        }
-
-        match syscall::ipc_recv_any(&tokens, &mut recv_buf, 16) {
-            Ok((_idx, len)) => {
-                if let Some((msg, _)) = parse_message(&recv_buf[..len]) {
-                    if msg.tag.label == COMP_INPUT_FORWARD_LABEL {
-                        if let Some(key) = ForwardedKey::from_message(&msg.words) {
-                            match &key {
-                                ForwardedKey::Close => running = false,
-                                ForwardedKey::Press { scancode, .. } if *scancode == SCAN_ESC => running = false,
-                                _ => { handle_key(emu, &key); }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
+    #[test]
+    fn close_or_escape_policy_exits_on_escape() {
+        let key = ForwardedKey::Press {
+            ascii: 0,
+            modifiers: 0,
+            scancode: SCAN_ESC,
+            extended: 0,
+        };
+        assert!(InputExitPolicy::CloseOrEscape.should_exit(&key));
     }
 
-    displayd_destroy(&surf);
-    let destroy_msg = Message::new(
-        COMP_WIN_DESTROY_LABEL,
-        [win.win_id, 0, 0, 0, 0, 0],
-        1,
-    );
-    let _ = send(win.comp_ep, &destroy_msg, IpcFlags::empty());
+    #[test]
+    fn every_policy_exits_on_close() {
+        assert!(InputExitPolicy::CloseOnly.should_exit(&ForwardedKey::Close));
+    }
 
-    let _ = debug_print("xnes: exit");
-    0
+    #[test]
+    fn retain_unpushed_samples_moves_backlog_to_front() {
+        let mut samples = [1, 2, 3, 4];
+        let remaining = retain_unpushed_samples(&mut samples, 2);
+        assert_eq!((remaining, samples), (2, [3, 4, 3, 4]));
+    }
+
 }
