@@ -249,6 +249,7 @@ pub struct VfsRegisterPtsRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VfsRegisterPtsReply {
     pub assigned_id: u32,
+    pub errno: i32,
 }
 
 // ----- Shell completion -----
