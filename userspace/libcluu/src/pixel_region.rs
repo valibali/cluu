@@ -61,14 +61,27 @@ impl PixelRegion {
             unsafe { syscall::invoke(sp, InvokeOp::FrameAllocate, rounded, 0, 0, 0)? };
 
         let num_pages = rounded / PAGE_SIZE;
-        syscall::space_map_range(
+        if let Err(err) = syscall::space_map_range(
             sp,
             PIXEL_SHM_VA,
             token as usize,
             FLAGS_USER_RW | MAP_FRAME_TOKEN,
             num_pages,
             0,
-        )?;
+        ) {
+            let _ = syscall::space_unmap(sp, PIXEL_SHM_VA, num_pages);
+            unsafe {
+                let _ = syscall::invoke(
+                    token as usize,
+                    InvokeOp::FrameFree,
+                    0,
+                    0,
+                    0,
+                    0,
+                );
+            }
+            return Err(err);
+        }
 
         // Zero the buffer so the first frame isn't garbage.
         unsafe {
@@ -132,16 +145,25 @@ impl PixelRegion {
         self.ptr
     }
 
-    /// Free the frame token and unmap the SHM.
-    pub fn destroy(self) {
+    /// Unmap the client-side SHM mapping without freeing the frame token.
+    ///
+    /// Once a pixel region is attached to a compositor window, the compositor
+    /// owns the shared token and frees it when the window is destroyed.
+    pub fn unmap(self) {
         let sp = space_token();
         let total_bytes = self.pixel_w * self.pixel_h * 4;
         let num_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
         let _ = syscall::space_unmap(sp, PIXEL_SHM_VA, num_pages);
-        if self.token != 0 {
+    }
+
+    /// Free the frame token and unmap the SHM.
+    pub fn destroy(self) {
+        let token = self.token;
+        self.unmap();
+        if token != 0 {
             unsafe {
                 let _ = syscall::invoke(
-                    self.token as usize,
+                    token as usize,
                     InvokeOp::FrameFree,
                     0,
                     0,
