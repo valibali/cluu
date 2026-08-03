@@ -17,16 +17,19 @@ use audiod::ring::FrameRing;
 use audiod::session::{AUDIOD_STREAM_CLOSE, AUDIOD_STREAM_OPEN};
 use libcluu::audio_client::PCM_FMT_S16;
 use libcluu::ipc::{
-    parse_message, call_with_payload, send,
+    call, call_with_payload, parse_message, send,
     COMP_INPUT_FORWARD_LABEL,
+    KBD_EVENT_LABEL,
     COMP_WIN_DAMAGE_LABEL, COMP_WIN_REGISTER_LABEL, COMP_WIN_REGISTER_REPLY,
     COMP_WIN_SET_PIXEL_REGION_LABEL, COMP_WIN_DESTROY_LABEL,
-    COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_FLAG_FULLSCREEN, COMP_WIN_FLAG_NO_CHROME,
+    COMP_WIN_QUERY_SCREEN_LABEL,
 };
 use cluu_wire::display::{
     DISPLAY_OUTPUT_INFO_LABEL, DISPLAY_SURFACE_CREATE_LABEL,
     DISPLAY_BUFFER_COMMIT_LABEL, DISPLAY_SET_GEOMETRY_LABEL,
     DISPLAY_SURFACE_DESTROY_LABEL,
+    DISPLAY_LEASE_ACQUIRE_LABEL, DISPLAY_LEASE_RELEASE_LABEL,
+    DISPLAY_LEASE_RELEASE_ACK_LABEL,
 };
 use libcluu::pixel_region::PixelRegion;
 use libcluu::registry;
@@ -50,6 +53,8 @@ const SCAN_X: u8 = 0x2D;
 const SCAN_ENTER: u8 = 0x1C;
 const SCAN_SPACE: u8 = 0x39;
 const SCAN_ESC: u8 = 0x01;
+const MOD_CTRL: u8 = 1 << 1;
+const MOD_ALT: u8 = 1 << 2;
 
 const DISPLAYD_VA: usize = 0xD200_0000;
 const AUDIO_RING_VA: usize = 0xD300_0000;
@@ -57,6 +62,7 @@ const AUDIO_RATE: u32 = 44100;
 const AUDIO_CHANNELS: u8 = 1;
 const AUDIO_PERIOD_BYTES: usize = 4096;
 const PAGE_SIZE: usize = 4096;
+const DIRECT_FB_VA: usize = 0xD400_0000;
 const NTSC_FRAME_NS: u64 = 16_639_267;
 const INPUT_DRAIN_LIMIT: usize = 32;
 
@@ -123,6 +129,87 @@ struct CompWindow {
     my_ep: usize,
     cell_w: u16,
     cell_h: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectLeaseError {
+    NotMapped,
+    NotReleased,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectLeasePhase {
+    Mapped,
+    ReleasePrepared,
+    Unmapped,
+    Released,
+}
+
+impl DirectLeasePhase {
+    fn prepare_release(&mut self) -> core::result::Result<(), DirectLeaseError> {
+        match self {
+            Self::Mapped => {
+                *self = Self::ReleasePrepared;
+                Ok(())
+            }
+            Self::ReleasePrepared | Self::Unmapped | Self::Released => {
+                Err(DirectLeaseError::NotMapped)
+            }
+        }
+    }
+
+    fn unmap(&mut self) -> core::result::Result<(), DirectLeaseError> {
+        match self {
+            Self::ReleasePrepared => {
+                *self = Self::Unmapped;
+                Ok(())
+            }
+            Self::Mapped | Self::Unmapped | Self::Released => Err(DirectLeaseError::NotMapped),
+        }
+    }
+
+    fn acknowledge(&mut self) -> core::result::Result<(), DirectLeaseError> {
+        match self {
+            Self::Unmapped => {
+                *self = Self::Released;
+                Ok(())
+            }
+            Self::Mapped | Self::ReleasePrepared | Self::Released => {
+                Err(DirectLeaseError::NotReleased)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectFramebuffer {
+    va: usize,
+    pages: usize,
+    stride_words: usize,
+    width: u32,
+    height: u32,
+}
+
+struct DirectLease {
+    displayd_ep: usize,
+    handle: cluu_wire::display::LeaseHandle,
+    framebuffer: DirectFramebuffer,
+    phase: DirectLeasePhase,
+}
+
+fn framebuffer_pages(pitch: u32, height: u32) -> Option<usize> {
+    let bytes = (pitch as usize).checked_mul(height as usize)?;
+    if bytes == 0 {
+        return None;
+    }
+    bytes.checked_add(PAGE_SIZE - 1).map(|value| value / PAGE_SIZE)
+}
+
+fn framebuffer_stride_words(pitch: u32) -> Option<usize> {
+    if pitch == 0 || pitch % 4 != 0 {
+        return None;
+    }
+    Some(pitch as usize / 4)
 }
 
 fn query_screen(comp_ep: usize) -> Result<(u16, u16)> {
@@ -294,6 +381,241 @@ fn query_displayd_output(displayd_ep: usize) -> Result<(u32, u32, u32)> {
         return Err(libcluu::Error::InvalidState);
     }
     Ok((rmsg.words[0] as u32, rmsg.words[1] as u32, rmsg.words[2] as u32))
+}
+
+fn acquire_direct_lease(
+    displayd_ep: usize,
+    input_endpoint: usize,
+    width: u32,
+    height: u32,
+    pitch: u32,
+) -> Result<DirectLease> {
+    if width == 0 || height == 0 || pitch == 0 {
+        return Err(libcluu::Error::InvalidArgument);
+    }
+    framebuffer_pages(pitch, height).ok_or(libcluu::Error::InvalidArgument)?;
+    let stride_words = framebuffer_stride_words(pitch).ok_or(libcluu::Error::InvalidArgument)?;
+    if stride_words < width as usize {
+        return Err(libcluu::Error::InvalidArgument);
+    }
+    let request = Message::new(
+        DISPLAY_LEASE_ACQUIRE_LABEL,
+        [space_token(), DIRECT_FB_VA, input_endpoint, 0, 0, 0],
+        3,
+    );
+    let mut reply_buf = [0u8; 128];
+    let bytes = libcluu::syscall::ipc_call(displayd_ep, request.as_bytes(), &mut reply_buf)?;
+    let (reply, _) = parse_message(&reply_buf[..bytes]).ok_or(libcluu::Error::InvalidState)?;
+    if reply.tag.label != DISPLAY_LEASE_ACQUIRE_LABEL || reply.words[5] != 0 {
+        return Err(libcluu::Error::InvalidState);
+    }
+    let granted_width = reply.words[2] as u32;
+    let granted_height = reply.words[3] as u32;
+    let granted_pitch = reply.words[4] as u32;
+    let pages = framebuffer_pages(granted_pitch, granted_height)
+        .ok_or(libcluu::Error::InvalidState)?;
+    let stride_words = framebuffer_stride_words(granted_pitch)
+        .ok_or(libcluu::Error::InvalidState)?;
+    if granted_width == 0 || granted_height == 0 || stride_words < granted_width as usize {
+        return Err(libcluu::Error::InvalidState);
+    }
+    Ok(DirectLease {
+        displayd_ep,
+        handle: cluu_wire::display::LeaseHandle {
+            lease_id: reply.words[0] as u64,
+            generation: reply.words[1] as u64,
+        },
+        framebuffer: DirectFramebuffer {
+            va: DIRECT_FB_VA,
+            pages,
+            stride_words,
+            width: granted_width,
+            height: granted_height,
+        },
+        phase: DirectLeasePhase::Mapped,
+    })
+}
+
+fn lease_control_message(label: u32, lease_id: u64, generation: u64) -> Message {
+    Message::new(
+        label,
+        [lease_id as usize, generation as usize, 0, 0, 0, 0],
+        2,
+    )
+}
+
+fn release_direct_lease(lease: &mut DirectLease) -> Result<()> {
+    let sp = space_token();
+    let mut release = lease_control_message(
+        DISPLAY_LEASE_RELEASE_LABEL,
+        lease.handle.lease_id,
+        lease.handle.generation,
+    );
+    call(lease.displayd_ep, &mut release, IpcFlags::empty())?;
+    if release.tag.label != DISPLAY_LEASE_RELEASE_LABEL || release.words[0] != 0 {
+        return Err(libcluu::Error::InvalidState);
+    }
+    lease
+        .phase
+        .prepare_release()
+        .map_err(|_| libcluu::Error::InvalidState)?;
+    lease
+        .phase
+        .unmap()
+        .map_err(|_| libcluu::Error::InvalidState)?;
+    syscall::space_unmap(sp, lease.framebuffer.va, lease.framebuffer.pages)?;
+
+    let mut acknowledge = lease_control_message(
+        DISPLAY_LEASE_RELEASE_ACK_LABEL,
+        lease.handle.lease_id,
+        lease.handle.generation,
+    );
+    call(lease.displayd_ep, &mut acknowledge, IpcFlags::empty())?;
+    if acknowledge.tag.label != DISPLAY_LEASE_RELEASE_ACK_LABEL || acknowledge.words[0] != 0 {
+        return Err(libcluu::Error::InvalidState);
+    }
+    lease.phase.acknowledge().map_err(|_| libcluu::Error::InvalidState)?;
+    Ok(())
+}
+
+fn render_direct_frame(
+    framebuffer: DirectFramebuffer,
+    nes_frame: &[u8; 61440],
+    fit_w: usize,
+    fit_h: usize,
+    x_lut: &[u16],
+) {
+    let width = framebuffer.width as usize;
+    let height = framebuffer.height as usize;
+    let stride = framebuffer.stride_words;
+    let Some((off_x, off_y)) = direct_fit_offsets(width, height, fit_w, fit_h) else {
+        return;
+    };
+    let ptr = framebuffer.va as *mut u32;
+    for dy in 0..fit_h {
+        let row = (off_y + dy) * stride + off_x;
+        let sy = dy * NES_H / fit_h;
+        let src_row = sy * NES_W;
+        for dx in 0..fit_w {
+            let pixel = nes_color(nes_frame[src_row + x_lut[dx] as usize]);
+            unsafe { core::ptr::write_volatile(ptr.add(row + dx), pixel); }
+        }
+    }
+}
+
+fn direct_fit_offsets(
+    width: usize,
+    height: usize,
+    fit_w: usize,
+    fit_h: usize,
+) -> Option<(usize, usize)> {
+    if fit_w == 0 || fit_h == 0 || fit_w > width || fit_h > height {
+        return None;
+    }
+    Some(((width - fit_w) / 2, (height - fit_h) / 2))
+}
+
+fn clear_direct_borders(framebuffer: DirectFramebuffer, fit_w: usize, fit_h: usize) {
+    let width = framebuffer.width as usize;
+    let height = framebuffer.height as usize;
+    let stride = framebuffer.stride_words;
+    let Some((off_x, off_y)) = direct_fit_offsets(width, height, fit_w, fit_h) else {
+        return;
+    };
+    let ptr = framebuffer.va as *mut u32;
+
+    for dy in 0..off_y {
+        let row = dy * stride;
+        for dx in 0..width {
+            unsafe { core::ptr::write_volatile(ptr.add(row + dx), 0xFF000000); }
+        }
+    }
+    for dy in off_y + fit_h..height {
+        let row = dy * stride;
+        for dx in 0..width {
+            unsafe { core::ptr::write_volatile(ptr.add(row + dx), 0xFF000000); }
+        }
+    }
+    for dy in off_y..off_y + fit_h {
+        let row = dy * stride;
+        for dx in 0..off_x {
+            unsafe { core::ptr::write_volatile(ptr.add(row + dx), 0xFF000000); }
+        }
+        for dx in off_x + fit_w..width {
+            unsafe { core::ptr::write_volatile(ptr.add(row + dx), 0xFF000000); }
+        }
+    }
+}
+
+fn log_first_direct_frame(lease: &DirectLease, damage_ok: bool) {
+    let framebuffer = lease.framebuffer;
+    let ptr = framebuffer.va as *const u32;
+    let stride = framebuffer.stride_words;
+    let width = framebuffer.width as usize;
+    let height = framebuffer.height as usize;
+    let mut nonblack = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = unsafe { core::ptr::read_volatile(ptr.add(y * stride + x)) };
+            if pixel != 0xFF00_0000 {
+                nonblack += 1;
+            }
+        }
+    }
+    let first = unsafe { core::ptr::read_volatile(ptr) };
+    let center = unsafe { core::ptr::read_volatile(ptr.add((height / 2) * stride + width / 2)) };
+    let last = unsafe { core::ptr::read_volatile(ptr.add((height - 1) * stride + width - 1)) };
+    let _ = debug_print(&alloc::format!(
+        "xnes: direct frame diag va=0x{:x} lease={} generation={} {}x{} pitch={} samples={:08x},{:08x},{:08x} nonblack={} damage={}",
+        framebuffer.va,
+        lease.handle.lease_id,
+        lease.handle.generation,
+        framebuffer.width,
+        framebuffer.height,
+        framebuffer.stride_words * 4,
+        first,
+        center,
+        last,
+        nonblack,
+        damage_ok
+    ));
+}
+
+fn encode_direct_damage_message(
+    lease_id: u64,
+    generation: u64,
+    payload_len: usize,
+) -> Message {
+    Message::new(
+        DISPLAY_BUFFER_COMMIT_LABEL,
+        [payload_len, lease_id as usize, 0, generation as usize, 0, 0],
+        4,
+    )
+}
+
+fn damage_direct_frame(lease: &DirectLease, fit_w: usize, fit_h: usize) -> Result<()> {
+    let width = lease.framebuffer.width as usize;
+    let height = lease.framebuffer.height as usize;
+    let (off_x, off_y) = direct_fit_offsets(width, height, fit_w, fit_h)
+        .ok_or(libcluu::Error::InvalidArgument)?;
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&(off_x as u32).to_le_bytes());
+    payload[4..8].copy_from_slice(&(off_y as u32).to_le_bytes());
+    payload[8..12].copy_from_slice(&(fit_w as u32).to_le_bytes());
+    payload[12..16].copy_from_slice(&(fit_h as u32).to_le_bytes());
+    let message = encode_direct_damage_message(
+        lease.handle.lease_id,
+        lease.handle.generation,
+        payload.len(),
+    );
+    let header = message.as_bytes();
+    let mut buffer = Vec::with_capacity(header.len() + payload.len());
+    buffer.extend_from_slice(header);
+    buffer.extend_from_slice(&payload);
+    match syscall::ipc_send_nonblocking(lease.displayd_ep, &buffer) {
+        Err(libcluu::Error::WouldBlock) => Ok(()),
+        result => result,
+    }
 }
 
 fn compute_pixel_aspect_fit(screen_w: u32, screen_h: u32) -> (u32, u32) {
@@ -561,14 +883,25 @@ impl InputExitPolicy {
                 (self, key),
                 (Self::CloseOrEscape, ForwardedKey::Press { scancode: SCAN_ESC, .. })
             )
+            || matches!(
+                (self, key),
+                (
+                    Self::CloseOrEscape,
+                    ForwardedKey::Press { modifiers, scancode: SCAN_X, .. }
+                ) if *modifiers & (MOD_CTRL | MOD_ALT) == (MOD_CTRL | MOD_ALT)
+            )
+    }
+}
+
+fn input_message_key(msg: &Message) -> Option<ForwardedKey> {
+    match msg.tag.label {
+        COMP_INPUT_FORWARD_LABEL | KBD_EVENT_LABEL => ForwardedKey::from_message(&msg.words),
+        _ => None,
     }
 }
 
 fn process_input_message(emu: &mut Emulator, exit_policy: InputExitPolicy, msg: &Message) -> bool {
-    if msg.tag.label != COMP_INPUT_FORWARD_LABEL {
-        return true;
-    }
-    let Some(key) = ForwardedKey::from_message(&msg.words) else {
+    let Some(key) = input_message_key(msg) else {
         return true;
     };
     let _ = debug_print(&alloc::format!("xnes: key {:?}", key));
@@ -596,11 +929,6 @@ fn wait_for_inputs(
         let Some((msg, _)) = parse_message(&recv_buf[..len]) else {
             continue;
         };
-        if index == 0 {
-            let _ = debug_print(&alloc::format!(
-                "xnes: input recv label={} words={}", msg.tag.label, msg.tag.words
-            ));
-        }
         if !process_input_message(emu, exit_policy, &msg) {
             return false;
         }
@@ -735,6 +1063,110 @@ fn run_emulator_loop(
     audio
 }
 
+fn fullscreen_cleanup_failed(
+    damage_failed: bool,
+    release: impl FnOnce() -> Result<()>,
+) -> bool {
+    let release_failed = release().is_err();
+    damage_failed || release_failed
+}
+
+fn run_direct_fullscreen(emu: &mut Emulator) -> i32 {
+    let displayd_ep = match registry::lookup_service("displayd:main") {
+        Some(ep) => ep,
+        None => {
+            let _ = debug_print("xnes: displayd unavailable for fullscreen lease");
+            return 1;
+        }
+    };
+    let (width, height, pitch) = match query_displayd_output(displayd_ep) {
+        Ok(output) => output,
+        Err(_) => {
+            let _ = debug_print("xnes: fullscreen output query failed");
+            return 1;
+        }
+    };
+    let info = process_info();
+    let input_endpoint = match syscall::endpoint_create(info.tokens[TOKEN_IPC]) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            let _ = debug_print("xnes: fullscreen input endpoint failed");
+            return 1;
+        }
+    };
+    let mut lease = match acquire_direct_lease(displayd_ep, input_endpoint, width, height, pitch) {
+        Ok(lease) => lease,
+        Err(_) => {
+            let _ = debug_print("xnes: fullscreen lease acquire failed");
+            return 1;
+        }
+    };
+    let (fit_w, fit_h) = compute_pixel_aspect_fit(
+        lease.framebuffer.width,
+        lease.framebuffer.height,
+    );
+    let fit_w = fit_w as usize;
+    let fit_h = fit_h as usize;
+    if direct_fit_offsets(
+        lease.framebuffer.width as usize,
+        lease.framebuffer.height as usize,
+        fit_w,
+        fit_h,
+    )
+    .is_none()
+    {
+        let _ = debug_print("xnes: fullscreen output is smaller than NES frame");
+        let _ = release_direct_lease(&mut lease);
+        return 1;
+    }
+    let x_lut: Vec<u16> = (0..fit_w).map(|dx| (dx * NES_W / fit_w) as u16).collect();
+    clear_direct_borders(lease.framebuffer, fit_w, fit_h);
+    let tokens = [input_endpoint];
+    let mut damage_failed = false;
+    let mut direct_diag_done = false;
+    let mut damage_failure_logged = false;
+    let audio = run_emulator_loop(emu, InputExitPolicy::CloseOrEscape, &tokens, |frame| {
+        render_direct_frame(lease.framebuffer, frame, fit_w, fit_h, &x_lut);
+        let damage_result = damage_direct_frame(&lease, fit_w, fit_h);
+        if !direct_diag_done {
+            log_first_direct_frame(&lease, damage_result.is_ok());
+            direct_diag_done = true;
+        }
+        if damage_result.is_err() {
+            damage_failed = true;
+            if !damage_failure_logged {
+                let _ = debug_print("xnes: direct damage failure (first failure)");
+                damage_failure_logged = true;
+            }
+        }
+    });
+    if let Some(audio) = audio {
+        close_audio(&audio);
+    }
+    if fullscreen_cleanup_failed(damage_failed, || release_direct_lease(&mut lease)) {
+        let _ = debug_print("xnes: fullscreen cleanup failed; fail-closed");
+        return 1;
+    }
+    let _ = debug_print("xnes: fullscreen lease released");
+    0
+}
+
+fn run_lease_selftest(iterations: usize) -> i32 {
+    let mut completed = 0usize;
+    while completed < iterations {
+        let mut phase = DirectLeasePhase::Mapped;
+        if phase.prepare_release().is_err()
+            || phase.unmap().is_err()
+            || phase.acknowledge().is_err()
+        {
+            return 1;
+        }
+        completed += 1;
+    }
+    let _ = debug_print(&alloc::format!("xnes: lease selftest passed iterations={}", iterations));
+    0
+}
+
 #[cfg(not(feature = "host-test"))]
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -743,7 +1175,18 @@ pub extern "C" fn main() -> i32 {
     let argv = args::args();
     let mut rom_path: Option<&str> = None;
     let mut fullscreen = false;
+    let mut lease_selftest: Option<usize> = None;
     for arg in &argv[1..] {
+        if let Some(value) = arg.strip_prefix("--lease-selftest=") {
+            lease_selftest = match value.parse::<usize>() {
+                Ok(iterations) => Some(iterations),
+                Err(_) => {
+                    let _ = debug_print("xnes: invalid --lease-selftest value");
+                    return 1;
+                }
+            };
+            continue;
+        }
         match arg.as_str() {
             "-fullscreen" | "--fullscreen" => fullscreen = true,
             _ => {
@@ -752,6 +1195,9 @@ pub extern "C" fn main() -> i32 {
                 }
             }
         }
+    }
+    if let Some(iterations) = lease_selftest {
+        return run_lease_selftest(iterations);
     }
     let rom_path = match rom_path {
         Some(p) => p,
@@ -788,14 +1234,10 @@ pub extern "C" fn main() -> i32 {
     let mut emu = Emulator::new(mapper);
     let _ = debug_print("xnes: emulator initialized");
 
-    if fullscreen {
-        run_windowed(&mut emu, true)
-    } else {
-        run_windowed(&mut emu, false)
-    }
+    if fullscreen { run_direct_fullscreen(&mut emu) } else { run_windowed(&mut emu) }
 }
 
-fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
+fn run_windowed(emu: &mut Emulator) -> i32 {
     let (win_cell_w, win_cell_h, pr_cell_x, pr_cell_y, pr_cell_w, pr_cell_h) = {
         let comp_ep = match registry::lookup_service("compositor:client") {
             Some(ep) => ep,
@@ -809,13 +1251,9 @@ fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
                 let _ = debug_print(&alloc::format!(
                     "xnes: screen {}x{} cells", cols, rows
                 ));
-                if fullscreen {
-                    (cols, rows, 0u16, 0u16, cols, rows)
-                } else {
-                    let (w, h) = compute_aspect_fit(cols, rows);
-                    let _ = debug_print(&alloc::format!("xnes: windowed fit {}x{}", w, h));
-                    (w, h, 0u16, 0u16, w, h)
-                }
+                let (w, h) = compute_aspect_fit(cols, rows);
+                let _ = debug_print(&alloc::format!("xnes: windowed fit {}x{}", w, h));
+                (w, h, 0u16, 0u16, w, h)
             }
             Err(_) => {
                 let _ = debug_print("xnes: screen query failed, using 64x30");
@@ -824,12 +1262,7 @@ fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
         }
     };
 
-    let flags = if fullscreen {
-        COMP_WIN_FLAG_FULLSCREEN | COMP_WIN_FLAG_NO_CHROME
-    } else {
-        0
-    };
-    let win = match create_window("xnes", win_cell_w as u32, win_cell_h as u32, flags) {
+    let win = match create_window("xnes", win_cell_w as u32, win_cell_h as u32, 0) {
         Ok(w) => w,
         Err(e) => {
             let _ = debug_print(&alloc::format!("xnes: window creation failed {:?}", e));
@@ -876,15 +1309,7 @@ fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
     }
     let _ = debug_print("xnes: PixelRegion attached to window");
 
-    let (dst_w, dst_h) = if fullscreen {
-        let (w, h) = compute_pixel_aspect_fit(
-            pixel_region.pixel_w as u32,
-            pixel_region.pixel_h as u32,
-        );
-        (w as usize, h as usize)
-    } else {
-        (pixel_region.pixel_w, pixel_region.pixel_h)
-    };
+    let (dst_w, dst_h) = (pixel_region.pixel_w, pixel_region.pixel_h);
     let off_x = (pixel_region.pixel_w.saturating_sub(dst_w)) / 2;
     let off_y = (pixel_region.pixel_h.saturating_sub(dst_h)) / 2;
     let _ = debug_print(&alloc::format!("xnes: render target {}x{}", dst_w, dst_h));
@@ -892,11 +1317,7 @@ fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
     let x_lut: Vec<u16> = (0..dst_w).map(|dx| (dx * NES_W / dst_w) as u16).collect();
 
     let tokens = [win.my_ep];
-    let exit_policy = if fullscreen {
-        InputExitPolicy::CloseOrEscape
-    } else {
-        InputExitPolicy::CloseOnly
-    };
+    let exit_policy = InputExitPolicy::CloseOnly;
     let audio = run_emulator_loop(emu, exit_policy, &tokens, |frame| {
         render_frame(
             &mut pixel_region,
@@ -933,6 +1354,32 @@ fn run_windowed(emu: &mut Emulator, fullscreen: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::Cell;
+
+    #[test]
+    fn fullscreen_cleanup_attempts_release_after_damage_failure() {
+        let release_attempted = Cell::new(false);
+
+        let failed = fullscreen_cleanup_failed(true, || {
+            release_attempted.set(true);
+            Ok(())
+        });
+
+        assert!(failed);
+        assert!(release_attempted.get());
+    }
+
+    #[test]
+    fn fullscreen_cleanup_reports_release_failure_without_damage_failure() {
+        assert!(fullscreen_cleanup_failed(false, || {
+            Err(libcluu::Error::InvalidState)
+        }));
+    }
+
+    #[test]
+    fn fullscreen_cleanup_succeeds_when_damage_and_release_succeed() {
+        assert!(!fullscreen_cleanup_failed(false, || Ok(())));
+    }
 
     #[test]
     fn close_only_policy_ignores_escape() {
@@ -957,6 +1404,64 @@ mod tests {
     }
 
     #[test]
+    fn direct_policy_exits_on_ctrl_alt_x() {
+        let key = ForwardedKey::Press {
+            ascii: b'x',
+            modifiers: MOD_CTRL | MOD_ALT,
+            scancode: SCAN_X,
+            extended: 0,
+        };
+        assert!(InputExitPolicy::CloseOrEscape.should_exit(&key));
+    }
+
+    #[test]
+    fn direct_policy_keeps_plain_x_running() {
+        let key = ForwardedKey::Press {
+            ascii: b'x',
+            modifiers: 0,
+            scancode: SCAN_X,
+            extended: 0,
+        };
+        assert!(!InputExitPolicy::CloseOrEscape.should_exit(&key));
+    }
+
+    #[test]
+    fn input_message_key_accepts_raw_keyboard_event() {
+        let msg = Message::new(
+            KBD_EVENT_LABEL,
+            [0, b'x' as usize, (MOD_CTRL | MOD_ALT) as usize, SCAN_X as usize, 0, 0],
+            5,
+        );
+        assert_eq!(
+            input_message_key(&msg),
+            Some(ForwardedKey::Press {
+                ascii: b'x',
+                modifiers: MOD_CTRL | MOD_ALT,
+                scancode: SCAN_X,
+                extended: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn input_message_key_preserves_forwarded_input() {
+        let msg = Message::new(
+            COMP_INPUT_FORWARD_LABEL,
+            [7, b'z' as usize, 0, SCAN_Z as usize, 0, 0],
+            5,
+        );
+        assert_eq!(
+            input_message_key(&msg),
+            Some(ForwardedKey::Press {
+                ascii: b'z',
+                modifiers: 0,
+                scancode: SCAN_Z,
+                extended: 0,
+            })
+        );
+    }
+
+    #[test]
     fn every_policy_exits_on_close() {
         assert!(InputExitPolicy::CloseOnly.should_exit(&ForwardedKey::Close));
     }
@@ -966,6 +1471,101 @@ mod tests {
         let mut samples = [1, 2, 3, 4];
         let remaining = retain_unpushed_samples(&mut samples, 2);
         assert_eq!((remaining, samples), (2, [3, 4, 3, 4]));
+    }
+
+    #[test]
+    fn direct_framebuffer_pages_round_up_exactly() {
+        assert_eq!(framebuffer_pages(640 * 4, 480), Some(300));
+        assert_eq!(framebuffer_pages(PAGE_SIZE as u32, 1), Some(1));
+        assert_eq!(framebuffer_pages(PAGE_SIZE as u32, 0), None);
+    }
+
+    #[test]
+    fn direct_framebuffer_stride_rejects_non_pixel_pitch() {
+        assert_eq!(framebuffer_stride_words(640 * 4), Some(640));
+        assert_eq!(framebuffer_stride_words(3), None);
+    }
+
+    #[test]
+    fn direct_fit_offsets_reject_subnative_output() {
+        assert_eq!(direct_fit_offsets(255, 240, 256, 240), None);
+        assert_eq!(direct_fit_offsets(256, 239, 256, 240), None);
+    }
+
+    #[test]
+    fn direct_fit_offsets_center_game_rectangle() {
+        assert_eq!(direct_fit_offsets(640, 480, 256, 240), Some((192, 120)));
+    }
+
+    #[test]
+    fn direct_release_requires_unmap_before_ack() {
+        let mut phase = DirectLeasePhase::Mapped;
+        assert_eq!(phase.acknowledge(), Err(DirectLeaseError::NotReleased));
+        assert_eq!(phase.prepare_release(), Ok(()));
+        assert_eq!(phase.acknowledge(), Err(DirectLeaseError::NotReleased));
+        assert_eq!(phase.unmap(), Ok(()));
+        assert_eq!(phase.acknowledge(), Ok(()));
+        assert_eq!(phase.acknowledge(), Err(DirectLeaseError::NotReleased));
+    }
+
+    #[test]
+    fn lease_control_message_keeps_handle_in_word_zero() {
+        let message = lease_control_message(DISPLAY_LEASE_RELEASE_LABEL, 17, 29);
+        assert_eq!(message.words[0], 17);
+        assert_eq!(message.words[1], 29);
+        assert_eq!(message.tag.words, 2);
+    }
+
+    #[test]
+    fn direct_damage_message_encodes_payload_length_and_rect() {
+        let lease_id = 17;
+        let generation = 23;
+        let mut payload = [0u8; 16];
+        payload[0..4].copy_from_slice(&17u32.to_le_bytes());
+        payload[4..8].copy_from_slice(&29u32.to_le_bytes());
+        payload[8..12].copy_from_slice(&256u32.to_le_bytes());
+        payload[12..16].copy_from_slice(&240u32.to_le_bytes());
+        let message = encode_direct_damage_message(lease_id, generation, payload.len());
+        let mut encoded = [0u8; core::mem::size_of::<Message>() + 16];
+        encoded[..core::mem::size_of::<Message>()].copy_from_slice(message.as_bytes());
+        encoded[core::mem::size_of::<Message>()..].copy_from_slice(&payload);
+
+        let Some((parsed, parsed_payload)) = parse_message(&encoded) else {
+            panic!("direct damage message must parse");
+        };
+
+        assert_eq!((parsed.words[0], parsed.words[1], parsed.words[3]),
+            (16, lease_id as usize, generation as usize));
+        assert_eq!(parsed_payload.len(), 16);
+        assert_eq!(
+            (
+                u32::from_le_bytes([
+                    parsed_payload[0],
+                    parsed_payload[1],
+                    parsed_payload[2],
+                    parsed_payload[3],
+                ]),
+                u32::from_le_bytes([
+                    parsed_payload[4],
+                    parsed_payload[5],
+                    parsed_payload[6],
+                    parsed_payload[7],
+                ]),
+                u32::from_le_bytes([
+                    parsed_payload[8],
+                    parsed_payload[9],
+                    parsed_payload[10],
+                    parsed_payload[11],
+                ]),
+                u32::from_le_bytes([
+                    parsed_payload[12],
+                    parsed_payload[13],
+                    parsed_payload[14],
+                    parsed_payload[15],
+                ]),
+            ),
+            (17, 29, 256, 240)
+        );
     }
 
 }
