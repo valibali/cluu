@@ -37,6 +37,15 @@ pub struct CalleeSavedRegs {
 }
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
+const IPC_SEND_NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 2);
+
+fn decode_send_len(raw: usize) -> (usize, bool, bool) {
+    (
+        raw & !(IPC_REG_INLINE_FLAG | IPC_SEND_NONBLOCK_FLAG),
+        raw & IPC_REG_INLINE_FLAG != 0,
+        raw & IPC_SEND_NONBLOCK_FLAG != 0,
+    )
+}
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 /// Flag bit on `invoke_thread_create`'s `args.arg6`: create the thread
 /// SUSPENDED. Userspace must call `thread_resume` to make it runnable.
@@ -76,7 +85,7 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
 
     let token_handle = TokenHandle::from_raw(args.arg1);
     let msg_ptr = args.arg2;
-    let msg_len = args.arg3;
+    let (msg_len, inline_flag_set, nonblocking) = decode_send_len(args.arg3);
 
     let (token, obj_ref) = lookup_token(token_handle).map_err(|_| Error::InvalidArgument)?;
     if !token.has_right(Rights::IPC_SEND) {
@@ -91,7 +100,6 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
         return Err(Error::InvalidArgument);
     };
 
-    let inline_flag_set = (msg_len & IPC_REG_INLINE_FLAG) != 0;
     if inline_flag_set {
         if !crate::ipc::endpoint::register_fast_enabled() {
             return Err(Error::InvalidParameter);
@@ -112,11 +120,17 @@ pub fn sys_send(args: SyscallArgs) -> SyscallResult {
             buffer[copied..copied + chunk_len].copy_from_slice(&bytes[..chunk_len]);
             copied += chunk_len;
         }
-        crate::ipc::endpoint::send_from_kernel(endpoint_id, &buffer[..inline_len])?;
+        crate::ipc::endpoint::send_from_kernel(endpoint_id, &buffer[..inline_len], nonblocking)?;
     } else {
         let page_table_root =
             crate::sched::ThreadManager::current_page_table_root().ok_or(Error::InvalidState)?;
-        crate::ipc::endpoint::send_from_user(endpoint_id, msg_ptr, msg_len, page_table_root)?;
+        crate::ipc::endpoint::send_from_user(
+            endpoint_id,
+            msg_ptr,
+            msg_len,
+            page_table_root,
+            nonblocking,
+        )?;
     }
     Ok(0)
 }
@@ -1516,13 +1530,13 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
             return Err(Error::InvalidArgument);
         };
         let phys = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
-        frame_registry::inc_map_count(frame_id);
-        // Phase 2.6: frame was retype_to_user'd when allocated (rc=1, UserData).
-        // This is a SECOND mapping into a different address space — call inc_ref
-        // so teardown of either space only decrements without prematurely freeing
-        // the frame. Without this, the owner's teardown dec_ref drives rc→0 while
-        // the borrower's PTE still points to the now-freed phys (UAF).
-        let _ = crate::mm::frame_table::inc_ref(phys);
+        // Token ownership is separate from PTE references. Add one reference for
+        // this mapping; token release remains responsible for final reclamation.
+        frame_registry::map_page(frame_id, 0).map_err(|_| Error::InvalidArgument)?;
+        if crate::mm::frame_table::inc_ref(phys).is_err() {
+            let _ = frame_registry::unmap_page(phys);
+            return Err(Error::InvalidState);
+        }
         mapped_frame_id = Some(frame_id);
         phys
     } else if map_device {
@@ -1567,7 +1581,9 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
         }
     }
 
-    let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
+    if !map_frame_token {
+        let _ = crate::mm::frame_table::retype_to_user(frame_phys, space_id);
+    }
     let result = space_repository::with_space_mut(space_id, |space| unsafe {
         elf::map_user_page(
             virt_addr,
@@ -1582,20 +1598,20 @@ fn invoke_space_map(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> Sys
     match result {
         Some(Ok(())) => Ok(0),
         Some(Err(_)) => {
-            if let Some(fid) = mapped_frame_id {
+            if let Some(_fid) = mapped_frame_id {
                 // Phase 2.6: undo the inc_ref added above for MAP_FRAME_TOKEN.
                 let _ = crate::mm::frame_table::dec_ref(frame_phys);
-                frame_registry::dec_map_count(fid);
+                let _ = frame_registry::unmap_page(frame_phys);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
             }
             Err(Error::OutOfMemory)
         }
         None => {
-            if let Some(fid) = mapped_frame_id {
+            if let Some(_fid) = mapped_frame_id {
                 // Phase 2.6: undo the inc_ref added above for MAP_FRAME_TOKEN.
                 let _ = crate::mm::frame_table::dec_ref(frame_phys);
-                frame_registry::dec_map_count(fid);
+                let _ = frame_registry::unmap_page(frame_phys);
             } else if !map_device {
                 pmm::free_frame(frame_phys);
             }
@@ -1650,13 +1666,9 @@ fn invoke_space_unmap(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -> S
                 // for capability-tracked frames still needs to be decremented so
                 // map_count stays consistent — but the actual PMM free is now
                 // driven by dec_ref, not frame_registry.
-                let _ = crate::mm::frame_table::dec_ref(phys_addr);
                 // Also maintain the frame_registry map_count for tracked frames.
-                if let Some(frame_id) = frame_registry::lookup_by_phys(phys_addr) {
-                    // dec_and_maybe_free would double-free if dec_ref already freed;
-                    // just decrement the map count instead.
-                    frame_registry::dec_map_count(frame_id);
-                }
+                let _ = frame_registry::unmap_page(phys_addr);
+                let _ = crate::mm::frame_table::dec_ref(phys_addr);
                 unmapped += 1;
             }
         }
@@ -2425,17 +2437,31 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
             return Err(Error::InvalidArgument);
         };
         let phys_base = frame_registry::get_phys(frame_id).ok_or(Error::NotFound)?;
-        frame_registry::inc_map_count(frame_id);
-
         // Map the physical pages contiguously starting at phys_base.
+        let mut mapped_pages = 0usize;
         for page_idx in 0..num_pages {
             let virt_addr = virt_start + (page_idx * PAGE_SIZE) as u64;
-            let phys_addr = phys_base + (page_idx * PAGE_SIZE) as u64;
-            // Phase 2.6: inc_ref each page individually — the frame was
-            // retype_to_user'd at FrameAllocate time (rc≥1). This is a
-            // SECOND (or later) mapping; teardown of either space must
-            // only decrement, not prematurely free. One inc_ref per PTE.
-            let _ = crate::mm::frame_table::inc_ref(phys_addr);
+            let phys_addr = match frame_registry::map_page(frame_id, page_idx) {
+                Ok(phys) => phys,
+                Err(_) => {
+                    for rollback_idx in 0..mapped_pages {
+                        let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                        let _ = frame_registry::unmap_page(rollback_phys);
+                        let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                    }
+                    return Err(Error::InvalidArgument);
+                }
+            };
+            // Add one frame-table reference per constituent PTE.
+            if crate::mm::frame_table::inc_ref(phys_addr).is_err() {
+                let _ = frame_registry::unmap_page(phys_addr);
+                for rollback_idx in 0..mapped_pages {
+                    let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                    let _ = frame_registry::unmap_page(rollback_phys);
+                    let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                }
+                return Err(Error::InvalidState);
+            }
             let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
                 crate::elf::map_user_page(
                     virt_addr,
@@ -2452,17 +2478,28 @@ fn invoke_space_map_range(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) 
                     // map_user_page failed: undo the inc_ref we just added, then
                     // also undo the frame_registry map_count.
                     let _ = crate::mm::frame_table::dec_ref(phys_addr);
-                    frame_registry::dec_map_count(frame_id);
+                    let _ = frame_registry::unmap_page(phys_addr);
+                    for rollback_idx in 0..mapped_pages {
+                        let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                        let _ = frame_registry::unmap_page(rollback_phys);
+                        let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                    }
                     klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: map_user_page failed");
                     return Err(Error::OutOfMemory);
                 }
                 None => {
                     let _ = crate::mm::frame_table::dec_ref(phys_addr);
-                    frame_registry::dec_map_count(frame_id);
+                    let _ = frame_registry::unmap_page(phys_addr);
+                    for rollback_idx in 0..mapped_pages {
+                        let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                        let _ = frame_registry::unmap_page(rollback_phys);
+                        let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                    }
                     klibcluu::warn("invoke_space_map_range MAP_FRAME_TOKEN: space not found");
                     return Err(Error::NotFound);
                 }
             }
+            mapped_pages += 1;
         }
         return Ok(num_pages);
     }
@@ -2664,11 +2701,29 @@ fn invoke_space_map_auto(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -
         Some(va)
     }).ok_or(Error::NotFound)?.ok_or(Error::OutOfMemory)?;
 
-    frame_registry::inc_map_count(frame_id);
+    let mut mapped_pages = 0usize;
     for page_idx in 0..num_pages {
         let virt_addr = va + (page_idx * PAGE_SIZE) as u64;
-        let phys_addr = phys_base + (page_idx * PAGE_SIZE) as u64;
-        let _ = crate::mm::frame_table::inc_ref(phys_addr);
+        let phys_addr = match frame_registry::map_page(frame_id, page_idx) {
+            Ok(phys) => phys,
+            Err(_) => {
+                for rollback_idx in 0..mapped_pages {
+                    let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                    let _ = frame_registry::unmap_page(rollback_phys);
+                    let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                }
+                return Err(Error::InvalidArgument);
+            }
+        };
+        if crate::mm::frame_table::inc_ref(phys_addr).is_err() {
+            let _ = frame_registry::unmap_page(phys_addr);
+            for rollback_idx in 0..mapped_pages {
+                let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                let _ = frame_registry::unmap_page(rollback_phys);
+                let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+            }
+            return Err(Error::InvalidState);
+        }
         let map_result = space_repository::with_space_mut(space_id, |space| unsafe {
             crate::elf::map_user_page(
                 virt_addr,
@@ -2683,15 +2738,26 @@ fn invoke_space_map_auto(token: &Token, obj_ref: ObjectRef, args: SyscallArgs) -
             Some(Ok(())) => {}
             Some(Err(_)) => {
                 let _ = crate::mm::frame_table::dec_ref(phys_addr);
-                frame_registry::dec_map_count(frame_id);
+                let _ = frame_registry::unmap_page(phys_addr);
+                for rollback_idx in 0..mapped_pages {
+                    let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                    let _ = frame_registry::unmap_page(rollback_phys);
+                    let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                }
                 return Err(Error::OutOfMemory);
             }
             None => {
                 let _ = crate::mm::frame_table::dec_ref(phys_addr);
-                frame_registry::dec_map_count(frame_id);
+                let _ = frame_registry::unmap_page(phys_addr);
+                for rollback_idx in 0..mapped_pages {
+                    let rollback_phys = phys_base + (rollback_idx * PAGE_SIZE) as u64;
+                    let _ = frame_registry::unmap_page(rollback_phys);
+                    let _ = crate::mm::frame_table::dec_ref(rollback_phys);
+                }
                 return Err(Error::NotFound);
             }
         }
+        mapped_pages += 1;
     }
 
     Ok(va as usize)
@@ -4075,4 +4141,29 @@ pub fn sys_debug_print(args: SyscallArgs) -> SyscallResult {
 pub fn sys_debug_print(_args: SyscallArgs) -> SyscallResult {
     // Disabled in release builds.
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_send_len_preserves_legacy_pointer_mode() {
+        assert_eq!(decode_send_len(8192), (8192, false, false));
+    }
+
+    #[test]
+    fn decode_send_len_handles_inline_and_nonblocking_flags() {
+        let raw = IPC_REG_INLINE_FLAG | IPC_SEND_NONBLOCK_FLAG | 32;
+        assert_eq!(decode_send_len(raw), (32, true, true));
+    }
+
+    #[test]
+    fn decode_send_len_keeps_unknown_flag_bits_in_length() {
+        let unknown = 1usize << (usize::BITS - 3);
+        let (len, inline, nonblocking) = decode_send_len(unknown | 32);
+        assert_eq!(len, unknown | 32);
+        assert!(!inline);
+        assert!(!nonblocking);
+    }
 }

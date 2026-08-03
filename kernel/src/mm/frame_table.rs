@@ -106,8 +106,14 @@ pub struct FrameMeta {
 }
 
 impl FrameMeta {
+    const TOKEN_OWNED: u8 = 0x80;
+
     const fn zeroed() -> Self {
         Self { tag: FrameTag::Untyped, refcount: 0, owner: 0, extra: 0 }
+    }
+
+    const fn token_owned(self) -> bool {
+        self.extra & Self::TOKEN_OWNED != 0
     }
 }
 
@@ -273,6 +279,26 @@ pub fn retype_to_user(phys: u64, owner: AddressSpaceId) -> Result<(), FrameTable
     Ok(())
 }
 
+/// Retype a frame owned by a frame token.
+///
+/// Token ownership is held separately from PTE references, so an unmapped
+/// token frame remains typed until `release_token_owned_range` explicitly
+/// releases it.
+pub fn retype_to_token_user(phys: u64, owner: AddressSpaceId) -> Result<(), FrameTableError> {
+    let mut guard = FRAME_TABLE.lock();
+    let Some(table) = guard.as_mut() else { return Ok(()); };
+    let idx = checked_frame(table, phys)?;
+    let entry = &mut table[idx];
+    if entry.tag != FrameTag::Untyped {
+        return Err(FrameTableError::AlreadyTyped);
+    }
+    entry.tag = FrameTag::UserData;
+    entry.refcount = 0;
+    entry.owner = owner.as_u64() as u16;
+    entry.extra = FrameMeta::TOKEN_OWNED;
+    Ok(())
+}
+
 /// Retype a frame to `Grant` (shared / multi-owner).
 ///
 /// Caller must have established ownership already (typically comes from a
@@ -285,7 +311,7 @@ pub fn retype_to_grant(phys: u64) -> Result<(), FrameTableError> {
     let entry = &mut table[idx];
     // Grant is a valid transition from UserData, Untyped, or Grant itself.
     entry.tag = FrameTag::Grant;
-    entry.extra = 0;
+    entry.extra &= FrameMeta::TOKEN_OWNED;
     Ok(())
 }
 
@@ -344,6 +370,9 @@ pub fn retype_to_untyped(phys: u64) -> Result<(), FrameTableError> {
         if ENFORCE_INVARIANTS {
             return Err(FrameTableError::StillReferenced);
         }
+    }
+    if entry.token_owned() {
+        return Err(FrameTableError::StillReferenced);
     }
     entry.tag = FrameTag::Untyped;
     entry.refcount = 0;
@@ -439,8 +468,10 @@ pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
         }
         entry.refcount = entry.refcount.saturating_sub(1);
         let new_rc = entry.refcount;
-        let should_free = new_rc == 0 && matches!(entry.tag, FrameTag::UserData | FrameTag::Grant | FrameTag::PageTable);
-        if new_rc == 0 {
+        let should_free = new_rc == 0
+            && !entry.token_owned()
+            && matches!(entry.tag, FrameTag::UserData | FrameTag::Grant | FrameTag::PageTable);
+        if new_rc == 0 && !entry.token_owned() {
             entry.tag = FrameTag::Untyped;
             entry.owner = 0;
             entry.extra = 0;
@@ -453,6 +484,31 @@ pub fn dec_ref(phys: u64) -> Result<u16, FrameTableError> {
         crate::mm::pmm::free_frame_tagged(phys, "dec_ref_auto");
     }
     Ok(new_rc)
+}
+
+/// Release all pages in one frame-token allocation atomically.
+pub fn release_token_owned_range(phys: u64, page_count: u32) -> Result<(), FrameTableError> {
+    let mut guard = FRAME_TABLE.lock();
+    let Some(table) = guard.as_mut() else { return Ok(()); };
+    let count = page_count as usize;
+    for offset in 0..count {
+        let page_phys = phys + (offset as u64) * 4096;
+        let idx = checked_frame(table, page_phys)?;
+        let entry = &table[idx];
+        if !entry.token_owned() || entry.refcount != 0 {
+            return Err(FrameTableError::StillReferenced);
+        }
+    }
+    for offset in 0..count {
+        let page_phys = phys + (offset as u64) * 4096;
+        let idx = checked_frame(table, page_phys)?;
+        let entry = &mut table[idx];
+        entry.tag = FrameTag::Untyped;
+        entry.refcount = 0;
+        entry.owner = 0;
+        entry.extra = 0;
+    }
+    Ok(())
 }
 
 // ─── Query API ───────────────────────────────────────────────────────────────
@@ -509,6 +565,13 @@ pub fn refcount_of(phys: u64) -> u16 {
     table[idx].refcount
 }
 
+pub fn is_token_owned(phys: u64) -> bool {
+    let guard = FRAME_TABLE.lock();
+    let Some(table) = guard.as_ref() else { return false; };
+    let idx = frame_of(phys);
+    table.get(idx).is_some_and(|entry| entry.token_owned())
+}
+
 // ─── Diagnostic / audit ──────────────────────────────────────────────────────
 
 /// Scan the entire table and count frames that are tagged with any of the
@@ -525,7 +588,7 @@ pub fn count_inconsistencies() -> (usize, usize) {
     for e in table.iter() {
         if e.tag == FrameTag::Untyped && e.refcount > 0 {
             untyped_has_ref += 1;
-        } else if e.tag != FrameTag::Untyped && e.refcount == 0 {
+        } else if e.tag != FrameTag::Untyped && e.refcount == 0 && !e.token_owned() {
             // KernelHeap / Device / BootReserved frames don't participate in
             // user refcounting yet; exclude them from the "inconsistent" count.
             match e.tag {
@@ -592,6 +655,23 @@ mod tests {
         entry.refcount = 1;
         entry.owner = owner as u16;
         entry.extra = 0;
+        Ok(())
+    }
+
+    fn do_retype_token_user(
+        table: &mut Vec<FrameMeta>,
+        phys: u64,
+        owner: u64,
+    ) -> Result<(), FrameTableError> {
+        let idx = checked_frame(table, phys)?;
+        let entry = &mut table[idx];
+        if entry.tag != FrameTag::Untyped {
+            return Err(FrameTableError::AlreadyTyped);
+        }
+        entry.tag = FrameTag::UserData;
+        entry.refcount = 0;
+        entry.owner = owner as u16;
+        entry.extra = FrameMeta::TOKEN_OWNED;
         Ok(())
     }
 
@@ -662,12 +742,31 @@ mod tests {
             return Ok(0);
         }
         entry.refcount = entry.refcount.saturating_sub(1);
-        if entry.refcount == 0 {
+        if entry.refcount == 0 && !entry.token_owned() {
             entry.tag = FrameTag::Untyped;
             entry.owner = 0;
             entry.extra = 0;
         }
         Ok(entry.refcount)
+    }
+
+    fn do_release_token_owned_range(
+        table: &mut Vec<FrameMeta>,
+        phys: u64,
+        page_count: u32,
+    ) -> Result<(), FrameTableError> {
+        let count = page_count as usize;
+        for offset in 0..count {
+            let entry = &table[frame_of(phys + (offset as u64) * PAGE)];
+            if !entry.token_owned() || entry.refcount != 0 {
+                return Err(FrameTableError::StillReferenced);
+            }
+        }
+        for offset in 0..count {
+            let entry = &mut table[frame_of(phys + (offset as u64) * PAGE)];
+            *entry = FrameMeta::zeroed();
+        }
+        Ok(())
     }
 
     fn do_dec_ref(table: &mut Vec<FrameMeta>, phys: u64) -> Result<u16, FrameTableError> {
@@ -693,6 +792,11 @@ mod tests {
             assert_eq!(e.refcount, 0, "frame {} refcount should be 0", i);
             assert_eq!(e.owner, 0, "frame {} owner should be 0", i);
         }
+    }
+
+    #[test]
+    fn token_ownership_reuses_existing_frame_metadata_byte() {
+        assert_eq!(core::mem::size_of::<FrameMeta>(), 6);
     }
 
     // ── Test 2: retype_to_user ──────────────────────────────────────────────
@@ -1271,5 +1375,54 @@ mod tests {
         let rc = do_dec_ref_p2(&mut table, phys).unwrap();
         assert_eq!(rc, 0);
         assert_eq!(meta(&table, phys).tag, FrameTag::Untyped);
+    }
+
+    #[test]
+    fn token_owned_frame_stays_typed_until_explicit_release() {
+        let mut table = fresh_table(16);
+        let phys = 7 * PAGE;
+
+        do_retype_token_user(&mut table, phys, 21).unwrap();
+        assert_eq!(meta(&table, phys).refcount, 0);
+
+        do_inc_ref_p2(&mut table, phys).unwrap();
+        do_dec_ref_p2(&mut table, phys).unwrap();
+
+        assert_eq!(meta(&table, phys).tag, FrameTag::UserData);
+        assert!(meta(&table, phys).token_owned());
+    }
+
+    #[test]
+    fn token_owned_range_release_clears_every_constituent_page() {
+        let mut table = fresh_table(16);
+        let phys = 8 * PAGE;
+
+        for page in 0..4 {
+            do_retype_token_user(&mut table, phys + page * PAGE, 22).unwrap();
+        }
+
+        do_release_token_owned_range(&mut table, phys, 4).unwrap();
+
+        for page in 0..4 {
+            assert_eq!(meta(&table, phys + page * PAGE).tag, FrameTag::Untyped);
+        }
+    }
+
+    #[test]
+    fn token_owned_range_release_rejects_mapped_constituent_without_partial_release() {
+        let mut table = fresh_table(16);
+        let phys = 8 * PAGE;
+
+        for page in 0..4 {
+            do_retype_token_user(&mut table, phys + page * PAGE, 23).unwrap();
+        }
+        do_inc_ref_p2(&mut table, phys + 2 * PAGE).unwrap();
+
+        let result = do_release_token_owned_range(&mut table, phys, 4);
+
+        assert_eq!(result, Err(FrameTableError::StillReferenced));
+        for page in 0..4 {
+            assert!(meta(&table, phys + page * PAGE).token_owned());
+        }
     }
 }

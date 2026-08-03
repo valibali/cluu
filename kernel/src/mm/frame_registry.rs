@@ -29,6 +29,24 @@ pub struct FrameEntry {
     pub page_count: u32,
 }
 
+impl FrameEntry {
+    fn begin_map(&mut self, page_index: usize) -> Result<u64, FrameRegistryError> {
+        if page_index >= self.page_count as usize {
+            return Err(FrameRegistryError::PageOutOfRange);
+        }
+        self.map_count = self.map_count.saturating_add(1);
+        Ok(self.phys_addr + (page_index as u64) * 4096)
+    }
+
+    fn finish_unmap(&mut self) -> Result<(), FrameRegistryError> {
+        if self.map_count == 0 {
+            return Err(FrameRegistryError::NotMapped);
+        }
+        self.map_count -= 1;
+        Ok(())
+    }
+}
+
 /// Forward map: FrameId → FrameEntry
 static FRAME_REGISTRY: Mutex<BTreeMap<FrameId, FrameEntry>> = Mutex::new(BTreeMap::new());
 
@@ -42,6 +60,8 @@ static NEXT_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 pub enum FrameRegistryError {
     NotFound,
     StillMapped,
+    NotMapped,
+    PageOutOfRange,
 }
 
 /// Allocate a new physical frame and register it.
@@ -132,7 +152,11 @@ pub fn dec_and_maybe_free(frame_id: FrameId) {
     reg.remove(&frame_id);
     drop(reg);
 
-    PHYS_TO_FRAME.lock().remove(&phys);
+    let mut phys_map = PHYS_TO_FRAME.lock();
+    for page in 0..page_count {
+        phys_map.remove(&(phys + (page as u64) * 4096));
+    }
+    drop(phys_map);
     let order = ceil_log2_pages(page_count as usize);
     // Phase 1: advisory retype before PMM free.
     let _ = crate::mm::frame_table::retype_to_untyped(phys);
@@ -152,13 +176,25 @@ pub fn free_frame(frame_id: FrameId) -> Result<(), FrameRegistryError> {
 
     let phys = entry.phys_addr;
     let page_count = entry.page_count;
+    let token_owned = crate::mm::frame_table::is_token_owned(phys);
+    if token_owned {
+        crate::mm::frame_table::release_token_owned_range(phys, page_count)
+            .map_err(|_| FrameRegistryError::StillMapped)?;
+    } else {
+        for page in 0..page_count {
+            crate::mm::frame_table::retype_to_untyped(phys + (page as u64) * 4096)
+                .map_err(|_| FrameRegistryError::StillMapped)?;
+        }
+    }
     reg.remove(&frame_id);
     drop(reg);
 
-    PHYS_TO_FRAME.lock().remove(&phys);
+    let mut phys_map = PHYS_TO_FRAME.lock();
+    for page in 0..page_count {
+        phys_map.remove(&(phys + (page as u64) * 4096));
+    }
+    drop(phys_map);
     let order = ceil_log2_pages(page_count as usize);
-    // Phase 1: advisory retype before PMM free.
-    let _ = crate::mm::frame_table::retype_to_untyped(phys);
     crate::mm::pmm::free_order(phys, order as usize);
     Ok(())
 }
@@ -171,15 +207,38 @@ pub fn get_phys(frame_id: FrameId) -> Option<u64> {
 /// Increment mapping count (called when frame is mapped into a space).
 pub fn inc_map_count(frame_id: FrameId) {
     if let Some(entry) = FRAME_REGISTRY.lock().get_mut(&frame_id) {
-        entry.map_count += 1;
+        entry.map_count = entry.map_count.saturating_add(1);
     }
+}
+
+pub fn map_page(frame_id: FrameId, page_index: usize) -> Result<u64, FrameRegistryError> {
+    FRAME_REGISTRY
+        .lock()
+        .get_mut(&frame_id)
+        .ok_or(FrameRegistryError::NotFound)?
+        .begin_map(page_index)
 }
 
 /// Decrement mapping count (called when frame is unmapped from a space).
 pub fn dec_map_count(frame_id: FrameId) {
     if let Some(entry) = FRAME_REGISTRY.lock().get_mut(&frame_id) {
-        entry.map_count = entry.map_count.saturating_sub(1);
+        let _ = entry.finish_unmap();
     }
+}
+
+pub fn unmap_page(phys: u64) -> Result<FrameId, FrameRegistryError> {
+    let frame_id = lookup_by_phys(phys).ok_or(FrameRegistryError::NotFound)?;
+    let mut registry = FRAME_REGISTRY.lock();
+    let entry = registry.get_mut(&frame_id).ok_or(FrameRegistryError::NotFound)?;
+    let offset = phys.checked_sub(entry.phys_addr).ok_or(FrameRegistryError::PageOutOfRange)?;
+    if offset % 4096 != 0 {
+        return Err(FrameRegistryError::PageOutOfRange);
+    }
+    if offset / 4096 >= entry.page_count as u64 {
+        return Err(FrameRegistryError::PageOutOfRange);
+    }
+    entry.finish_unmap()?;
+    Ok(frame_id)
 }
 
 /// Reverse lookup: physical address → FrameId.
@@ -223,8 +282,8 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
     let allocated_count = 1usize << order;
     for i in 0..allocated_count {
         let page_phys = phys + (i as u64) * 4096;
-        if let Err(e) = crate::mm::frame_table::retype_to_user(page_phys, owner) {
-            klibcluu::error("frame_registry::alloc_frame_n: retype_to_user failed");
+        if let Err(e) = crate::mm::frame_table::retype_to_token_user(page_phys, owner) {
+            klibcluu::error("frame_registry::alloc_frame_n: retype_to_token_user failed");
             klibcluu::log_hex(klibcluu::LogLevel::Error, "  phys=0x", page_phys);
             klibcluu::log_dec(klibcluu::LogLevel::Error, "  owner=", owner.as_u64());
             let _ = e;
@@ -240,7 +299,10 @@ pub fn alloc_frame_n(owner: AddressSpaceId, n_pages: usize) -> Option<(FrameId, 
         page_count: allocated_pages,
     };
     FRAME_REGISTRY.lock().insert(id, entry);
-    PHYS_TO_FRAME.lock().insert(phys, id);
+    let mut phys_map = PHYS_TO_FRAME.lock();
+    for page in 0..allocated_pages {
+        phys_map.insert(phys + (page as u64) * 4096, id);
+    }
     Some((id, phys))
 }
 
@@ -252,4 +314,69 @@ fn ceil_log2_pages(n: usize) -> u32 {
         return 0;
     }
     (usize::BITS - (n - 1).leading_zeros()) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_entry_counts_each_constituent_mapping() {
+        let mut entry = FrameEntry {
+            phys_addr: 0x4000,
+            owner_space: AddressSpaceId::new(1),
+            map_count: 0,
+            auto_free: false,
+            page_count: 4,
+        };
+
+        assert_eq!(entry.begin_map(2), Ok(0x6000));
+        assert_eq!(entry.begin_map(3), Ok(0x7000));
+        assert_eq!(entry.map_count, 2);
+    }
+
+    #[test]
+    fn frame_entry_rejects_page_beyond_buddy_rounded_allocation() {
+        let mut entry = FrameEntry {
+            phys_addr: 0x4000,
+            owner_space: AddressSpaceId::new(1),
+            map_count: 0,
+            auto_free: false,
+            page_count: 4,
+        };
+
+        assert_eq!(entry.begin_map(4), Err(FrameRegistryError::PageOutOfRange));
+        assert_eq!(entry.map_count, 0);
+    }
+
+    #[test]
+    fn frame_entry_rejects_mapping_count_underflow() {
+        let mut entry = FrameEntry {
+            phys_addr: 0x4000,
+            owner_space: AddressSpaceId::new(1),
+            map_count: 0,
+            auto_free: false,
+            page_count: 1,
+        };
+
+        assert_eq!(entry.finish_unmap(), Err(FrameRegistryError::NotMapped));
+        assert_eq!(entry.map_count, 0);
+    }
+
+    #[test]
+    fn frame_entry_unmaps_each_constituent_mapping_exactly_once() {
+        let mut entry = FrameEntry {
+            phys_addr: 0x4000,
+            owner_space: AddressSpaceId::new(1),
+            map_count: 0,
+            auto_free: false,
+            page_count: 4,
+        };
+
+        assert_eq!(entry.begin_map(1), Ok(0x5000));
+        assert_eq!(entry.begin_map(3), Ok(0x7000));
+        assert_eq!(entry.finish_unmap(), Ok(()));
+        assert_eq!(entry.finish_unmap(), Ok(()));
+        assert_eq!(entry.finish_unmap(), Err(FrameRegistryError::NotMapped));
+    }
 }

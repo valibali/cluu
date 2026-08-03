@@ -292,8 +292,12 @@ impl QueueEndpoint {
         sender: Option<ThreadId>,
         data: &[u8],
         reply_id: Option<crate::token::ReplyId>,
+        nonblocking: bool,
     ) -> Result<Option<ThreadId>, Error> {
         if self.queue.len() >= MAX_QUEUE_LEN {
+            if nonblocking {
+                return Err(Error::WouldBlock);
+            }
             if let Some(sender_id) = crate::sched::ThreadManager::current() {
                 self.waiting_senders.push_back(sender_id);
                 return Err(Error::WouldBlock);
@@ -321,13 +325,21 @@ impl QueueEndpoint {
         data: &[u8],
         reply_id: crate::token::ReplyId,
     ) -> Result<Option<ThreadId>, Error> {
-        self.send_inner(sender, data, Some(reply_id))
+        self.send_inner(sender, data, Some(reply_id), false)
+    }
+
+    pub fn send_nonblocking(
+        &mut self,
+        sender: Option<ThreadId>,
+        data: &[u8],
+    ) -> Result<Option<ThreadId>, Error> {
+        self.send_inner(sender, data, None, true)
     }
 }
 
 impl ByteEndpoint for QueueEndpoint {
     fn send(&mut self, sender: Option<ThreadId>, data: &[u8]) -> Result<Option<ThreadId>, Error> {
-        self.send_inner(sender, data, None)
+        self.send_inner(sender, data, None, false)
     }
 
     fn recv(&mut self, receiver: ThreadId) -> Result<Option<ReceivedMessage>, Error> {
@@ -723,6 +735,7 @@ pub fn send_from_user(
     msg_ptr: usize,
     msg_len: usize,
     page_table_root: x86_64::PhysAddr,
+    nonblocking: bool,
 ) -> Result<(), Error> {
     let first_send = {
         let mut logged = SEND_LOGGED.lock();
@@ -739,14 +752,18 @@ pub fn send_from_user(
         return Err(Error::InvalidParameter);
     }
     let payload = copy_user_payload(msg_ptr, msg_len, page_table_root)?;
-    send_payload(endpoint, payload.as_slice(), first_send)
+    send_payload(endpoint, payload.as_slice(), first_send, nonblocking)
 }
 
-pub fn send_from_kernel(endpoint: EndpointId, payload: &[u8]) -> Result<(), Error> {
+pub fn send_from_kernel(
+    endpoint: EndpointId,
+    payload: &[u8],
+    nonblocking: bool,
+) -> Result<(), Error> {
     if payload.len() > IPC_MESSAGE_MAX {
         return Err(Error::InvalidParameter);
     }
-    send_payload(endpoint, payload, false)
+    send_payload(endpoint, payload, false, nonblocking)
 }
 
 pub fn recv_to_user_nonblocking(
@@ -973,7 +990,12 @@ fn log_endpoint_busy(endpoint: EndpointId, stats: QueueStats, is_call: bool) {
     );
 }
 
-fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<(), Error> {
+fn send_payload(
+    endpoint: EndpointId,
+    payload: &[u8],
+    log_send: bool,
+    nonblocking: bool,
+) -> Result<(), Error> {
     let sender = crate::sched::ThreadManager::current();
     // Try to send - if queue is full, block and return (will be retried from userspace when woken)
     let wake = {
@@ -989,9 +1011,16 @@ fn send_payload(endpoint: EndpointId, payload: &[u8], log_send: bool) -> Result<
         match try_direct_deliver_to_waiting_receiver(ep, endpoint, sender, payload)? {
             DirectDelivery::DeliveredWake(receiver_id) => Some(receiver_id),
             DirectDelivery::DeliveredNoWake(_) => None,
-            DirectDelivery::NotDelivered => match ep.send(sender, payload) {
+            DirectDelivery::NotDelivered => match if nonblocking {
+                ep.send_nonblocking(sender, payload)
+            } else {
+                ep.send(sender, payload)
+            } {
                 Ok(wake) => wake, // Success
                 Err(Error::WouldBlock) => {
+                    if nonblocking {
+                        return Err(Error::WouldBlock);
+                    }
                     // Queue is full - sender was added to waiting_senders, need to block.
                     crate::sched::ThreadManager::block_current();
                     crate::architecture::x86_64::syscall::request_resched();
@@ -1169,6 +1198,36 @@ pub fn set_register_fast_enabled(enabled: bool) {
 #[inline(always)]
 pub fn register_fast_enabled() -> bool {
     IPC_REGISTER_FAST_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonblocking_send_does_not_register_waiter_when_queue_is_full() {
+        let mut endpoint = QueueEndpoint::new();
+        for _ in 0..MAX_QUEUE_LEN {
+            assert!(endpoint.send_nonblocking(None, &[0]).is_ok());
+        }
+
+        assert_eq!(endpoint.send_nonblocking(None, &[1]), Err(Error::WouldBlock));
+        assert!(endpoint.waiting_senders.is_empty());
+        assert_eq!(endpoint.queue.len(), MAX_QUEUE_LEN);
+    }
+
+    #[test]
+    fn nonblocking_send_retries_after_queue_space_is_available() {
+        let mut endpoint = QueueEndpoint::new();
+        for _ in 0..MAX_QUEUE_LEN {
+            assert!(endpoint.send_nonblocking(None, &[0]).is_ok());
+        }
+        assert_eq!(endpoint.send_nonblocking(None, &[1]), Err(Error::WouldBlock));
+
+        assert!(matches!(endpoint.recv_nonblocking(), Ok(Some(_))));
+        assert!(endpoint.send_nonblocking(None, &[1]).is_ok());
+        assert_eq!(endpoint.queue.len(), MAX_QUEUE_LEN);
+    }
 }
 
 /// Get the current caller for an endpoint (used by reply)
