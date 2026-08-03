@@ -32,6 +32,9 @@ impl Compositor {
     /// pixel content overwrites the BG_CELL placeholder that the compose
     /// pass wrote for pixel-region cells.
     pub fn flush_pixel_regions_to_backbuf(&mut self, pixel_content_dirty: bool) {
+        if !self.active {
+            return;
+        }
         #[cfg(feature = "bench")]
         let _bench_start = read_tsc();
         #[cfg(feature = "bench")]
@@ -240,6 +243,9 @@ impl Compositor {
     /// the resulting pixels into `backbuf`. Caller must follow with
     /// `flush_backbuf_to_displayd` to push to displayd.
     pub fn flush_grid_to_backbuf(&mut self) {
+        if !self.active {
+            return;
+        }
         #[cfg(feature = "bench")]
         let _bench_start = read_tsc();
         #[cfg(feature = "bench")]
@@ -395,6 +401,9 @@ impl Compositor {
     /// `None` (nothing changed since the last flush) the function returns
     /// immediately without sending anything to displayd.
     pub fn flush_backbuf_to_displayd(&mut self) {
+        if !self.active {
+            return;
+        }
         let Some(rect) = self.dirty_rect.take() else { return; };
 
         let x = rect.x.min(self.width_px);

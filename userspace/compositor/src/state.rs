@@ -19,6 +19,7 @@ use cluu_wire::display::{
     DISPLAY_OUTPUT_INFO_LABEL, DISPLAY_SET_GEOMETRY_LABEL,
     DISPLAY_SURFACE_CREATE_LABEL,
 };
+use crate::lease::{LeaseHandle, LeaseState};
 use libcluu::ipc;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, Error, Result};
@@ -350,6 +351,7 @@ pub struct Compositor {
     pub focused: Option<WindowId>,
     /// Always true — displayd owns the VT; compositor is always active.
     pub active: bool,
+    pub lease_state: LeaseState,
     /// Monotonically increasing counter used to assign `WindowId`s.
     pub next_id: u64,
 
@@ -544,6 +546,7 @@ impl Compositor {
             windows: Vec::new(),
             focused: None,
             active: true,
+            lease_state: LeaseState::new(),
             next_id: 1,
             clock_seconds: 0,
             clock_ready: false,
@@ -566,6 +569,76 @@ impl Compositor {
             cursor_needs_render: false,
             pixel_dirty: false,
         })
+    }
+
+    pub fn register_lease(&mut self, handle: LeaseHandle) {
+        self.lease_state = LeaseState::register(handle);
+    }
+
+    pub fn suspend_framebuffer(&mut self, handle: LeaseHandle) -> Result<()> {
+        if self.fb_grant_va == 0 || self.fb_ptr.is_null() {
+            return Err(Error::InvalidState);
+        }
+        if self.lease_state != LeaseState::Active(handle) {
+            return Err(Error::InvalidState);
+        }
+        let bytes = (self.pitch as usize)
+            .checked_mul(self.height_px as usize)
+            .ok_or(Error::Overflow)?;
+        let pages = bytes
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(Error::Overflow)?
+            / PAGE_SIZE;
+        libcluu::syscall::space_unmap(libcluu::boot::space_token(), self.fb_grant_va, pages)
+            .map_err(|_| Error::InvalidState)?;
+        self.lease_state
+            .suspend(handle)
+            .map_err(|_| Error::InvalidState)?;
+        self.fb_ptr = core::ptr::null_mut();
+        self.fb_grant_va = 0;
+        self.active = false;
+        self.deadlines.next_frame_ms = u64::MAX;
+        Ok(())
+    }
+
+    pub fn resume_framebuffer(
+        &mut self,
+        handle: LeaseHandle,
+        width_px: u32,
+        height_px: u32,
+        pitch: u32,
+        grant_va: usize,
+    ) -> Result<()> {
+        if width_px == 0 || height_px == 0 || pitch == 0 || grant_va == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        if self.lease_state != LeaseState::Suspended(handle) {
+            return Err(Error::InvalidState);
+        }
+        let cols = (width_px / GLYPH_W) as u16;
+        let rows = (height_px / GLYPH_H) as u16;
+        if cols == 0 || rows == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let cell_count = cols as usize * rows as usize;
+        self.width_px = width_px;
+        self.height_px = height_px;
+        self.pitch = pitch;
+        self.cols = cols;
+        self.rows = rows;
+        self.cell_grid = alloc::vec![0; cell_count];
+        self.prev_cell_grid = alloc::vec![u64::MAX; cell_count];
+        self.cell_dirty.reset(cols, rows);
+        self.render_dirty.reset(cols, rows);
+        self.cell_dirty.mark_all();
+        self.fb_grant_va = grant_va;
+        self.fb_ptr = grant_va as *mut u32;
+        self.active = true;
+        self.lease_state
+            .resume(handle)
+            .map_err(|_| Error::InvalidState)?;
+        self.deadlines.next_frame_ms = 0;
+        Ok(())
     }
 
     /// Poll displayd for output dimensions. If changed, resize the cell grid,

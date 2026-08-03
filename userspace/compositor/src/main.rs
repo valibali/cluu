@@ -15,8 +15,9 @@ mod hotkeys;
 mod status;
 mod window_mgr;
 mod render;
+mod lease;
 
-use libcluu::boot::{process_info, PARAM_NOTIFY_READY_EP, TOKEN_IPC};
+use libcluu::boot::{process_info, space_token, PARAM_NOTIFY_READY_EP, TOKEN_IPC};
 use libcluu::ipc::{
     extract_reply_id, reply, reply_with_payload, send_msg_with_payload,
     COMP_WIN_QUERY_SCREEN_LABEL, COMP_WIN_REGISTER_REPLY, COMP_FRAME_READY_LABEL,
@@ -26,6 +27,10 @@ use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, registry, syscall, Error};
 use registry::RegistryEvent;
 
+use cluu_wire::display::{
+    DISPLAY_LEASE_ACQUIRE_LABEL, DISPLAY_LEASE_REGISTER_LABEL,
+    DISPLAY_LEASE_RELEASE_LABEL,
+};
 use cluu_wire::session::{
     SESSION_ENDED_LABEL, COMPOSITOR_SESSION_HANDOFF_LABEL,
     CompositorSessionHandoffRequest, CompositorSessionHandoffReply,
@@ -165,6 +170,13 @@ pub extern "C" fn main() -> i32 {
 
     let _ = debug_print("compositor: endpoints registered");
 
+    if comp.fb_grant_va != 0 {
+        if register_default_lease(&mut comp).is_err() {
+            let _ = debug_print("compositor: lease registration failed");
+            return -1;
+        }
+    }
+
     // READY notify is *deferred* until the main dispatch loop has actually
     // started running (see one-shot send at the top of `loop` below).
     // Sending it here, before vtmgr lookup + `recv_any` loop entry, races
@@ -262,6 +274,15 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
                     }
                     if msg.tag.label == SESSION_ENDED_LABEL {
                         handle_session_ended(&mut comp, &msg, payload);
+                        continue;
+                    }
+
+                    if idx == 2 && msg.tag.label == DISPLAY_LEASE_RELEASE_LABEL {
+                        handle_lease_suspend(&mut comp, &msg);
+                        continue;
+                    }
+                    if idx == 2 && msg.tag.label == DISPLAY_LEASE_ACQUIRE_LABEL {
+                        handle_lease_resume(&mut comp, &msg, payload);
                         continue;
                     }
 
@@ -556,6 +577,94 @@ let notify_ep = info.params[PARAM_NOTIFY_READY_EP] as usize;
 }
 
 // ── Session lifecycle handlers ─────────────────────────────────────
+
+fn register_default_lease(comp: &mut state::Compositor) -> Result<(), Error> {
+    let mut message = Message::new(
+        DISPLAY_LEASE_REGISTER_LABEL,
+        [
+            comp.control_endpoint,
+            space_token(),
+            comp.fb_grant_va,
+            comp.surface_token as usize,
+            0,
+            0,
+        ],
+        4,
+    );
+    libcluu::ipc::call(comp.displayd_ep, &mut message, IpcFlags::empty())?;
+    if message.tag.label != DISPLAY_LEASE_REGISTER_LABEL || message.words[5] != 0 {
+        return Err(Error::InvalidState);
+    }
+    comp.register_lease(lease::LeaseHandle {
+        lease_id: message.words[0] as u64,
+        generation: message.words[1] as u64,
+    });
+    Ok(())
+}
+
+fn wire_lease_handle(msg: &Message) -> lease::LeaseHandle {
+    lease::LeaseHandle {
+        lease_id: msg.words[0] as u64,
+        generation: msg.words[1] as u64,
+    }
+}
+
+fn wire_resume_lease_handle(msg: &Message) -> lease::LeaseHandle {
+    lease::LeaseHandle {
+        lease_id: msg.words[1] as u64,
+        generation: msg.words[2] as u64,
+    }
+}
+
+#[cfg(test)]
+mod lease_wire_tests {
+    use super::*;
+
+    #[test]
+    fn resume_handle_survives_payload_length_prefix() {
+        let msg = Message::new(
+            DISPLAY_LEASE_ACQUIRE_LABEL,
+            [8, 17, 29, 1920, 1018, 7680],
+            6,
+        );
+        assert_eq!(wire_resume_lease_handle(&msg), lease::LeaseHandle { lease_id: 17, generation: 29 });
+    }
+}
+
+fn reply_lease_status(msg: &Message, status: usize) {
+    let reply_token = extract_reply_id(msg).unwrap_or(0);
+    let response = Message::new(msg.tag.label, [status, 0, 0, 0, 0, 0], 1);
+    let _ = reply(reply_token, &response, IpcFlags::empty());
+}
+
+fn handle_lease_suspend(comp: &mut state::Compositor, msg: &Message) {
+    let status = match comp.suspend_framebuffer(wire_lease_handle(msg)) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    };
+    reply_lease_status(msg, status);
+}
+
+fn handle_lease_resume(comp: &mut state::Compositor, msg: &Message, payload: &[u8]) {
+    let grant_va = if payload.len() == core::mem::size_of::<usize>() {
+        let mut bytes = [0u8; core::mem::size_of::<usize>()];
+        bytes.copy_from_slice(payload);
+        usize::from_le_bytes(bytes)
+    } else {
+        0
+    };
+    let status = match comp.resume_framebuffer(
+        wire_resume_lease_handle(msg),
+        msg.words[3] as u32,
+        msg.words[4] as u32,
+        msg.words[5] as u32,
+        grant_va,
+    ) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    };
+    reply_lease_status(msg, status);
+}
 
 fn handle_session_handoff(
     comp: &mut state::Compositor,
