@@ -58,6 +58,7 @@
 //!
 use alloc::format;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use cluu_wire::display::{DamageList, OutputInfo, PixelFormat, Rect};
 
@@ -92,8 +93,66 @@ pub const GPU_UNREF_RESOURCE: u32 = 0x706;
 pub const GPU_POLL_EVENT: u32 = 0x707;
 pub const GPU_RESIZE: u32 = 0x708;
 pub const GPU_GRANT_TO_CLIENT: u32 = 0x709;
+/// Release direct grant. Uses same IPC label with words[2] set to this opcode.
+pub const GPU_GRANT_RELEASE: usize = 1;
 /// Batched transfer+flush. Payload contains `count` little-endian rectangles.
 pub const GPU_TRANSFER_FLUSH_BATCH: u32 = 0x70A;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectGrant {
+    pub surface_token: u64,
+    pub client_space_token: usize,
+    pub client_target_va: usize,
+    pub pages: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectGrantState {
+    Idle,
+    Active(DirectGrant),
+}
+
+impl DirectGrantState {
+    const fn new() -> Self {
+        Self::Idle
+    }
+
+    fn reserve(
+        &mut self,
+        surface_token: u64,
+        client_space_token: usize,
+        client_target_va: usize,
+        pages: usize,
+    ) -> Result<(), &'static str> {
+        if !matches!(self, Self::Idle) {
+            return Err("displayd: virtio-gpu direct grant already active");
+        }
+        *self = Self::Active(DirectGrant {
+            surface_token,
+            client_space_token,
+            client_target_va,
+            pages,
+        });
+        Ok(())
+    }
+
+    fn rollback(&mut self) {
+        *self = Self::Idle;
+    }
+
+    fn clear_surface(&mut self, surface_token: u64) {
+        if matches!(self, Self::Active(grant) if grant.surface_token == surface_token) {
+            *self = Self::Idle;
+        }
+    }
+
+    pub const fn active_surface(self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Active(grant) => Some(grant.surface_token),
+        }
+    }
+}
 
 /// Protocol version the backend expects from the driver.
 pub const GPU_PROTOCOL_VERSION: usize = 1;
@@ -110,6 +169,9 @@ const PROBE_TIMEOUT_MS: usize = 500;
 
 /// Command timeout for init and flush IPC calls.
 const CMD_TIMEOUT_MS: usize = 2000;
+static TRANSFER_DIAG_DONE: AtomicBool = AtomicBool::new(false);
+static TRANSFER_FAILURE_DIAG_DONE: AtomicBool = AtomicBool::new(false);
+static GPU_FLUSH_FAILURE_DIAG_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Default display if the driver reports no enabled scanout.
 const DEFAULT_W: u32 = 640;
@@ -138,7 +200,9 @@ pub struct VirtioGpuBackend {
     direct_scanout_eligible: bool,
     direct_scanout_active: bool,
     direct_scanout_token: u64,
+    direct_grant: DirectGrantState,
     first_frame_seen: bool,
+    direct_flush_diag_done: bool,
     batch_enabled: bool,
     batch_layout_version: usize,
 }
@@ -246,7 +310,9 @@ impl VirtioGpuBackend {
             direct_scanout_eligible: false,
             direct_scanout_active: false,
             direct_scanout_token: 0,
+            direct_grant: DirectGrantState::new(),
             first_frame_seen: false,
+            direct_flush_diag_done: false,
             batch_enabled: batch_layout_version == GPU_BATCH_LAYOUT_VERSION,
             batch_layout_version,
         };
@@ -360,13 +426,23 @@ impl VirtioGpuBackend {
     }
 
     pub fn grant_fb_to_client(
-        &self,
+        &mut self,
+        surface_token: u64,
         client_space_token: usize,
         client_target_va: usize,
     ) -> Result<usize, &'static str> {
         if self.fb_pages == 0 {
             return Err("no FB allocated");
         }
+        if client_space_token == 0 || client_target_va == 0 || client_target_va & 0xFFF != 0 {
+            return Err("invalid direct grant target");
+        }
+        self.direct_grant.reserve(
+            surface_token,
+            client_space_token,
+            client_target_va,
+            self.fb_pages,
+        )?;
         let req = Message::new(
             GPU_GRANT_TO_CLIENT,
             [client_space_token, client_target_va, 0, 0, 0, 0],
@@ -379,17 +455,71 @@ impl VirtioGpuBackend {
             &mut reply_buf,
             CMD_TIMEOUT_MS,
         );
-        match r {
+        let result = match r {
             Ok(bytes) => {
                 if let Some((msg, _)) = parse_message(&reply_buf[..bytes]) {
                     if msg.words[0] == 0 {
-                        return Ok(client_target_va);
+                        Ok(client_target_va)
+                    } else {
+                        Err("driver grant failed")
                     }
+                } else {
+                    Err("driver grant failed")
                 }
-                Err("driver grant failed")
             }
             Err(_) => Err("driver grant timeout"),
+        };
+        if result.is_err() {
+            self.direct_grant.rollback();
         }
+        result
+    }
+
+    pub fn clear_for_lease(&mut self) {
+        let buffer = unsafe { core::slice::from_raw_parts_mut(self.compose_ptr, self.compose_len) };
+        for pixel in buffer {
+            *pixel = 0;
+        }
+        let damage = DamageList::from_rects(&[Rect {
+            x: 0,
+            y: 0,
+            w: self.info.width,
+            h: self.info.height,
+        }]);
+        self.flush(&damage);
+    }
+
+    pub fn release_direct_grant(&mut self, surface_token: u64) -> Result<(), &'static str> {
+        let grant = match self.direct_grant {
+            DirectGrantState::Active(grant) if grant.surface_token == surface_token => grant,
+            _ => return Ok(()),
+        };
+        let request = Message::new(
+            GPU_GRANT_TO_CLIENT,
+            [
+                grant.client_space_token,
+                grant.client_target_va,
+                GPU_GRANT_RELEASE,
+                grant.pages,
+                0,
+                0,
+            ],
+            4,
+        );
+        let mut reply_buf = [0u8; 128];
+        let bytes = ipc_call_timeout(
+            self.driver_endpoint,
+            request.as_bytes(),
+            &mut reply_buf,
+            CMD_TIMEOUT_MS,
+        )
+        .map_err(|_| "driver release timeout")?;
+        let (reply, _) = parse_message(&reply_buf[..bytes]).ok_or("driver release malformed reply")?;
+        if reply.words[0] != 0 {
+            return Err("driver release failed");
+        }
+        self.direct_grant.clear_surface(surface_token);
+        Ok(())
     }
 
     /// Check if a surface is eligible for direct scanout.
@@ -426,7 +556,7 @@ impl VirtioGpuBackend {
     /// (no downstream IPC), so this cannot form a deadlock cycle. The
     /// result is discarded — a failed flush is non-fatal; the next flush
     /// retries.
-    fn transfer_flush_rect(&self, rect: Rect) -> bool {
+    fn transfer_flush_rect(&self, rect: Rect, path: &'static str) -> bool {
         let req = Message::new(
             GPU_TRANSFER_FLUSH,
             [
@@ -446,12 +576,54 @@ impl VirtioGpuBackend {
             &mut reply_buf,
             CMD_TIMEOUT_MS,
         ) else {
+            self.log_transfer_diag(rect, 0, usize::MAX, false);
+            self.log_flush_failure(path, rect, usize::MAX);
             return false;
         };
         let Some((msg, _)) = parse_message(&reply_buf[..bytes]) else {
+            self.log_transfer_diag(rect, 0, usize::MAX - 1, false);
+            self.log_flush_failure(path, rect, usize::MAX - 1);
             return false;
         };
-        msg.tag.label == GPU_TRANSFER_FLUSH && msg.words[0] == 0
+        let ok = msg.tag.label == GPU_TRANSFER_FLUSH && msg.words[0] == 0;
+        self.log_transfer_diag(rect, msg.tag.label, msg.words[0], ok);
+        if !ok {
+            self.log_flush_failure(path, rect, msg.words[0]);
+        }
+        ok
+    }
+
+    fn log_flush_failure(&self, path: &str, rect: Rect, status: usize) {
+        if !GPU_FLUSH_FAILURE_DIAG_DONE.swap(true, Ordering::Relaxed) {
+            let _ = debug_print(&format!(
+                "displayd: gpu flush failure path={} resource={} rect={},{},{},{} response_status={}",
+                path,
+                self.resource_id,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                status
+            ));
+        }
+    }
+
+    fn log_transfer_diag(&self, rect: Rect, reply_label: u32, status: usize, ok: bool) {
+        let first = !TRANSFER_DIAG_DONE.swap(true, Ordering::Relaxed);
+        let first_failure = !ok && !TRANSFER_FAILURE_DIAG_DONE.swap(true, Ordering::Relaxed);
+        if first || first_failure {
+            let _ = debug_print(&format!(
+                "displayd: gpu transfer resource={} rect={},{},{},{} reply_label=0x{:x} status={} ok={}",
+                self.resource_id,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                reply_label,
+                status,
+                ok
+            ));
+        }
     }
 
     fn transfer_flush_batch(&self, rects: &[Rect]) -> Option<usize> {
@@ -491,10 +663,38 @@ impl VirtioGpuBackend {
             },
             &mut reply_buf,
             CMD_TIMEOUT_MS,
-        )
-        .ok()?;
-        let (msg, _) = parse_message(&reply_buf[..bytes])?;
+        );
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.log_batch_diag(rects.len(), 0, usize::MAX, 0, false);
+                self.log_flush_failure("batch", rects[0], usize::MAX);
+                return None;
+            }
+        };
+        let (msg, _) = match parse_message(&reply_buf[..bytes]) {
+            Some(parsed) => parsed,
+            None => {
+                self.log_batch_diag(rects.len(), 0, usize::MAX - 1, 0, false);
+                self.log_flush_failure("batch", rects[0], usize::MAX - 1);
+                return None;
+            }
+        };
         let completed = msg.words[2];
+        let batch_ok = msg.tag.label == GPU_TRANSFER_FLUSH_BATCH
+            && msg.words[0] == 0
+            && msg.words[1] == rects.len()
+            && completed == rects.len();
+        self.log_batch_diag(
+            rects.len(),
+            msg.tag.label,
+            msg.words[0],
+            completed,
+            batch_ok,
+        );
+        if !batch_ok {
+            self.log_flush_failure("batch", rects[0], msg.words[0]);
+        }
         if msg.tag.label != GPU_TRANSFER_FLUSH_BATCH {
             return None;
         }
@@ -509,6 +709,29 @@ impl VirtioGpuBackend {
             None
         }
     }
+
+    fn log_batch_diag(
+        &self,
+        rect_count: usize,
+        reply_label: u32,
+        status: usize,
+        completed: usize,
+        ok: bool,
+    ) {
+        let first = !TRANSFER_DIAG_DONE.swap(true, Ordering::Relaxed);
+        let first_failure = !ok && !TRANSFER_FAILURE_DIAG_DONE.swap(true, Ordering::Relaxed);
+        if first || first_failure {
+            let _ = debug_print(&format!(
+                "displayd: gpu transfer resource={} batch_rects={} reply_label=0x{:x} status={} completed={} ok={}",
+                self.resource_id,
+                rect_count,
+                reply_label,
+                status,
+                completed,
+                ok
+            ));
+        }
+    }
 }
 
 impl Backend for VirtioGpuBackend {
@@ -521,44 +744,7 @@ impl Backend for VirtioGpuBackend {
     }
 
     fn flush(&mut self, damage: &DamageList) {
-        let bounds = Rect {
-            x: 0,
-            y: 0,
-            w: self.info.width,
-            h: self.info.height,
-        };
-        let mut rects = Vec::new();
-        for r in damage.rects() {
-            if let Some(clipped) = r.clip_to(bounds) {
-                rects.push(clipped);
-            }
-        }
-
-        if rects.is_empty() {
-            return;
-        }
-        if !self.batch_enabled {
-            for rect in rects {
-                let _ = self.transfer_flush_rect(rect);
-            }
-            return;
-        }
-
-        match self.transfer_flush_batch(&rects) {
-            Some(completed) if completed < rects.len() => {
-                self.batch_enabled = false;
-                for rect in &rects[completed..] {
-                    let _ = self.transfer_flush_rect(*rect);
-                }
-            }
-            Some(_) => {}
-            None => {
-                self.batch_enabled = false;
-                for rect in rects {
-                    let _ = self.transfer_flush_rect(rect);
-                }
-            }
-        }
+        let _ = self.flush_damage(damage, false);
     }
 
     fn try_direct_scanout(&mut self, surface: &Surface) -> bool {
@@ -600,6 +786,76 @@ impl Backend for VirtioGpuBackend {
             self.direct_scanout_active = false;
         }
         false
+    }
+}
+
+impl VirtioGpuBackend {
+    fn flush_damage(&mut self, damage: &DamageList, direct: bool) -> bool {
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            w: self.info.width,
+            h: self.info.height,
+        };
+        let mut rects = Vec::new();
+        for r in damage.rects() {
+            if let Some(clipped) = r.clip_to(bounds) {
+                rects.push(clipped);
+            }
+        }
+
+        if rects.is_empty() {
+            if direct && !self.direct_flush_diag_done {
+                self.direct_flush_diag_done = true;
+                let _ = debug_print(&format!(
+                    "displayd: virtio direct flush diag rects={} clipped_rects=0 result=empty",
+                    damage.rects().len()
+                ));
+            }
+            return false;
+        }
+        let (result, path) = if !self.batch_enabled {
+            let mut ok = true;
+            for rect in &rects {
+                ok &= self.transfer_flush_rect(*rect, "fallback");
+            }
+            (ok, "fallback")
+        } else {
+            match self.transfer_flush_batch(&rects) {
+                Some(completed) if completed < rects.len() => {
+                    self.batch_enabled = false;
+                    let mut ok = true;
+                    for rect in &rects[completed..] {
+                        ok &= self.transfer_flush_rect(*rect, "batch-fallback");
+                    }
+                    (ok, "batch-fallback")
+                }
+                Some(_) => (true, "batch"),
+                None => {
+                    self.batch_enabled = false;
+                    let mut ok = true;
+                    for rect in &rects {
+                        ok &= self.transfer_flush_rect(*rect, "batch-fallback");
+                    }
+                    (ok, "batch-fallback")
+                }
+            }
+        };
+        if direct && !self.direct_flush_diag_done {
+            self.direct_flush_diag_done = true;
+            let _ = debug_print(&format!(
+                "displayd: virtio direct flush diag rects={} clipped_rects={} result={} ok={}",
+                damage.rects().len(),
+                rects.len(),
+                path,
+                result
+            ));
+        }
+        result
+    }
+
+    pub fn flush_direct(&mut self, damage: &DamageList) -> bool {
+        self.flush_damage(damage, true)
     }
 }
 
@@ -734,4 +990,56 @@ fn resolve_gpudev_endpoint() -> Option<usize> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirectGrantState, DirectGrant};
+
+    #[test]
+    fn direct_grant_reserve_is_exclusive() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.reserve(7, 11, 0x4000, 2), Ok(()));
+        assert_eq!(state.reserve(8, 12, 0x8000, 2), Err("displayd: virtio-gpu direct grant already active"));
+        assert_eq!(state.active_surface(), Some(7));
+    }
+
+    #[test]
+    fn direct_grant_rollback_returns_to_idle() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.reserve(7, 11, 0x4000, 2), Ok(()));
+
+        state.rollback();
+
+        assert_eq!(state.active_surface(), None);
+        assert_eq!(state.reserve(8, 12, 0x8000, 2), Ok(()));
+    }
+
+    #[test]
+    fn direct_grant_clear_only_releases_matching_surface() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.reserve(7, 11, 0x4000, 2), Ok(()));
+
+        state.clear_surface(8);
+        assert_eq!(state.active_surface(), Some(7));
+
+        state.clear_surface(7);
+        assert_eq!(state.active_surface(), None);
+    }
+
+    #[test]
+    fn direct_grant_record_keeps_rollback_metadata() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.reserve(7, 11, 0x4000, 2), Ok(()));
+
+        assert_eq!(
+            state,
+            DirectGrantState::Active(DirectGrant {
+                surface_token: 7,
+                client_space_token: 11,
+                client_target_va: 0x4000,
+                pages: 2,
+            })
+        );
+    }
 }

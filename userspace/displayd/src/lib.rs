@@ -33,6 +33,8 @@ extern crate alloc;
 pub mod backend;
 pub mod compose;
 pub mod damage;
+pub mod direct_damage;
+pub mod lease;
 pub mod scene;
 pub mod surface;
 

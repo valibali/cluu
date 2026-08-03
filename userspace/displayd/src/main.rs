@@ -37,6 +37,7 @@ mod virtio_gpu_backend;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use cluu_wire::display::{
     DamageList, Error as DisplayError, OutputInfo, Rect, SurfaceState,
@@ -44,16 +45,26 @@ use cluu_wire::display::{
     DISPLAY_BUFFER_ACQUIRE_LABEL, DISPLAY_BUFFER_COMMIT_LABEL,
     DISPLAY_BUFFER_RELEASE_LABEL, DISPLAY_SET_GEOMETRY_LABEL,
     DISPLAY_SET_VISIBLE_LABEL, DISPLAY_SURFACE_DESTROY_LABEL,
+    DISPLAY_LEASE_REGISTER_LABEL, DISPLAY_LEASE_ACQUIRE_LABEL,
+    DISPLAY_LEASE_RELEASE_LABEL, DISPLAY_LEASE_RELEASE_ACK_LABEL,
+    LeaseAcquire, LeaseGranted, LeaseHandle, LeaseOwner,
 };
 
 use libcluu::boot::{process_info, space_token, TOKEN_IPC};
 use libcluu::ipc::{extract_reply_id, parse_message, reply};
-use libcluu::registry;
+use libcluu::ipc::{VTMGR_DIRECT_ABORT_LABEL, VTMGR_DIRECT_COMMIT_LABEL,
+    VTMGR_DIRECT_PREPARE_LABEL, VTMGR_DIRECT_RETURN_COMMIT_LABEL,
+    VTMGR_DIRECT_RETURN_PREPARE_LABEL};
+use libcluu::registry::{self, RegistryEvent};
 use libcluu::syscall::{self, MAP_FRAME_TOKEN};
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, Error};
 
 use displayd::{Backend, Scene, Surface};
+use displayd::direct_damage::{fullscreen_damage, parse_damage_payload};
+use displayd::lease::{
+    bind_compositor, CompositorRegistration, LeaseCoordinator, LeaseIo,
+};
 use linear_fb::LinearFbBackend;
 use virtio_gpu_backend::VirtioGpuBackend;
 
@@ -75,6 +86,8 @@ const MARKER_FLUSH: &str = "DISPLAYD_FLUSH";
 const MARKER_SELFTEST_OK: &str = "DISPLAYD_SELFTEST_OK";
 const MARKER_QUOTA_REJECT: &str = "DISPLAYD_QUOTA_REJECT";
 const MARKER_BACKEND: &str = "DISPLAYD_BACKEND";
+static DIRECT_FLUSH_DIAG_DONE: AtomicBool = AtomicBool::new(false);
+static DIRECT_FLUSH_FAILURE_DIAG_DONE: AtomicBool = AtomicBool::new(false);
 
 // ── Backend selection ─────────────────────────────────────────────────
 
@@ -112,6 +125,188 @@ impl Backend for DisplayBackend {
             DisplayBackend::Linear(b) => b.try_direct_scanout(surface),
             DisplayBackend::VirtioGpu(b) => b.try_direct_scanout(surface),
         }
+    }
+}
+
+impl DisplayBackend {
+    fn flush_direct(&mut self, damage: &DamageList) -> bool {
+        match self {
+            DisplayBackend::Linear(b) => {
+                b.flush(damage);
+                true
+            }
+            DisplayBackend::VirtioGpu(b) => b.flush_direct(damage),
+        }
+    }
+}
+
+struct DisplayLeaseIo<'a> {
+    backend: &'a mut DisplayBackend,
+    direct_fb_token: &'a mut u64,
+    vtmgr_endpoint: Option<usize>,
+    compositor: Option<CompositorRegistration>,
+}
+
+impl DisplayLeaseIo<'_> {
+    fn vtmgr_call(&self, label: u32, words: [usize; 6]) -> Result<(), DisplayError> {
+        let endpoint = self.vtmgr_endpoint.ok_or(DisplayError::LeaseIoFailure)?;
+        let mut message = Message::new(label, words, 2);
+        libcluu::ipc::call(endpoint, &mut message, IpcFlags::empty())
+            .map_err(|_| DisplayError::LeaseIoFailure)?;
+        if message.words[0] == 0 { Ok(()) } else { Err(DisplayError::LeaseIoFailure) }
+    }
+
+}
+
+impl LeaseIo for DisplayLeaseIo<'_> {
+    fn clear_for_compositor(&mut self) -> Result<(), DisplayError> {
+        if let DisplayBackend::VirtioGpu(backend) = self.backend {
+            backend.clear_for_lease();
+        }
+        Ok(())
+    }
+
+    fn prepare_acquire(
+        &mut self,
+        lease: LeaseGranted,
+        request: Option<LeaseAcquire>,
+    ) -> Result<(), DisplayError> {
+        if lease.owner != LeaseOwner::Fullscreen {
+            return Ok(());
+        }
+        let request = request.ok_or(DisplayError::LeaseIoFailure)?;
+        self.vtmgr_call(
+            VTMGR_DIRECT_PREPARE_LABEL,
+            [request.input_endpoint, lease.handle.generation as usize, 0, 0, 0, 0],
+        )?;
+        let granted = match self.backend {
+            DisplayBackend::VirtioGpu(backend) => {
+                backend.clear_for_lease();
+                backend.grant_fb_to_client(lease.handle.lease_id, request.client_space_token, request.client_target_va)
+            }
+            DisplayBackend::Linear(_) => Err("linear framebuffer cannot be directly granted"),
+        };
+        if granted.is_err() {
+            let _ = self.vtmgr_call(
+                VTMGR_DIRECT_ABORT_LABEL,
+                [lease.handle.generation as usize, 0, 0, 0, 0, 0],
+            );
+            return Err(DisplayError::LeaseIoFailure);
+        }
+        let commit = self.vtmgr_call(
+            VTMGR_DIRECT_COMMIT_LABEL,
+            [lease.handle.generation as usize, 0, 0, 0, 0, 0],
+        );
+        if commit.is_err() {
+            if let DisplayBackend::VirtioGpu(backend) = self.backend {
+                let _ = backend.release_direct_grant(lease.handle.lease_id);
+            }
+            let _ = self.vtmgr_call(
+                VTMGR_DIRECT_ABORT_LABEL,
+                [lease.handle.generation as usize, 0, 0, 0, 0, 0],
+            );
+            return Err(DisplayError::LeaseIoFailure);
+        }
+        Ok(())
+    }
+
+    fn prepare_release(&mut self, lease: LeaseGranted) -> Result<(), DisplayError> {
+        if lease.owner != LeaseOwner::Fullscreen {
+            let compositor = self.compositor.ok_or(DisplayError::LeaseIoFailure)?;
+            let mut message = Message::new(
+                DISPLAY_LEASE_RELEASE_LABEL,
+                [lease.handle.lease_id as usize, lease.handle.generation as usize, 0, 0, 0, 0],
+                2,
+            );
+            libcluu::ipc::call(compositor.endpoint, &mut message, IpcFlags::empty())
+                .map_err(|_| DisplayError::LeaseIoFailure)?;
+            if message.words[0] != 0 {
+                return Err(DisplayError::LeaseIoFailure);
+            }
+            if let DisplayBackend::VirtioGpu(backend) = self.backend {
+                backend
+                    .release_direct_grant(compositor.resource_token)
+                    .map_err(|_| DisplayError::LeaseIoFailure)?;
+            }
+            *self.direct_fb_token = 0;
+            return Ok(());
+        }
+        self.vtmgr_call(
+            VTMGR_DIRECT_RETURN_PREPARE_LABEL,
+            [lease.handle.generation as usize, 0, 0, 0, 0, 0],
+        )?;
+        Ok(())
+    }
+
+    fn complete_release(&mut self, lease: LeaseGranted) -> Result<(), DisplayError> {
+        if lease.owner == LeaseOwner::Fullscreen {
+            if let DisplayBackend::VirtioGpu(backend) = self.backend {
+                backend
+                    .release_direct_grant(lease.handle.lease_id)
+                    .map_err(|_| DisplayError::LeaseIoFailure)?;
+            }
+            *self.direct_fb_token = 0;
+            self.vtmgr_call(
+                VTMGR_DIRECT_RETURN_COMMIT_LABEL,
+                [lease.handle.generation as usize, 0, 0, 0, 0, 0],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn restore_compositor(
+        &mut self,
+        lease: LeaseGranted,
+        resource_token: u64,
+    ) -> Result<(), DisplayError> {
+        let compositor = self.compositor.ok_or(DisplayError::LeaseIoFailure)?;
+        let output = self.backend.output_info();
+        let grant_va = match self.backend {
+            DisplayBackend::VirtioGpu(backend) => {
+                backend
+                    .release_direct_grant(resource_token)
+                    .map_err(|_| DisplayError::LeaseIoFailure)?;
+                backend
+                    .grant_fb_to_client(
+                        resource_token,
+                        compositor.space_token,
+                        compositor.target_va,
+                    )
+                    .map_err(|_| DisplayError::LeaseIoFailure)?
+            }
+            DisplayBackend::Linear(_) => return Err(DisplayError::LeaseIoFailure),
+        };
+        let message = Message::new(
+            DISPLAY_LEASE_ACQUIRE_LABEL,
+            [
+                0,
+                lease.handle.lease_id as usize,
+                lease.handle.generation as usize,
+                output.width as usize,
+                output.height as usize,
+                output.pitch as usize,
+            ],
+            6,
+        );
+        let grant_payload = grant_va.to_le_bytes();
+        let mut reply_message = Message::new(0, [0; 6], 0);
+        let resume_succeeded = libcluu::ipc::call_with_payload(
+            compositor.endpoint,
+            &message,
+            &grant_payload,
+            &mut reply_message,
+        )
+            .is_ok()
+            && reply_message.words[0] == 0;
+        if !resume_succeeded {
+            if let DisplayBackend::VirtioGpu(backend) = self.backend {
+                let _ = backend.release_direct_grant(resource_token);
+            }
+            *self.direct_fb_token = 0;
+            return Err(DisplayError::LeaseIoFailure);
+        }
+        *self.direct_fb_token = resource_token;
+        Ok(())
     }
 }
 
@@ -191,6 +386,25 @@ pub extern "C" fn main() -> i32 {
         return -1;
     }
 
+    let mut vtmgr_endpoint = registry::lookup_cached("vtmgr:input");
+    if vtmgr_endpoint.is_none() {
+        let _ = registry::request_subscription("vtmgr", "input");
+    }
+    let mut leases = LeaseCoordinator::new();
+    let mut direct_fb_token: u64 = 0;
+    {
+        let mut io = DisplayLeaseIo {
+            backend: &mut backend,
+            direct_fb_token: &mut direct_fb_token,
+            vtmgr_endpoint,
+            compositor: None,
+        };
+        if leases.register_compositor(&mut io).is_err() {
+            let _ = debug_print("displayd: compositor lease registration failed");
+            return -1;
+        }
+    }
+
     // 4. READY marker — emitted only after dispatch endpoint can receive.
     let _ = debug_print(&format!(
         "{} {} {} {} {}",
@@ -213,7 +427,7 @@ pub extern "C" fn main() -> i32 {
     };
     let mut buf = [0u8; RECV_BUF_LEN];
     let mut surfaces = surfaces;
-    let mut direct_fb_token: u64 = 0;
+    let mut compositor: Option<CompositorRegistration> = None;
 
     loop {
         match syscall::ipc_recv_any_with_sender(&tokens, &mut buf, RECV_TIMEOUT_MS) {
@@ -225,7 +439,13 @@ pub extern "C" fn main() -> i32 {
                         ));
                     }
                     if registry_ep != 0 && idx == 1 {
-                        let _ = registry::handle_incoming_message(&msg, payload);
+                        if let Ok(Some(RegistryEvent::Grant { service_name, name, token })) =
+                            registry::handle_incoming_message(&msg, payload)
+                        {
+                            if service_name == "vtmgr" && name == "input" {
+                                vtmgr_endpoint = Some(token);
+                            }
+                        }
                         continue;
                     }
                     handle_message(
@@ -235,8 +455,11 @@ pub extern "C" fn main() -> i32 {
                         &mut scene,
                         &mut backend,
                         &mut surfaces,
-                        &mut direct_fb_token,
-                        endpoint,
+                         &mut direct_fb_token,
+                         &mut leases,
+                         vtmgr_endpoint,
+                         &mut compositor,
+                         endpoint,
                     );
                 }
             }
@@ -374,6 +597,42 @@ fn surfaces_exceed_quota(existing: &[u64], max: usize) -> bool {
     existing.len() >= max
 }
 
+fn reply_lease(
+    reply_token: usize,
+    label: u32,
+    lease: LeaseGranted,
+    output: OutputInfo,
+    error: Option<DisplayError>,
+) {
+    let status = error.map_or(0, |value| value as usize);
+    let message = Message::new(
+        label,
+        [
+            lease.handle.lease_id as usize,
+            lease.handle.generation as usize,
+            output.width as usize,
+            output.height as usize,
+            output.pitch as usize,
+            status,
+        ],
+        6,
+    );
+    let _ = reply(reply_token, &message, IpcFlags::empty());
+}
+
+fn reply_lease_status(reply_token: usize, label: u32, status: usize) {
+    let words = match label {
+        DISPLAY_LEASE_REGISTER_LABEL | DISPLAY_LEASE_ACQUIRE_LABEL => [0, 0, 0, 0, 0, status],
+        _ => [status, 0, 0, 0, 0, 0],
+    };
+    let message = Message::new(label, words, 6);
+    let _ = reply(reply_token, &message, IpcFlags::empty());
+}
+
+fn reply_lease_error(reply_token: usize, label: u32, error: DisplayError) {
+    reply_lease_status(reply_token, label, error as usize);
+}
+
 // ── IPC dispatch ──────────────────────────────────────────────────────
 
 /// Dispatch an incoming IPC message to the appropriate handler.
@@ -385,6 +644,9 @@ fn handle_message(
     backend: &mut DisplayBackend,
     surfaces: &mut Vec<TrackedSurface>,
     direct_fb_token: &mut u64,
+    leases: &mut LeaseCoordinator,
+    vtmgr_endpoint: Option<usize>,
+    compositor: &mut Option<CompositorRegistration>,
     _endpoint: usize,
 ) {
     let label = msg.tag.label;
@@ -395,6 +657,92 @@ fn handle_message(
     }
 
     match label {
+        DISPLAY_LEASE_REGISTER_LABEL => {
+            let output = backend.output_info();
+            let requested = CompositorRegistration::new(
+                msg.words[0],
+                msg.words[1],
+                msg.words[2],
+                msg.words[3] as u64,
+            );
+            let registration = match bind_compositor(compositor, requested) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    reply_lease_error(reply_token, DISPLAY_LEASE_REGISTER_LABEL, error);
+                    return;
+                }
+            };
+            let mut io = DisplayLeaseIo {
+                backend,
+                direct_fb_token,
+                vtmgr_endpoint,
+                compositor: Some(registration),
+            };
+            match leases.active_lease() {
+                Some(granted) if granted.owner == LeaseOwner::Compositor => {
+                    reply_lease(reply_token, DISPLAY_LEASE_REGISTER_LABEL, granted, output, None)
+                }
+                Some(_) => reply_lease_error(reply_token, DISPLAY_LEASE_REGISTER_LABEL, DisplayError::FramebufferBusy),
+                None => match leases.register_compositor(&mut io) {
+                    Ok(granted) => {
+                        reply_lease(reply_token, DISPLAY_LEASE_REGISTER_LABEL, granted, output, None)
+                    }
+                    Err(error) => reply_lease_error(reply_token, DISPLAY_LEASE_REGISTER_LABEL, error),
+                },
+            }
+        }
+
+        DISPLAY_LEASE_ACQUIRE_LABEL => {
+            let output = backend.output_info();
+            let request = LeaseAcquire {
+                client_space_token: msg.words[0],
+                client_target_va: msg.words[1],
+                input_endpoint: msg.words[2],
+            };
+            let mut io = DisplayLeaseIo {
+                backend,
+                direct_fb_token,
+                vtmgr_endpoint,
+                compositor: *compositor,
+            };
+            match leases.acquire_fullscreen(&mut io, request) {
+                Ok(granted) => reply_lease(reply_token, DISPLAY_LEASE_ACQUIRE_LABEL, granted, output, None),
+                Err(error) => reply_lease_error(reply_token, DISPLAY_LEASE_ACQUIRE_LABEL, error),
+            }
+        }
+
+        DISPLAY_LEASE_RELEASE_LABEL => {
+            let handle = LeaseHandle { lease_id: msg.words[0] as u64, generation: msg.words[1] as u64 };
+            let mut io = DisplayLeaseIo {
+                backend,
+                direct_fb_token,
+                vtmgr_endpoint,
+                compositor: *compositor,
+            };
+            match leases.release(&mut io, handle) {
+                Ok(_) => reply_lease_status(reply_token, DISPLAY_LEASE_RELEASE_LABEL, 0),
+                Err(error) => reply_lease_error(reply_token, DISPLAY_LEASE_RELEASE_LABEL, error),
+            }
+        }
+
+        DISPLAY_LEASE_RELEASE_ACK_LABEL => {
+            let handle = LeaseHandle { lease_id: msg.words[0] as u64, generation: msg.words[1] as u64 };
+            let mut io = DisplayLeaseIo {
+                backend,
+                direct_fb_token,
+                vtmgr_endpoint,
+                compositor: *compositor,
+            };
+            let resource_token = match *compositor {
+                Some(registration) => registration.resource_token,
+                None => 0,
+            };
+            match leases.acknowledge_release_and_restore(&mut io, handle, resource_token) {
+                Ok(_) => reply_lease_status(reply_token, DISPLAY_LEASE_RELEASE_ACK_LABEL, 0),
+                Err(error) => reply_lease_error(reply_token, DISPLAY_LEASE_RELEASE_ACK_LABEL, error),
+            }
+        }
+
         DISPLAY_OUTPUT_INFO_LABEL => {
             let output = backend.output_info();
             let reply_msg = Message::new(
@@ -453,8 +801,12 @@ fn handle_message(
 
                     let grant_va = if client_space_token != 0 && client_grant_va != 0 {
                         match backend {
-                            DisplayBackend::VirtioGpu(ref b) => {
-                                match b.grant_fb_to_client(client_space_token, client_grant_va) {
+                            DisplayBackend::VirtioGpu(ref mut b) => {
+                                match b.grant_fb_to_client(
+                                    token,
+                                    client_space_token,
+                                    client_grant_va,
+                                ) {
                                     Ok(va) => {
                                         *direct_fb_token = token;
                                         va
@@ -540,35 +892,69 @@ fn handle_message(
             let seq = msg.words[3] as u64;
             let client_frame_token = msg.words[4] as u64;
 
-            // Damage rects from payload: each rect is 16 bytes (4*u32).
-            let mut rects: Vec<Rect> = Vec::new();
-            let mut off = 0;
-            while off + 16 <= payload.len() {
-                let x = u32::from_le_bytes([
-                    payload[off], payload[off + 1],
-                    payload[off + 2], payload[off + 3],
-                ]);
-                let y = u32::from_le_bytes([
-                    payload[off + 4], payload[off + 5],
-                    payload[off + 6], payload[off + 7],
-                ]);
-                let w = u32::from_le_bytes([
-                    payload[off + 8], payload[off + 9],
-                    payload[off + 10], payload[off + 11],
-                ]);
-                let h = u32::from_le_bytes([
-                    payload[off + 12], payload[off + 13],
-                    payload[off + 14], payload[off + 15],
-                ]);
-                if w > 0 && h > 0 {
-                    rects.push(Rect { x, y, w, h });
-                }
-                off += 16;
-            }
+            let rects = parse_damage_payload(payload);
             let damage = DamageList::from_rects(&rects);
 
             // Direct-FB path: client wrote directly to the granted FB.
             // No copy, no composite — just TRANSFER the damage to QEMU.
+            let lease_damage = leases.active_lease().is_some_and(|lease| {
+                lease.owner == LeaseOwner::Fullscreen
+                    && lease.handle
+                        == LeaseHandle {
+                            lease_id: token,
+                            generation: seq,
+                        }
+            });
+            let direct_damage = if lease_damage {
+                fullscreen_damage(payload, &rects, backend.output_info())
+            } else {
+                damage
+            };
+            if client_frame_token == 0 && lease_damage && leases.mark_fullscreen_commit_diag(
+                LeaseHandle { lease_id: token, generation: seq },
+            ) {
+                let first = rects.first().copied();
+                let bounds = backend.output_info();
+                let clipped_rects = rects
+                    .iter()
+                    .filter(|rect| {
+                        rect.clip_to(Rect {
+                            x: 0,
+                            y: 0,
+                            w: bounds.width,
+                            h: bounds.height,
+                        })
+                        .is_some()
+                    })
+                    .count();
+                let _ = debug_print(&format!(
+                    "displayd: fullscreen commit diag payload_len={} parsed_rects={} first_rect={:?} clipped_rects={}",
+                    payload.len(), rects.len(), first, clipped_rects
+                ));
+            }
+            if client_frame_token == 0 && lease_damage {
+                let flush_ok = backend.flush_direct(&direct_damage);
+                let first_flush = !DIRECT_FLUSH_DIAG_DONE.swap(true, Ordering::Relaxed);
+                let first_failure = !flush_ok
+                    && !DIRECT_FLUSH_FAILURE_DIAG_DONE.swap(true, Ordering::Relaxed);
+                if first_flush || first_failure {
+                    let _ = debug_print(&format!(
+                        "displayd: direct commit flush_result={} lease_match=true id={} generation={}",
+                        flush_ok,
+                        token,
+                        seq
+                    ));
+                }
+                emit_flush_marker(&direct_damage);
+                let reply_msg = Message::new(
+                    DISPLAY_BUFFER_COMMIT_LABEL,
+                    [0, 0, 0, 0, 0, 0],
+                    1,
+                );
+                let _ = reply(reply_token, &reply_msg, IpcFlags::empty());
+                return;
+            }
+
             if client_frame_token == 0 && token == *direct_fb_token && *direct_fb_token != 0 {
                 backend.flush(&damage);
                 emit_flush_marker(&damage);
@@ -784,8 +1170,26 @@ fn handle_message(
         DISPLAY_SURFACE_DESTROY_LABEL => {
             let token = msg.words[1] as u64;
 
-            let error_code = match scene.destroy_surface(token) {
-                Ok(_) => {
+            let error_code = if token == *direct_fb_token {
+                match backend {
+                    DisplayBackend::VirtioGpu(b) => {
+                        if b.release_direct_grant(token).is_err() {
+                            DisplayError::LeaseIoFailure as usize
+                        } else {
+                            *direct_fb_token = 0;
+                            0
+                        }
+                    }
+                    DisplayBackend::Linear(_) => 0,
+                }
+            } else {
+                0
+            };
+            let error_code = if error_code != 0 {
+                error_code
+            } else {
+                match scene.destroy_surface(token) {
+                    Ok(_) => {
                     // Remove from tracked surfaces.
                     if let Some(idx) = surfaces.iter().position(|s| s.token == token) {
                         surfaces[idx].state.destroy();
@@ -794,8 +1198,9 @@ fn handle_message(
                     let frame_damage = scene.composite_frame(backend);
                     emit_flush_marker(&frame_damage);
                     0
+                    }
+                    Err(e) => e as usize,
                 }
-                Err(e) => e as usize,
             };
 
             let reply_msg = Message::new(
