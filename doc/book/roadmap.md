@@ -499,6 +499,20 @@ Performance (T2↔T13 linear-fb regression check):
 - These measurements were with the pre-T19 sdl2-shim path; cannot be
   re-measured after T19's SDL2 migration (DOOM page-faults).
 
+### Interlude: Xnes display and audio path (DONE 2026-08-03)
+
+Xnes now has separate stable windowed and direct-fullscreen paths. Windowed
+rendering uses compositor pixel-region damage; fullscreen rendering acquires an
+exclusive displayd framebuffer lease, submits damage for the centered NES
+rectangle, and restores compositor ownership on exit. Both paths keep audio in
+audiod's shared ring and use NTSC frame pacing without unbounded display IPC.
+
+Manual QEMU validation confirmed good frame rate and audio in fullscreen,
+`Ctrl-Alt-X` compositor restoration, and good frame rate and audio after
+returning to windowed mode. Per-input receive diagnostics were removed after
+validation because they produced routine log spam without changing input
+handling.
+
 ### Interlude: audiod SIMD/SSE2 optimization (PENDING)
 
 audiod's hot path (mix + gain + pan + resample) is currently scalar

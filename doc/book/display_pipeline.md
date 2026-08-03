@@ -13,11 +13,11 @@ compositor window, render into the shared mapping, and send
 into its direct framebuffer, and sends a damage-only commit to displayd. The
 compositor remains the sole direct framebuffer owner.
 
-Fullscreen xnes uses the same pipeline with `COMP_WIN_FLAG_FULLSCREEN` and
-`COMP_WIN_FLAG_NO_CHROME`. The window is pinned to the output and compositor
-cursor rendering is suppressed while it is focused. Keyboard events still pass
-through the compositor input-capture endpoint, and audio remains independent
-through audiod's shared ring.
+Windowed xnes uses this pipeline with compositor chrome. Fullscreen xnes uses
+an explicit `displayd` direct-display lease: displayd transfers the framebuffer
+grant to xnes, compositor visual work is quiesced, and xnes submits only the
+changed game rectangle. Keyboard events remain routed through the lease's input
+endpoint, and audio remains independent through audiod's shared ring.
 
 This path avoids xnes sending a full frame token to displayd. That older path
 made displayd map, copy, composite, and flush every frame. Fire-and-forget
@@ -26,12 +26,9 @@ blocked emulation and starved audio.
 
 ## Direct framebuffer ownership
 
-The current compositor path has one direct framebuffer owner. Do not grant the
-same scanout mapping to xnes while compositor still renders: two writable
-owners can race with GPU transfer and overwrite each other's pixels.
-
-Future fullscreen applications that must become direct `displayd` clients need
-an explicit exclusive lease/handoff protocol:
+The current compositor path has one direct framebuffer owner. Fullscreen
+applications that become direct `displayd` clients use an explicit exclusive
+lease/handoff protocol:
 
 1. Quiesce compositor visual work, cursor, status row, and damage commits.
 2. Keep compositor keyboard routing alive.
@@ -40,9 +37,9 @@ an explicit exclusive lease/handoff protocol:
 5. Revoke or recover ownership on release or client death.
 6. Reacquire the compositor grant and force a full repaint.
 
-The existing `direct_fb_token` singleton is not sufficient for this handoff:
-granting a second mapping can silently supersede the first owner. A future
-lease must make ownership transitions explicit and rollback-safe.
+Lease ownership transitions are explicit and rollback-safe; a second direct
+grant cannot silently supersede the current owner. Release and client-death
+paths restore compositor ownership before normal windowed rendering resumes.
 
 ## Performance rules
 
@@ -56,12 +53,19 @@ lease must make ownership transitions explicit and rollback-safe.
 ## Relevant implementation
 
 - `userspace/xnes-cluu/src/main.rs`: xnes frame pacing, audio, input, and
-  compositor fullscreen window setup.
+  windowed rendering, and direct fullscreen lease lifecycle.
 - `userspace/libcluu/src/pixel_region.rs`: client-side shared pixel grant.
 - `userspace/compositor/src/window_mgr.rs`: fullscreen/no-chrome window and
   pixel-region mapping.
 - `userspace/compositor/src/render.rs`: shared-pixel copy and damage commit.
 - `userspace/displayd/src/main.rs`: display surface ownership and commit
-  dispatch.
+  dispatch, including direct-display lease ownership.
 - `userspace/displayd/src/virtio_gpu_backend.rs`: direct framebuffer grant and
   GPU transfer/flush.
+
+## Manual validation
+
+On 2026-08-03, fullscreen xnes was manually exercised in QEMU: frame rate and
+audio were good, `Ctrl-Alt-X` returned ownership to the compositor, and the
+windowed path also rendered with good frame rate and audio. Routine per-input
+diagnostics were then removed from xnes; input handling is unchanged.
