@@ -8,6 +8,7 @@
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use cluu_virtio_core::dma::{DmaPool, DmaRegion};
 use cluu_virtio_core::pci;
@@ -37,6 +38,7 @@ const GPU_UNREF_RESOURCE: u32 = 0x706;
 const GPU_POLL_EVENT: u32 = 0x707;
 const GPU_RESIZE: u32 = 0x708;
 const GPU_GRANT_TO_CLIENT: u32 = 0x709;
+const GPU_GRANT_RELEASE: usize = 1;
 const GPU_TRANSFER_FLUSH_BATCH: u32 = 0x70A;
 const GPU_PROTOCOL_VERSION: usize = 1;
 const GPU_CAP_DAMAGE_BATCH: usize = 1 << 0;
@@ -88,6 +90,72 @@ pub struct GpuDriver {
     pub fb_resource_id: u32,
     pub fb_width: u32,
     pub fb_height: u32,
+    direct_grant: DirectGrantState,
+}
+
+static TRANSFER_FLUSH_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectGrantRecord {
+    client_space_token: usize,
+    client_target_va: usize,
+    pages: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectGrantState {
+    Idle,
+    Active(DirectGrantRecord),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectGrantStateError {
+    AlreadyActive,
+}
+
+impl DirectGrantState {
+    const fn new() -> Self {
+        Self::Idle
+    }
+
+    fn acquire(
+        &mut self,
+        grant: DirectGrantRecord,
+    ) -> core::result::Result<(), DirectGrantStateError> {
+        if !matches!(self, Self::Idle) {
+            return Err(DirectGrantStateError::AlreadyActive);
+        }
+        *self = Self::Active(grant);
+        Ok(())
+    }
+
+    fn rollback(&mut self) {
+        *self = Self::Idle;
+    }
+
+    fn release(
+        &mut self,
+        client_space_token: usize,
+        client_target_va: usize,
+    ) -> Option<DirectGrantRecord> {
+        let Self::Active(grant) = *self else {
+            return None;
+        };
+        if grant.client_space_token != client_space_token
+            || grant.client_target_va != client_target_va
+        {
+            return None;
+        }
+        *self = Self::Idle;
+        Some(grant)
+    }
+
+    const fn active(&self) -> Option<DirectGrantRecord> {
+        match self {
+            Self::Idle => None,
+            Self::Active(grant) => Some(*grant),
+        }
+    }
 }
 
 /// Display mode queried via GET_DISPLAY_INFO.
@@ -213,6 +281,7 @@ impl GpuDriver {
             fb_resource_id: 0,
             fb_width: 0,
             fb_height: 0,
+            direct_grant: DirectGrantState::new(),
         };
 
         driver.transport.set_driver_ok()?;
@@ -826,6 +895,19 @@ impl GpuDriver {
         // SAFETY: response buffers written by device via DMA.
         let tr_type = unsafe { core::ptr::read_volatile(tr_region.virt as *const u32) };
         let fr_type = unsafe { core::ptr::read_volatile(fr_region.virt as *const u32) };
+        if TRANSFER_FLUSH_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+            debug_print(&format!(
+                "virtio-gpu: transfer flush resource={} rect={},{},{},{} offset={} replies=0x{:x},0x{:x}",
+                resource_id,
+                x,
+                y,
+                w,
+                h,
+                offset,
+                tr_type,
+                fr_type
+            ))?;
+        }
         if !protocol::resp_ok(tr_type) || !protocol::resp_ok(fr_type) {
             return Err(Error::InvalidState);
         }
@@ -1457,6 +1539,11 @@ impl GpuDriver {
                         let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                         continue;
                     }
+                    if self.direct_grant.active().is_some() {
+                        let rmsg = Message::new(GPU_RESIZE, [6, 0, 0, 0, 0, 0], 1);
+                        let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                        continue;
+                    }
 
                     let new_bytes = match (new_w as usize)
                         .checked_mul(new_h as usize)
@@ -1589,33 +1676,77 @@ impl GpuDriver {
                     let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                 }
 
-                GPU_GRANT_TO_CLIENT => {
+        GPU_GRANT_TO_CLIENT => {
+            if msg.words[2] == GPU_GRANT_RELEASE {
+                let space_token = msg.words[0];
+                let target_va = msg.words[1];
+                let status = if self.direct_grant.release(space_token, target_va).is_some() {
+                    0
+                } else {
+                    1
+                };
+                let rmsg = Message::new(GPU_GRANT_TO_CLIENT, [status, 0, 0, 0, 0, 0], 1);
+                let _ = reply(reply_token, &rmsg, IpcFlags::empty());
+                continue;
+            }
                     let client_space_token = msg.words[0];
                     let client_target_va = msg.words[1];
                     debug_print(&format!(
                         "virtio-gpu: GRANT_TO_CLIENT space_tok={:#x} va={:#x} fb_virt={:#x} fb_pages={}",
                         client_space_token, client_target_va, self.fb_virt, self.fb_pages
                     ))?;
-                    let mut ok = true;
-                    if self.fb_pages > 0 {
-                        for page_idx in 0..self.fb_pages {
-                            if space_grant(
-                                self.space_token,
-                                client_space_token,
-                                self.fb_virt + page_idx * PAGE_SIZE,
-                                client_target_va + page_idx * PAGE_SIZE,
-                                0x02,
-                            )
-                            .is_err()
-                            {
-                                ok = false;
-                                break;
-                            }
+                    let status = if self.direct_grant.active().is_some()
+                        || self.fb_pages == 0
+                        || client_space_token == 0
+                        || client_target_va == 0
+                        || client_target_va & (PAGE_SIZE - 1) != 0
+                    {
+                        if self.direct_grant.active().is_some() {
+                            2
+                        } else {
+                            1
                         }
                     } else {
-                        ok = false;
-                    }
-                    let status: usize = if ok { 0 } else { 1 };
+                        let grant = DirectGrantRecord {
+                            client_space_token,
+                            client_target_va,
+                            pages: self.fb_pages,
+                        };
+                        if self.direct_grant.acquire(grant).is_err() {
+                            2
+                        } else {
+                            let mut mapped_pages = 0;
+                            let mut failed = false;
+                            for page_idx in 0..self.fb_pages {
+                                if space_grant(
+                                    self.space_token,
+                                    client_space_token,
+                                    self.fb_virt + page_idx * PAGE_SIZE,
+                                    client_target_va + page_idx * PAGE_SIZE,
+                                    0x02,
+                                )
+                                .is_err()
+                                {
+                                    failed = true;
+                                    break;
+                                }
+                                mapped_pages += 1;
+                            }
+                            if failed {
+                                if mapped_pages > 0 {
+                                    let _ = space_unmap(
+                                        client_space_token,
+                                        client_target_va,
+                                        mapped_pages,
+                                    );
+                                }
+                                self.direct_grant.rollback();
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                    };
                     let rmsg = Message::new(GPU_GRANT_TO_CLIENT, [status, 0, 0, 0, 0, 0], 1);
                     let _ = reply(reply_token, &rmsg, IpcFlags::empty());
                 }
@@ -1641,4 +1772,70 @@ fn lerp_color(a: u32, b: u32, t: u32) -> u32 {
     let r_ch = lerp_channel((a >> 16) & 0xFF, (b >> 16) & 0xFF);
     // X channel is always 0.
     (r_ch << 16) | (g_ch << 8) | b_ch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirectGrantRecord, DirectGrantState, DirectGrantStateError};
+
+    const FIRST_GRANT: DirectGrantRecord = DirectGrantRecord {
+        client_space_token: 11,
+        client_target_va: 0x4000,
+        pages: 2,
+    };
+    const SECOND_GRANT: DirectGrantRecord = DirectGrantRecord {
+        client_space_token: 12,
+        client_target_va: 0x8000,
+        pages: 4,
+    };
+
+    #[test]
+    fn direct_grant_empty_state_accepts_acquire() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.acquire(FIRST_GRANT), Ok(()));
+        assert_eq!(state.active(), Some(FIRST_GRANT));
+    }
+
+    #[test]
+    fn direct_grant_rejects_duplicate_and_conflicting_acquire() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.acquire(FIRST_GRANT), Ok(()));
+        assert_eq!(state.acquire(FIRST_GRANT), Err(DirectGrantStateError::AlreadyActive));
+        assert_eq!(state.acquire(SECOND_GRANT), Err(DirectGrantStateError::AlreadyActive));
+        assert_eq!(state.active(), Some(FIRST_GRANT));
+    }
+
+    #[test]
+    fn direct_grant_matching_release_clears_active_state() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.acquire(FIRST_GRANT), Ok(()));
+        assert_eq!(
+            state.release(FIRST_GRANT.client_space_token, FIRST_GRANT.client_target_va),
+            Some(FIRST_GRANT)
+        );
+        assert_eq!(state.active(), None);
+    }
+
+    #[test]
+    fn direct_grant_stale_release_is_idempotent() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.acquire(FIRST_GRANT), Ok(()));
+        assert_eq!(state.release(SECOND_GRANT.client_space_token, SECOND_GRANT.client_target_va), None);
+        assert_eq!(state.active(), Some(FIRST_GRANT));
+        assert_eq!(state.release(FIRST_GRANT.client_space_token, FIRST_GRANT.client_target_va), Some(FIRST_GRANT));
+        assert_eq!(state.release(FIRST_GRANT.client_space_token, FIRST_GRANT.client_target_va), None);
+        assert_eq!(state.active(), None);
+    }
+
+    #[test]
+    fn direct_grant_failed_acquire_and_rollback_preserve_transition_rules() {
+        let mut state = DirectGrantState::new();
+        assert_eq!(state.acquire(FIRST_GRANT), Ok(()));
+        assert!(state.acquire(SECOND_GRANT).is_err());
+        assert_eq!(state.active(), Some(FIRST_GRANT));
+        state.rollback();
+        assert_eq!(state.active(), None);
+        assert_eq!(state.acquire(SECOND_GRANT), Ok(()));
+        assert_eq!(state.active(), Some(SECOND_GRANT));
+    }
 }
