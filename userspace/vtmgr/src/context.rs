@@ -382,6 +382,7 @@ impl VtmgrContext {
                 let idx = n as usize;
                 if idx < VT_COUNT { self.tty_main_eps[idx] } else { 0 }
             }
+            RoutingTargetKind::Direct => 0,
         }
     }
 }

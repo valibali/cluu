@@ -23,8 +23,13 @@ mod input_routing;
 use context::VtmgrContext;
 use libcluu::boot::{process_info, TOKEN_SELF};
 use libcluu::ipc::{
-    parse_message, KBD_EVENT_LABEL, MOUSE_EVENT_LABEL, VTMGR_PIN_VT_LABEL, VTMGR_REQUEST_VT_SWITCH_LABEL,
+    KBD_EVENT_LABEL, MOUSE_EVENT_LABEL, VTMGR_DIRECT_ABORT_LABEL,
+    VTMGR_DIRECT_COMMIT_LABEL, VTMGR_DIRECT_PREPARE_LABEL,
+    VTMGR_DIRECT_RETURN_COMMIT_LABEL, VTMGR_DIRECT_RETURN_PREPARE_LABEL,
+    VTMGR_PIN_VT_LABEL,
+    VTMGR_REQUEST_VT_SWITCH_LABEL,
 };
+use libcluu::input_routing::DirectRouteError;
 use libcluu::server_main::AsyncServerMain;
 use libcluu::types::{IpcFlags, Message};
 use libcluu::{debug_print, yield_cpu, Result};
@@ -86,6 +91,26 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
         KBD_EVENT_LABEL | MOUSE_EVENT_LABEL => {
             ctx.router.forward(&msg, |kind| ctx.lookup_target_endpoint(kind));
         }
+        VTMGR_DIRECT_PREPARE_LABEL => {
+            let result = ctx.router.prepare_direct(msg.words[0], msg.words[1] as u64);
+            reply_direct_route_status(msg, result);
+        }
+        VTMGR_DIRECT_COMMIT_LABEL => {
+            let result = ctx.router.commit_direct(msg.words[0] as u64);
+            reply_direct_route_status(msg, result);
+        }
+        VTMGR_DIRECT_ABORT_LABEL => {
+            let result = ctx.router.abort_direct(msg.words[0] as u64);
+            reply_direct_route_status(msg, result);
+        }
+        VTMGR_DIRECT_RETURN_PREPARE_LABEL => {
+            let result = ctx.router.prepare_return(msg.words[0] as u64);
+            reply_direct_route_status(msg, result);
+        }
+        VTMGR_DIRECT_RETURN_COMMIT_LABEL => {
+            let result = ctx.router.commit_return(msg.words[0] as u64);
+            reply_direct_route_status(msg, result);
+        }
         VTMGR_REQUEST_VT_SWITCH_LABEL => {
             let new_vt = msg.words[0];
             let allowed = ctx.router.should_allow_switch(
@@ -116,3 +141,16 @@ fn handle_vtmgr_message(ctx: &mut VtmgrContext, msg: &Message, payload: &[u8]) {
     }
 }
 
+fn reply_direct_route_status<T>(
+    msg: &Message,
+    result: core::result::Result<T, DirectRouteError>,
+) {
+    let status = match result {
+        Ok(_) => 0,
+        Err(error) => error.status_code(),
+    };
+    if let Some(reply_id) = libcluu::ipc::extract_reply_id(msg) {
+        let reply = Message::new(0, [status, 0, 0, 0, 0, 0], 1);
+        let _ = libcluu::ipc::reply(reply_id, &reply, IpcFlags::empty());
+    }
+}
