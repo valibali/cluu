@@ -64,6 +64,10 @@ pub const DISPLAY_SET_GEOMETRY_LABEL: u32 = 305;
 pub const DISPLAY_SET_VISIBLE_LABEL: u32 = 306;
 pub const DISPLAY_SURFACE_DESTROY_LABEL: u32 = 307;
 pub const DISPLAY_OUTPUT_CHANGED_LABEL: u32 = 308;
+pub const DISPLAY_LEASE_REGISTER_LABEL: u32 = 309;
+pub const DISPLAY_LEASE_ACQUIRE_LABEL: u32 = 310;
+pub const DISPLAY_LEASE_RELEASE_LABEL: u32 = 311;
+pub const DISPLAY_LEASE_RELEASE_ACK_LABEL: u32 = 312;
 
 // ----- Pixel format -----
 
@@ -333,6 +337,63 @@ pub struct Destroy {
     pub surface_cap_token: u64,
 }
 
+// ----- Framebuffer lease -----
+
+/// Exclusive framebuffer owner. Exactly one owner may be active at a time.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseOwner {
+    Compositor = 0,
+    Fullscreen = 1,
+}
+
+/// Lifecycle handle for one framebuffer lease generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseHandle {
+    pub lease_id: u64,
+    pub generation: u64,
+}
+
+/// Register the default compositor framebuffer owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseRegister {
+    pub owner: LeaseOwner,
+}
+
+/// Request fullscreen framebuffer ownership after compositor release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseAcquire {
+    /// Client address-space capability receiving the framebuffer mapping.
+    pub client_space_token: usize,
+    /// Page-aligned client virtual address for the framebuffer mapping.
+    pub client_target_va: usize,
+    /// Endpoint that receives input while fullscreen owns the display.
+    pub input_endpoint: usize,
+}
+
+/// Begin release of the lease identified by `handle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseRelease {
+    pub handle: LeaseHandle,
+}
+
+/// Acknowledge that owner-side unmap/release work for `handle` completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseReleaseAck {
+    pub handle: LeaseHandle,
+}
+
+/// Logical lease grant returned by displayd.
+///
+/// Wire reply words are `[lease_id, generation, width, height, pitch, status]`.
+/// `status == 0` means grant success; geometry fields describe direct
+/// framebuffer mapping for fullscreen clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseGranted {
+    pub handle: LeaseHandle,
+    pub owner: LeaseOwner,
+}
+
 // ----- Error enum -----
 
 /// Protocol error. Exhaustive — every displayd failure maps to exactly one
@@ -364,6 +425,20 @@ pub enum Error {
     /// The surface capability token is invalid (destroyed, revoked, or never
     /// existed). Also returned for any operation on a destroyed surface.
     InvalidCapability,
+    /// The compositor currently owns the exclusive framebuffer.
+    FramebufferBusy,
+    /// A framebuffer lease is waiting for owner-side release acknowledgement.
+    LeaseTransitioning,
+    /// A release acknowledgement is required before ownership can change.
+    ReleaseRequired,
+    /// The lease handle does not identify the current lifecycle generation.
+    StaleLease,
+    /// A terminal lease release was repeated; no side effect was performed.
+    AlreadyReleased,
+    /// Lease-side preparation or completion failed; coordinator stays closed.
+    LeaseIoFailure,
+    /// Lease generation counter cannot advance safely.
+    LeaseGenerationExhausted,
 }
 
 // ----- Buffer state machine -----
@@ -629,6 +704,13 @@ mod tests {
             Error::PitchOverflow,
             Error::BufferOverflow,
             Error::InvalidCapability,
+            Error::FramebufferBusy,
+            Error::LeaseTransitioning,
+            Error::ReleaseRequired,
+            Error::StaleLease,
+            Error::AlreadyReleased,
+            Error::LeaseIoFailure,
+            Error::LeaseGenerationExhausted,
         ];
         // Every variant is distinct.
         for i in 0..errors.len() {
@@ -636,8 +718,8 @@ mod tests {
                 assert_ne!(errors[i], errors[j], "duplicate error variant at {}", i);
             }
         }
-        // Exactly 9 variants — update this test if the enum grows.
-        assert_eq!(errors.len(), 9);
+        // Exactly 16 variants — update this test if the enum grows.
+        assert_eq!(errors.len(), 16);
     }
 
     // Test 1: valid lifecycle — 2 buffers alternate 1000 times, no premature reuse.
