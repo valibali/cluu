@@ -55,6 +55,11 @@ pub const PROCMGR_QUERY_CTTY_LABEL: u32 = 11;
 /// vtmgr uses this to route switch requests to the right backend without relying
 /// on magic numbers in its own source.
 pub const VTMGR_PIN_VT_LABEL: u32 = 16;
+pub const VTMGR_DIRECT_PREPARE_LABEL: u32 = 113;
+pub const VTMGR_DIRECT_COMMIT_LABEL: u32 = 114;
+pub const VTMGR_DIRECT_ABORT_LABEL: u32 = 115;
+pub const VTMGR_DIRECT_RETURN_PREPARE_LABEL: u32 = 116;
+pub const VTMGR_DIRECT_RETURN_COMMIT_LABEL: u32 = 117;
 /// vtmgr → console: create a new VT buffer.
 /// words[0] = VT index (0-3).
 pub const CONSOLE_CREATE_VT_LABEL: u32 = 17;
@@ -1021,7 +1026,9 @@ pub fn call_with_payload(
     payload: &[u8],
     reply: &mut Message,
 ) -> Result<()> {
-    let header = msg.as_bytes();
+    let mut message = msg.clone();
+    message.words[0] = payload.len();
+    let header = message.as_bytes();
     let total_len = header.len() + payload.len();
     let reply_bytes = reply.as_bytes_mut();
     if total_len <= IPC_INLINE_STACK_MAX {

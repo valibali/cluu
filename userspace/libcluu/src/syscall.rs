@@ -10,6 +10,12 @@ use crate::error::{Error, Result};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 const IPC_REG_INLINE_FLAG: usize = 1usize << (usize::BITS - 1);
+const IPC_SEND_NONBLOCK_FLAG: usize = 1usize << (usize::BITS - 2);
+
+const fn encode_send_len(len: usize, inline: bool, nonblocking: bool) -> usize {
+    len | if inline { IPC_REG_INLINE_FLAG } else { 0 }
+        | if nonblocking { IPC_SEND_NONBLOCK_FLAG } else { 0 }
+}
 const IPC_REG_INLINE_MAX_PAYLOAD: usize = 32;
 const IPC_REG_FAST_UNKNOWN: u8 = 0;
 const IPC_REG_FAST_ENABLED: u8 = 1;
@@ -338,7 +344,7 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
                 SyscallNumber::Send,
                 endpoint_token,
                 usize::from_ne_bytes(chunk0),
-                IPC_REG_INLINE_FLAG | msg.len(),
+                encode_send_len(msg.len(), true, false),
                 usize::from_ne_bytes(chunk1),
                 usize::from_ne_bytes(chunk2),
                 usize::from_ne_bytes(chunk3),
@@ -362,7 +368,7 @@ pub fn ipc_send(endpoint_token: usize, msg: &[u8]) -> Result<()> {
             SyscallNumber::Send,
             endpoint_token,
             msg.as_ptr() as usize,
-            msg.len(),
+            encode_send_len(msg.len(), false, false),
         )?
     };
     Ok(())
@@ -386,7 +392,7 @@ pub fn ipc_send_nonblocking(endpoint_token: usize, msg: &[u8]) -> Result<()> {
                 SyscallNumber::Send,
                 endpoint_token,
                 usize::from_ne_bytes(chunk0),
-                IPC_REG_INLINE_FLAG | msg.len(),
+                encode_send_len(msg.len(), true, true),
                 usize::from_ne_bytes(chunk1),
                 usize::from_ne_bytes(chunk2),
                 usize::from_ne_bytes(chunk3),
@@ -410,14 +416,10 @@ pub fn ipc_send_nonblocking(endpoint_token: usize, msg: &[u8]) -> Result<()> {
             SyscallNumber::Send,
             endpoint_token,
             msg.as_ptr() as usize,
-            msg.len(),
+            encode_send_len(msg.len(), false, true),
         )
     };
-    match result {
-        Ok(_) => Ok(()),
-        Err(Error::WouldBlock) => Ok(()),
-        Err(err) => Err(err),
-    }
+    result.map(|_| ())
 }
 
 /// Receive IPC message from any of the given endpoints (recv_any)
@@ -1843,6 +1845,25 @@ mod tests {
         assert_eq!(SyscallNumber::Yield as usize, 4);
         assert_eq!(SyscallNumber::Invoke as usize, 5);
         assert_eq!(SyscallNumber::DebugPrint as usize, 255);
+    }
+
+    #[test]
+    fn send_flags_should_use_distinct_high_bits() {
+        assert_eq!(IPC_REG_INLINE_FLAG, 1usize << (usize::BITS - 1));
+        assert_eq!(IPC_SEND_NONBLOCK_FLAG, 1usize << (usize::BITS - 2));
+        assert_eq!(IPC_REG_INLINE_FLAG & IPC_SEND_NONBLOCK_FLAG, 0);
+        assert_eq!(8192 & (IPC_REG_INLINE_FLAG | IPC_SEND_NONBLOCK_FLAG), 0);
+    }
+
+    #[test]
+    fn encode_send_len_should_cover_all_send_modes() {
+        assert_eq!(encode_send_len(0, false, false), 0);
+        assert_eq!(encode_send_len(32, true, false), IPC_REG_INLINE_FLAG | 32);
+        assert_eq!(encode_send_len(8192, false, true), IPC_SEND_NONBLOCK_FLAG | 8192);
+        assert_eq!(
+            encode_send_len(32, true, true),
+            IPC_REG_INLINE_FLAG | IPC_SEND_NONBLOCK_FLAG | 32
+        );
     }
 
     #[test]
