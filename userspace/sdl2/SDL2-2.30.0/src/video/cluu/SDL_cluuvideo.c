@@ -22,13 +22,14 @@
 
 #ifdef SDL_VIDEO_DRIVER_CLUU
 
-/* CLUU video backend — displayd surface protocol + compositor input.
+/* CLUU video backend — compositor PixelRegion pixels + direct lease.
  *
  * This is the real SDL2 video backend for CLUU (spec §3.6). It creates
- * windows on displayd via the surface protocol, renders through the
- * built-in software renderer (SDL_RENDERER_SOFTWARE only — no accelerated
- * renderer is advertised), and pumps keyboard/mouse events from the
- * compositor's input-forward channel.
+ * compositor windows for windowed PixelRegion rendering, uses the displayd
+ * direct lease for startup fullscreen, renders through the built-in software
+ * renderer (SDL_RENDERER_SOFTWARE only — no accelerated renderer is
+ * advertised), and pumps keyboard/mouse events from the compositor's
+ * input-forward channel.
  *
  * The C code uses raw CLUU kernel syscalls (inline assembly in the header)
  * to talk to displayd and the compositor. No Rust libcluu linkage is needed
@@ -76,6 +77,13 @@ static int CLUU_Available(void)
 static void CLUU_DeleteDevice(SDL_VideoDevice *device)
 {
     if (device->driverdata) {
+        CLUU_DeviceData *data = (CLUU_DeviceData *)device->driverdata;
+        if (data->failed_direct_cleanup) {
+            if (cluu_release_direct_lease(data, data->failed_direct_cleanup) == 0) {
+                SDL_free(data->failed_direct_cleanup);
+                data->failed_direct_cleanup = NULL;
+            }
+        }
         SDL_free(device->driverdata);
     }
     SDL_free(device);
@@ -114,6 +122,7 @@ static SDL_VideoDevice *CLUU_CreateDevice(void)
     device->ShowWindow = CLUU_ShowWindow;
     device->HideWindow = CLUU_HideWindow;
     device->RaiseWindow = CLUU_RaiseWindow;
+    device->CanSetWindowFullscreen = CLUU_CanSetWindowFullscreen;
     device->SetWindowFullscreen = CLUU_SetWindowFullscreen;
 
     device->CreateWindowFramebuffer = CLUU_CreateWindowFramebuffer;
@@ -188,7 +197,8 @@ static unsigned long cluu_registry_subscribe(CLUU_DeviceData *data,
         /* Received a message — parse it. */
         if (ret >= CLUU_MSG_SIZE) {
             SDL_memcpy(&reply, recv_buf, CLUU_MSG_SIZE);
-            if (reply.tag.label == CLUU_REGISTRY_GRANT_DELIVER_LABEL) {
+            if (reply.tag.label == CLUU_REGISTRY_GRANT_DELIVER_LABEL &&
+                reply.tag.words >= 2 && reply.words[1] != 0) {
                 /* words[1] = granted endpoint token. */
                 return reply.words[1];
             }
@@ -251,14 +261,19 @@ int CLUU_VideoInit(_THIS)
             0, 0, 0, 0, 0, 0, 0);
         ret = cluu_ipc_call(data->displayd_ep,
             &req, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
-        if (ret < 0) {
+        if (ret < CLUU_MSG_SIZE ||
+            reply.tag.label != CLUU_DISPLAY_OUTPUT_INFO_LABEL ||
+            reply.tag.words < 3) {
             return SDL_SetError("CLUU: displayd output info query failed");
         }
         data->screen_w = (unsigned int)reply.words[0];
         data->screen_h = (unsigned int)reply.words[1];
         data->screen_pitch = (unsigned int)reply.words[2];
-        if (data->screen_w == 0 || data->screen_h == 0) {
-            return SDL_SetError("CLUU: displayd returned zero dimensions");
+        if (data->screen_w == 0 || data->screen_h == 0 ||
+            data->screen_w > 0x7fffffffu || data->screen_h > 0x7fffffffu ||
+            cluu_framebuffer_layout(data->screen_w, data->screen_h,
+                data->screen_pitch, NULL, NULL) < 0) {
+            return SDL_SetError("CLUU: displayd returned invalid dimensions");
         }
     }
 
@@ -291,7 +306,12 @@ int CLUU_VideoInit(_THIS)
 void CLUU_VideoQuit(_THIS)
 {
     CLUU_DeviceData *data = cluu_device_data(_this);
-    (void)data;
+    if (data->failed_direct_cleanup) {
+        if (cluu_release_direct_lease(data, data->failed_direct_cleanup) == 0) {
+            SDL_free(data->failed_direct_cleanup);
+            data->failed_direct_cleanup = NULL;
+        }
+    }
     /* Per-window cleanup happens in DestroyWindow/DestroyWindowFramebuffer.
      * Nothing global to clean up here — endpoints are process-scoped and
      * reclaimed on exit. */

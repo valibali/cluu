@@ -26,13 +26,13 @@
 #include "../SDL_sysvideo.h"
 
 /*
- * CLUU SDL2 video backend — displayd surface protocol + compositor input.
+ * CLUU SDL2 video backend — compositor pixels + direct display lease.
  *
  * Five logical files (spec §3.6):
  *   SDL_cluuvideo.h        — this file: shared declarations, IPC helpers
  *   SDL_cluuvideo.c        — bootstrap, VideoInit/VideoQuit, display modes
- *   SDL_cluuwindow.c       — CreateSDLWindow/DestroyWindow, fullscreen fallback
- *   SDL_cluuframebuffer.c  — framebuffer create/update/destroy → displayd commit
+ *   SDL_cluuwindow.c       — CreateSDLWindow/DestroyWindow, direct fullscreen lease
+ *   SDL_cluuframebuffer.c  — framebuffer create/update/destroy
  *   SDL_cluuevents.c       — PumpEvents → SDL_SendKeyboardKey from compositor forward
  *
  * The C backend talks to displayd and the compositor via raw CLUU kernel
@@ -40,7 +40,8 @@
  * the ProcessInfo block and IPC message layout are #[repr(C)] and stable.
  *
  * Software renderer only. No SDL_RENDERER_ACCELERATED is advertised.
- * Fullscreen falls back to composite (no VT theft, no scanout promotion).
+ * Startup fullscreen uses displayd's direct framebuffer lease. Runtime
+ * fullscreen transitions are intentionally unsupported.
  */
 
 /* ── ProcessInfo (at PROCESS_INFO_ADDR, #[repr(C)]) ─────────────────── */
@@ -107,6 +108,10 @@ typedef struct {
 #define CLUU_MAP_FRAME_TOKEN  0x400u
 #define CLUU_FLAGS_USER_RW    0x07u
 
+#define CLUU_PAGE_SIZE 4096u
+#define CLUU_FB_VA     0xD2000000u
+#define CLUU_MAX_MAP_PAGES 32768u
+
 /* ── Display protocol labels (cluu_wire::display) ────────────────────── */
 
 #define CLUU_DISPLAY_OUTPUT_INFO_LABEL     300u
@@ -117,14 +122,23 @@ typedef struct {
 #define CLUU_DISPLAY_SET_GEOMETRY_LABEL    305u
 #define CLUU_DISPLAY_SET_VISIBLE_LABEL     306u
 #define CLUU_DISPLAY_SURFACE_DESTROY_LABEL 307u
+#define CLUU_DISPLAY_LEASE_ACQUIRE_LABEL   310u
+#define CLUU_DISPLAY_LEASE_RELEASE_LABEL   311u
+#define CLUU_DISPLAY_LEASE_RELEASE_ACK_LABEL 312u
 
 /* ── Compositor protocol labels (libcluu::ipc) ───────────────────────── */
 
 #define CLUU_COMP_WIN_REGISTER_LABEL      90u
 #define CLUU_COMP_WIN_REGISTER_REPLY      91u
+#define CLUU_COMP_WIN_DAMAGE_LABEL        92u
 #define CLUU_COMP_WIN_DESTROY_LABEL       93u
 #define CLUU_COMP_INPUT_FORWARD_LABEL     96u
 #define CLUU_COMP_FRAME_READY_LABEL       100u
+#define CLUU_COMP_WIN_SET_PIXEL_REGION_LABEL 106u
+#define CLUU_KBD_EVENT_LABEL                1u
+
+#define CLUU_COMP_GLYPH_W                   8u
+#define CLUU_COMP_GLYPH_H                  16u
 
 #define CLUU_COMP_WIN_FLAG_FULLSCREEN     1u
 #define CLUU_COMP_WIN_FLAG_NO_CHROME      2u
@@ -151,18 +165,40 @@ typedef struct {
 
 #define CLUU_MAX_DAMAGE_RECTS 8
 
+typedef enum {
+    CLUU_DIRECT_NONE = 0,
+    CLUU_DIRECT_MAPPED,
+    CLUU_DIRECT_RELEASE_PREPARED,
+    CLUU_DIRECT_UNMAPPED,
+    CLUU_DIRECT_RELEASED
+} CLUU_DirectPhase;
+
 typedef struct {
-    /* displayd surface */
-    unsigned long long surface_token;   /* 0 = no surface */
+    /* displayd direct framebuffer geometry (startup fullscreen only) */
     unsigned int       surf_w;
     unsigned int       surf_h;
     unsigned int       surf_pitch;
 
-    /* frame token for pixel transfer */
+    /* compositor PixelRegion (windowed only) */
+    unsigned int       pixel_w;
+    unsigned int       pixel_h;
+    unsigned int       pixel_pitch;
+    unsigned int       cell_w;
+    unsigned int       cell_h;
     unsigned long long frame_token;
     void              *frame_va;        /* mapped virtual address */
     unsigned int       frame_pages;
     unsigned int       frame_bytes;
+    unsigned char      compositor_owns_frame;
+
+    /* displayd direct framebuffer lease (startup fullscreen only) */
+    unsigned long long lease_id;
+    unsigned long long lease_generation;
+    void              *direct_va;
+    unsigned long      direct_pages;
+    unsigned int       direct_bytes;
+    CLUU_DirectPhase   direct_phase;
+    unsigned char      framebuffer_created;
 
     /* compositor window */
     unsigned long long win_id;          /* 0 = no compositor window */
@@ -196,6 +232,7 @@ typedef struct {
 
     /* surface leak counter (for 100 init/quit test) */
     int surface_count;
+    CLUU_WindowData *failed_direct_cleanup;
 } CLUU_DeviceData;
 
 /* ── Inline syscall (matches kernel ABI: rax=nr, rdi..r9=args) ──────── */
@@ -330,6 +367,55 @@ static __inline__ int cluu_call_with_payload(unsigned long ep,
     return ret < 0 ? -1 : 0;
 }
 
+static __inline__ int cluu_release_direct_lease(CLUU_DeviceData *dev,
+    CLUU_WindowData *wd)
+{
+    CLUU_Message msg, reply;
+    long ret;
+
+    if (wd->direct_phase == CLUU_DIRECT_MAPPED) {
+        cluu_msg_init(&msg, CLUU_DISPLAY_LEASE_RELEASE_LABEL,
+            (unsigned long)wd->lease_id,
+            (unsigned long)wd->lease_generation,
+            0, 0, 0, 0, 2);
+        ret = cluu_ipc_call(dev->displayd_ep,
+            &msg, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
+        if (ret < CLUU_MSG_SIZE ||
+            reply.tag.label != CLUU_DISPLAY_LEASE_RELEASE_LABEL ||
+            reply.words[0] != 0) {
+            return SDL_SetError("CLUU: direct lease release failed");
+        }
+        wd->direct_phase = CLUU_DIRECT_RELEASE_PREPARED;
+    }
+    if (wd->direct_phase == CLUU_DIRECT_RELEASE_PREPARED) {
+        ret = cluu_invoke(dev->space_cap, CLUU_INVOKE_SPACE_UNMAP,
+            CLUU_FB_VA, wd->direct_pages, 0, 0);
+        if (ret < 0) {
+            return SDL_SetError("CLUU: direct framebuffer unmap failed (err=%ld)", ret);
+        }
+        wd->direct_va = NULL;
+        wd->framebuffer_created = 0;
+        wd->direct_phase = CLUU_DIRECT_UNMAPPED;
+    }
+    if (wd->direct_phase == CLUU_DIRECT_UNMAPPED) {
+        cluu_msg_init(&msg, CLUU_DISPLAY_LEASE_RELEASE_ACK_LABEL,
+            (unsigned long)wd->lease_id,
+            (unsigned long)wd->lease_generation,
+            0, 0, 0, 0, 2);
+        ret = cluu_ipc_call(dev->displayd_ep,
+            &msg, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
+        if (ret < CLUU_MSG_SIZE ||
+            reply.tag.label != CLUU_DISPLAY_LEASE_RELEASE_ACK_LABEL ||
+            reply.words[0] != 0) {
+            return SDL_SetError("CLUU: direct lease release acknowledgement failed");
+        }
+        wd->direct_phase = CLUU_DIRECT_RELEASED;
+        wd->direct_pages = 0;
+        wd->direct_bytes = 0;
+    }
+    return 0;
+}
+
 /* ── ProcessInfo access ──────────────────────────────────────────────── */
 
 static __inline__ CLUU_ProcessInfo *cluu_process_info(void)
@@ -347,6 +433,65 @@ static __inline__ unsigned long long cluu_param(int index)
     return cluu_process_info()->params[index];
 }
 
+static __inline__ int cluu_framebuffer_mapping_pages(unsigned int height,
+    unsigned int pitch, unsigned long *pages_out)
+{
+    unsigned long max_ulong = ~(unsigned long)0;
+    unsigned long bytes;
+
+    if (height == 0 || pitch == 0 ||
+        (unsigned long)height > max_ulong / (unsigned long)pitch) {
+        return -1;
+    }
+    bytes = (unsigned long)pitch * (unsigned long)height;
+    if (bytes > max_ulong - (CLUU_PAGE_SIZE - 1u)) {
+        return -1;
+    }
+    *pages_out = (bytes + (CLUU_PAGE_SIZE - 1u)) / CLUU_PAGE_SIZE;
+    if (*pages_out == 0 ||
+        *pages_out > CLUU_MAX_MAP_PAGES ||
+        *pages_out > (max_ulong - (unsigned long)CLUU_FB_VA) / CLUU_PAGE_SIZE) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Validate XRGB8888 geometry and calculate mapping size without overflow. */
+static __inline__ int cluu_framebuffer_layout(unsigned int width,
+    unsigned int height, unsigned int pitch,
+    unsigned int *bytes_out, unsigned int *pages_out)
+{
+    unsigned int max_uint = ~(unsigned int)0;
+    unsigned long min_pitch;
+    unsigned long bytes;
+    unsigned long pages;
+
+    if (width == 0 || height == 0 || pitch == 0 ||
+        width > 0x7fffffffu || height > 0x7fffffffu ||
+        pitch > 0x7fffffffu || (pitch & 3u) != 0) {
+        return -1;
+    }
+    min_pitch = (unsigned long)width * 4u;
+    if (min_pitch > max_uint || (unsigned long)pitch < min_pitch) {
+        return -1;
+    }
+    bytes = (unsigned long)pitch * (unsigned long)height;
+    if (bytes == 0 || bytes > max_uint ||
+        cluu_framebuffer_mapping_pages(height, pitch, &pages) < 0) {
+        return -1;
+    }
+    if (pages > max_uint) {
+        return -1;
+    }
+    if (bytes_out) {
+        *bytes_out = (unsigned int)bytes;
+    }
+    if (pages_out) {
+        *pages_out = (unsigned int)pages;
+    }
+    return 0;
+}
+
 /* ── VideoInit / VideoQuit ───────────────────────────────────────────── */
 
 extern int CLUU_VideoInit(_THIS);
@@ -360,6 +505,7 @@ extern void CLUU_ShowWindow(_THIS, SDL_Window *window);
 extern void CLUU_HideWindow(_THIS, SDL_Window *window);
 extern void CLUU_RaiseWindow(_THIS, SDL_Window *window);
 extern void CLUU_SetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen);
+extern SDL_bool CLUU_CanSetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen);
 
 /* ── Framebuffer operations ──────────────────────────────────────────── */
 

@@ -22,21 +22,87 @@
 
 #ifdef SDL_VIDEO_DRIVER_CLUU
 
-/* CLUU window operations — displayd surface creation + compositor window
- * registration for keyboard input.
+/* CLUU window operations — direct fullscreen lease or compositor window.
  *
  * CreateSDLWindow:
  *   1. Allocate CLUU_WindowData.
- *   2. Create a displayd surface (SurfaceCreate) for pixel output.
- *   3. Set geometry (centered for windowed, top-left for fullscreen).
- *   4. Register a compositor window (WinRegister) for keyboard input.
- *
- * Fullscreen: falls back to composite — no VT theft, no scanout promotion.
- * The surface is positioned at (0,0) and the compositor composites it. */
+ * Fullscreen is startup-only and uses displayd's direct framebuffer lease.
+ * Windowed mode renders through a compositor PixelRegion. */
 
 #include "SDL_cluuvideo.h"
 #include "../SDL_sysvideo.h"
 #include "../../events/SDL_events_c.h"
+
+extern void cluu_debug(const char *msg);
+
+static int CLUU_AcquireDirectLease(CLUU_DeviceData *dev,
+    CLUU_WindowData *wd, SDL_Window *window)
+{
+    CLUU_Message req, reply;
+    unsigned int bytes, pages;
+    unsigned long fallback_pages;
+    unsigned long mapped_pages;
+    long ret;
+
+    if (dev->displayd_ep == 0 || dev->input_ep == 0) {
+        return SDL_SetError("CLUU: direct fullscreen requires displayd and input endpoint");
+    }
+    if (cluu_framebuffer_layout(dev->screen_w, dev->screen_h,
+            dev->screen_pitch, NULL, NULL) < 0) {
+        return SDL_SetError("CLUU: invalid display geometry for direct fullscreen");
+    }
+    cluu_framebuffer_mapping_pages(dev->screen_h, dev->screen_pitch,
+        &fallback_pages);
+
+    cluu_msg_init(&req, CLUU_DISPLAY_LEASE_ACQUIRE_LABEL,
+        dev->space_cap, CLUU_FB_VA, dev->input_ep, 0, 0, 0, 3);
+    ret = cluu_ipc_call(dev->displayd_ep,
+        &req, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
+    if (ret < CLUU_MSG_SIZE ||
+        reply.tag.label != CLUU_DISPLAY_LEASE_ACQUIRE_LABEL ||
+        reply.words[5] != 0 || reply.words[0] == 0 || reply.words[1] == 0) {
+        return SDL_SetError("CLUU: direct fullscreen lease acquisition failed");
+    }
+    wd->lease_id = reply.words[0];
+    wd->lease_generation = reply.words[1];
+    wd->direct_va = (void *)(unsigned long)CLUU_FB_VA;
+    wd->direct_pages = fallback_pages;
+    wd->direct_phase = CLUU_DIRECT_MAPPED;
+
+    if (reply.words[2] > (~(unsigned int)0) ||
+        reply.words[3] > (~(unsigned int)0) ||
+        reply.words[4] > (~(unsigned int)0)) {
+        cluu_release_direct_lease(dev, wd);
+        return SDL_SetError("CLUU: malformed direct framebuffer grant");
+    }
+
+    if (cluu_framebuffer_mapping_pages((unsigned int)reply.words[3],
+            (unsigned int)reply.words[4], &mapped_pages) < 0) {
+        cluu_release_direct_lease(dev, wd);
+        return SDL_SetError("CLUU: direct framebuffer mapping size overflow");
+    }
+    wd->direct_pages = mapped_pages;
+    wd->direct_phase = CLUU_DIRECT_MAPPED;
+
+    if (cluu_framebuffer_layout((unsigned int)reply.words[2],
+            (unsigned int)reply.words[3], (unsigned int)reply.words[4],
+            &bytes, &pages) < 0) {
+        cluu_release_direct_lease(dev, wd);
+        return SDL_SetError("CLUU: invalid direct framebuffer grant");
+    }
+
+    wd->surf_w = (unsigned int)reply.words[2];
+    wd->surf_h = (unsigned int)reply.words[3];
+    wd->surf_pitch = (unsigned int)reply.words[4];
+    wd->direct_pages = pages;
+    wd->direct_bytes = bytes;
+    wd->direct_phase = CLUU_DIRECT_MAPPED;
+    wd->visible = 1;
+    window->w = (int)wd->surf_w;
+    window->h = (int)wd->surf_h;
+    cluu_debug("sdl2-cluu: direct FB");
+    return 0;
+}
 
 /* ── CreateSDLWindow ─────────────────────────────────────────────────── */
 
@@ -45,7 +111,9 @@ int CLUU_CreateSDLWindow(_THIS, SDL_Window *window)
     CLUU_DeviceData *dev = cluu_device_data(_this);
     CLUU_WindowData *wd;
     CLUU_Message req, reply;
-    unsigned int surf_w, surf_h, surf_pitch;
+    unsigned int pixel_w, pixel_h, pixel_pitch;
+    unsigned int cell_w, cell_h;
+    int requested_w, requested_h;
     long ret;
 
     wd = (CLUU_WindowData *)SDL_calloc(1, sizeof(CLUU_WindowData));
@@ -54,120 +122,110 @@ int CLUU_CreateSDLWindow(_THIS, SDL_Window *window)
     }
     window->driverdata = wd;
 
-    /* Surface dimensions from the SDL window request. */
-    surf_w = (unsigned int)window->w;
-    surf_h = (unsigned int)window->h;
-    if (surf_w == 0 || surf_h == 0) {
-        surf_w = dev->screen_w;
-        surf_h = dev->screen_h;
-    }
     wd->fullscreen = (window->flags & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
     if (wd->fullscreen) {
-        surf_w = dev->screen_w;
-        surf_h = dev->screen_h;
-        window->w = (int)surf_w;
-        window->h = (int)surf_h;
-    }
-    surf_pitch = surf_w * 4;  /* XRGB8888 = 4 bytes/pixel */
-    wd->surf_w = surf_w;
-    wd->surf_h = surf_h;
-    wd->surf_pitch = surf_pitch;
-    wd->visible = 1;
-
-    /* Create displayd surface.
-     * Word layout matches compositor's SURFACE_CREATE:
-     *   words[0] = client_space_token (0 = no direct FB grant)
-     *   words[1] = client_grant_va (0 = no direct FB)
-     *   words[2] = width
-     *   words[3] = height
-     *   words[4] = pitch */
-    if (dev->displayd_ep != 0) {
-        cluu_msg_init(&req, CLUU_DISPLAY_SURFACE_CREATE_LABEL,
-            0, 0,
-            surf_w, surf_h, surf_pitch,
-            0, 5);
-        ret = cluu_ipc_call(dev->displayd_ep,
-            &req, CLUU_MSG_SIZE, &reply, CLUU_MSG_SIZE);
-        if (ret < 0) {
+        if (CLUU_AcquireDirectLease(dev, wd, window) < 0) {
+            if (wd->direct_phase != CLUU_DIRECT_NONE &&
+                wd->direct_phase != CLUU_DIRECT_RELEASED) {
+                if (cluu_release_direct_lease(dev, wd) < 0) {
+                    dev->failed_direct_cleanup = wd;
+                    window->driverdata = NULL;
+                    return -1;
+                }
+            }
             SDL_free(wd);
             window->driverdata = NULL;
-            return SDL_SetError("CLUU: displayd surface create IPC failed");
+            return -1;
         }
-        wd->surface_token = reply.words[0];
-        if (wd->surface_token == 0) {
-            /* Error code in words[4] (error variant index). */
-            SDL_free(wd);
-            window->driverdata = NULL;
-            return SDL_SetError("CLUU: displayd refused surface create (err=%lu)",
-                reply.words[4]);
-        }
-
-        /* Set geometry: centered for windowed, top-left for fullscreen. */
-        {
-            long geo_x, geo_y;
-            char geo_payload[5];
-
-            if (wd->fullscreen) {
-                geo_x = 0;
-                geo_y = 0;
-            } else {
-                geo_x = (long)((dev->screen_w - surf_w) / 2);
-                geo_y = (long)((dev->screen_h - surf_h) / 2);
-                if (geo_x < 0) geo_x = 0;
-                if (geo_y < 0) geo_y = 0;
-            }
-
-            /* Payload: z_order (i32 LE) + visible (u8). */
-            {
-                int z = 1;
-                geo_payload[0] = (char)(z & 0xFF);
-                geo_payload[1] = (char)((z >> 8) & 0xFF);
-                geo_payload[2] = (char)((z >> 16) & 0xFF);
-                geo_payload[3] = (char)((z >> 24) & 0xFF);
-                geo_payload[4] = 1;  /* visible = true */
-            }
-
-            cluu_msg_init(&req, CLUU_DISPLAY_SET_GEOMETRY_LABEL,
-                0,  /* words[0] = 0 (payload len set by send_msg_with_payload) */
-                wd->surface_token,  /* words[1] = surface token */
-                (unsigned long)geo_x,  /* words[2] = x */
-                (unsigned long)geo_y,  /* words[3] = y */
-                0, 0, 4);
-            /* For payload messages, words[0] must be the payload length. */
-            req.words[0] = 5;  /* payload is 5 bytes */
-            cluu_send_msg_with_payload(dev->displayd_ep, &req, geo_payload, 5);
-        }
-
-        dev->surface_count++;
+        return 0;
+    }
+    if (window->w < 0 || window->h < 0) {
+        SDL_free(wd);
+        window->driverdata = NULL;
+        return SDL_SetError("CLUU: invalid window dimensions");
+    }
+    requested_w = window->w;
+    requested_h = window->h;
+    pixel_w = window->w == 0 ? dev->screen_w : (unsigned int)window->w;
+    pixel_h = window->h == 0 ? dev->screen_h : (unsigned int)window->h;
+    cell_w = pixel_w / CLUU_COMP_GLYPH_W;
+    if ((pixel_w % CLUU_COMP_GLYPH_W) != 0) {
+        cell_w++;
+    }
+    cell_h = pixel_h / CLUU_COMP_GLYPH_H;
+    if ((pixel_h % CLUU_COMP_GLYPH_H) != 0) {
+        cell_h++;
+    }
+    if (cell_w < 3 || cell_h < 3 || cell_w > 0xffffu || cell_h > 0xffffu ||
+        cell_w > (~(unsigned int)0) / CLUU_COMP_GLYPH_W ||
+        cell_h > (~(unsigned int)0) / CLUU_COMP_GLYPH_H) {
+        SDL_free(wd);
+        window->driverdata = NULL;
+        return SDL_SetError("CLUU: invalid compositor cell geometry");
+    }
+    pixel_w = cell_w * CLUU_COMP_GLYPH_W;
+    pixel_h = cell_h * CLUU_COMP_GLYPH_H;
+    if (pixel_w > (~(unsigned int)0) / 4u) {
+        SDL_free(wd);
+        window->driverdata = NULL;
+        return SDL_SetError("CLUU: PixelRegion pitch overflow");
+    }
+    pixel_pitch = pixel_w * 4u;
+    if (cluu_framebuffer_layout(pixel_w, pixel_h, pixel_pitch, NULL, NULL) < 0) {
+        SDL_free(wd);
+        window->driverdata = NULL;
+        return SDL_SetError("CLUU: invalid PixelRegion geometry");
+    }
+    if (dev->comp_ep == 0 || dev->input_ep == 0) {
+        SDL_free(wd);
+        window->driverdata = NULL;
+        return SDL_SetError("CLUU: windowed mode requires compositor and input endpoint");
     }
 
-    /* Register a compositor window for keyboard input.
-     * Compositor requires minimum 3x3 cells. Pixel output goes through
-     * displayd, not the compositor. The compositor window exists only
-     * to receive COMP_INPUT_FORWARD messages. */
-    if (dev->comp_ep != 0 && dev->input_ep != 0) {
+    {
         char title[] = "SDL";
         unsigned long win_flags = 0;
-        if (wd->fullscreen) {
-            win_flags = CLUU_COMP_WIN_FLAG_FULLSCREEN;
-        }
         cluu_msg_init(&req, CLUU_COMP_WIN_REGISTER_LABEL,
             sizeof(title) - 1,
-            3,
-            3,
+            cell_w,
+            cell_h,
             dev->input_ep,
             win_flags,
             0,
-            4);
+            5);
 
+        SDL_memset(&reply, 0, sizeof(reply));
         ret = cluu_call_with_payload(dev->comp_ep,
             &req, title, sizeof(title) - 1, &reply);
-        if (ret == 0 && reply.tag.label == CLUU_COMP_WIN_REGISTER_REPLY) {
-            wd->win_id = reply.words[0];
-            wd->shm_token = reply.words[1];
+        if (ret < 0 || reply.tag.label != CLUU_COMP_WIN_REGISTER_REPLY ||
+            reply.words[0] == 0 || reply.words[1] == 0 || reply.words[4] != 0 ||
+            reply.words[2] != cell_w || reply.words[3] != cell_h) {
+            if (ret == 0 && reply.tag.label == CLUU_COMP_WIN_REGISTER_REPLY &&
+                reply.words[0] != 0) {
+                CLUU_Message destroy;
+                cluu_msg_init(&destroy, CLUU_COMP_WIN_DESTROY_LABEL,
+                    reply.words[0], 0, 0, 0, 0, 0, 1);
+                cluu_ipc_send(dev->comp_ep, &destroy, CLUU_MSG_SIZE);
+            }
+            SDL_free(wd);
+            window->driverdata = NULL;
+            return SDL_SetError("CLUU: compositor window registration failed");
         }
-        /* Non-fatal if compositor registration fails — pixel output
-         * still works, just no keyboard events. */
+        wd->win_id = reply.words[0];
+        wd->shm_token = reply.words[1];
+    }
+
+    wd->pixel_w = pixel_w;
+    wd->pixel_h = pixel_h;
+    wd->pixel_pitch = pixel_pitch;
+    wd->cell_w = cell_w;
+    wd->cell_h = cell_h;
+    wd->visible = 1;
+    if (requested_w == 0) {
+        window->w = (int)pixel_w;
+    }
+    if (requested_h == 0) {
+        window->h = (int)pixel_h;
     }
 
     return 0;
@@ -187,16 +245,11 @@ void CLUU_DestroyWindow(_THIS, SDL_Window *window)
 
     /* Destroy framebuffer first (frees frame token + unmap). */
     CLUU_DestroyWindowFramebuffer(_this, window);
-
-    /* Destroy displayd surface. */
-    if (wd->surface_token != 0 && dev->displayd_ep != 0) {
-        cluu_msg_init(&msg, CLUU_DISPLAY_SURFACE_DESTROY_LABEL,
-            0, wd->surface_token, 0, 0, 0, 0, 2);
-        cluu_ipc_call(dev->displayd_ep, &msg, CLUU_MSG_SIZE, &msg, CLUU_MSG_SIZE);
-        wd->surface_token = 0;
-        if (dev->surface_count > 0) {
-            dev->surface_count--;
-        }
+    if (wd->direct_phase != CLUU_DIRECT_NONE &&
+        wd->direct_phase != CLUU_DIRECT_RELEASED) {
+        dev->failed_direct_cleanup = wd;
+        window->driverdata = NULL;
+        return;
     }
 
     /* Destroy compositor window. */
@@ -227,59 +280,33 @@ void CLUU_HideWindow(_THIS, SDL_Window *window)
 
 void CLUU_RaiseWindow(_THIS, SDL_Window *window)
 {
-    /* No-op — displayd composites by z-order, not focus. */
+    /* No-op — compositor manages z-order through focus. */
     (void)_this;
     (void)window;
 }
 
 /* ── SetWindowFullscreen ─────────────────────────────────────────────── */
 
-void CLUU_SetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen)
+SDL_bool CLUU_CanSetWindowFullscreen(_THIS, SDL_Window *window,
+    SDL_VideoDisplay *display, SDL_bool fullscreen)
 {
-    CLUU_DeviceData *dev = cluu_device_data(_this);
     CLUU_WindowData *wd = cluu_window_data(window);
-    CLUU_Message msg;
-    char geo_payload[5];
 
+    (void)_this;
     (void)display;
 
-    if (!wd || wd->surface_token == 0 || dev->displayd_ep == 0) {
-        return;  /* no surface — nothing to do */
-    }
+    /* Startup mode is immutable. Direct lease transitions require coordinated
+     * framebuffer and input ownership changes that SDL cannot do atomically. */
+    return wd && ((fullscreen ? 1 : 0) == wd->fullscreen) ? SDL_TRUE : SDL_FALSE;
+}
 
-    /* Fullscreen fallback: composite, not VT theft.
-     * Move the surface to (0,0) for fullscreen, or re-center for windowed.
-     * The compositor composites it at the surface position — no scanout
-     * promotion is attempted. */
-    wd->fullscreen = fullscreen ? 1 : 0;
-
-    {
-        long geo_x, geo_y;
-        int z = 1;
-        if (wd->fullscreen) {
-            geo_x = 0;
-            geo_y = 0;
-        } else {
-            geo_x = (long)((dev->screen_w - wd->surf_w) / 2);
-            geo_y = (long)((dev->screen_h - wd->surf_h) / 2);
-            if (geo_x < 0) geo_x = 0;
-            if (geo_y < 0) geo_y = 0;
-        }
-
-        geo_payload[0] = (char)(z & 0xFF);
-        geo_payload[1] = (char)((z >> 8) & 0xFF);
-        geo_payload[2] = (char)((z >> 16) & 0xFF);
-        geo_payload[3] = (char)((z >> 24) & 0xFF);
-        geo_payload[4] = 1;  /* visible */
-
-        cluu_msg_init(&msg, CLUU_DISPLAY_SET_GEOMETRY_LABEL,
-            5,  /* words[0] = payload length */
-            wd->surface_token,
-            (unsigned long)geo_x,
-            (unsigned long)geo_y,
-            0, 0, 4);
-        cluu_send_msg_with_payload(dev->displayd_ep, &msg, geo_payload, 5);
-    }
+void CLUU_SetWindowFullscreen(_THIS, SDL_Window *window,
+    SDL_VideoDisplay *display, SDL_bool fullscreen)
+{
+    (void)_this;
+    (void)window;
+    (void)display;
+    (void)fullscreen;
 }
 
 #endif /* SDL_VIDEO_DRIVER_CLUU */

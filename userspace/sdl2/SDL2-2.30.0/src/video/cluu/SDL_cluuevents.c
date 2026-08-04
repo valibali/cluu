@@ -185,16 +185,19 @@ void CLUU_PumpEvents(_THIS)
 
         SDL_memcpy(&msg, recv_buf, CLUU_MSG_SIZE);
 
-        /* Handle compositor input forward. */
-        if (msg.tag.label == CLUU_COMP_INPUT_FORWARD_LABEL) {
+        /* Windowed input is compositor-forwarded; direct fullscreen receives
+         * the same key wire layout under the raw KBD_EVENT label. */
+        if (msg.tag.label == CLUU_COMP_INPUT_FORWARD_LABEL ||
+            msg.tag.label == CLUU_KBD_EVENT_LABEL) {
             unsigned char ascii    = (unsigned char)(msg.words[1] & 0xFF);
             unsigned char mods     = (unsigned char)(msg.words[2] & 0xFF);
             unsigned char scancode = (unsigned char)(msg.words[3] & 0xFF);
             unsigned char extended = (unsigned char)(msg.words[4] & 0xFF);
             unsigned int  kind     = (unsigned int)msg.words[5];
 
-            /* kind == 99 → close request → SDL_QUIT. */
-            if (kind == 99) {
+            if ((msg.tag.label == CLUU_KBD_EVENT_LABEL && kind == 0 &&
+                 (mods & ((1u << 1) | (1u << 2))) == ((1u << 1) | (1u << 2)) &&
+                 scancode == 0x2D && extended == 0) || kind == 99) {
                 SDL_SendQuit();
                 continue;
             }
