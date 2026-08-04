@@ -1557,7 +1557,7 @@ static int SDL_UpdateFullscreenMode(SDL_Window *window, SDL_bool fullscreen)
 }
 
 #define CREATE_FLAGS \
-    (SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_POPUP_MENU | SDL_WINDOW_UTILITY | SDL_WINDOW_TOOLTIP | SDL_WINDOW_VULKAN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_METAL)
+    (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_POPUP_MENU | SDL_WINDOW_UTILITY | SDL_WINDOW_TOOLTIP | SDL_WINDOW_VULKAN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_METAL)
 
 static SDL_INLINE SDL_bool IsAcceptingDragAndDrop(void)
 {
@@ -2626,12 +2626,20 @@ void SDL_RestoreWindow(SDL_Window *window)
 int SDL_SetWindowFullscreen(SDL_Window *window, Uint32 flags)
 {
     Uint32 oldflags;
+    SDL_VideoDisplay *display;
     CHECK_WINDOW_MAGIC(window, -1);
 
     flags &= FULLSCREEN_MASK;
 
     if (flags == (window->flags & FULLSCREEN_MASK)) {
         return 0;
+    }
+
+    display = SDL_GetDisplayForWindow(window);
+    if (_this->CanSetWindowFullscreen &&
+        !_this->CanSetWindowFullscreen(_this, window, display,
+            flags != 0 ? SDL_TRUE : SDL_FALSE)) {
+        return SDL_SetError("Window fullscreen transition is unsupported");
     }
 
     /* clear the previous flags and OR in the new ones */

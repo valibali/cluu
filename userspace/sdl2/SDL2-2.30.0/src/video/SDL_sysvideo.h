@@ -246,6 +246,7 @@ struct SDL_VideoDevice
     void (*SetWindowBordered) (_THIS, SDL_Window * window, SDL_bool bordered);
     void (*SetWindowResizable) (_THIS, SDL_Window * window, SDL_bool resizable);
     void (*SetWindowAlwaysOnTop) (_THIS, SDL_Window * window, SDL_bool on_top);
+    SDL_bool (*CanSetWindowFullscreen) (_THIS, SDL_Window * window, SDL_VideoDisplay * display, SDL_bool fullscreen);
     void (*SetWindowFullscreen) (_THIS, SDL_Window * window, SDL_VideoDisplay * display, SDL_bool fullscreen);
     int (*SetWindowGammaRamp) (_THIS, SDL_Window * window, const Uint16 * ramp);
     int (*GetWindowGammaRamp) (_THIS, SDL_Window * window, Uint16 * ramp);
