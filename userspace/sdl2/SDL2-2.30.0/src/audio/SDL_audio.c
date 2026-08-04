@@ -29,6 +29,8 @@
 #include "../thread/SDL_systhread.h"
 #include "../SDL_utils_c.h"
 
+extern void debug_print(const char *msg);
+
 #define _THIS SDL_AudioDevice *_this
 
 typedef struct AudioThreadStartupData
@@ -683,6 +685,7 @@ static int SDLCALL SDL_RunAudio(void *userdata)
     Uint8 *device_buf_keepsafe = NULL;
 
     SDL_assert(!device->iscapture);
+    debug_print("sdl2: audio thread entered");
 
 #ifdef SDL_AUDIO_DRIVER_ANDROID
     {
@@ -691,13 +694,17 @@ static int SDLCALL SDL_RunAudio(void *userdata)
     }
 #else
     /* The audio mixing is always a high priority thread */
+    debug_print("sdl2: audio thread setting priority");
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_TIME_CRITICAL);
 #endif
+    debug_print("sdl2: audio thread priority complete");
 
     /* Perform any thread setup */
     device->threadid = SDL_ThreadID();
+    debug_print("sdl2: audio thread id complete");
 
     SDL_SemPost(startup_data->startup_semaphore);  /* SDL_OpenAudioDevice may now continue. */
+    debug_print("sdl2: audio startup semaphore posted");
 
     current_audio.impl.ThreadInit(device);
 
@@ -1556,6 +1563,7 @@ static SDL_AudioDeviceID open_audio_device(const char *devname, int iscapture,
 
         (void)SDL_snprintf(threadname, sizeof(threadname), "SDLAudio%c%" SDL_PRIu32, (iscapture) ? 'C' : 'P', device->id);
 
+        debug_print("sdl2: creating audio thread");
         device->thread = SDL_CreateThreadInternal(iscapture ? SDL_CaptureAudio : SDL_RunAudio, threadname, 0, &startup_data);
         if (device->thread == NULL) {
             SDL_DestroySemaphore(startup_data.startup_semaphore);
@@ -1564,8 +1572,11 @@ static SDL_AudioDeviceID open_audio_device(const char *devname, int iscapture,
             return 0;
         }
 
+        debug_print("sdl2: audio thread created; waiting startup semaphore");
         SDL_SemWait(startup_data.startup_semaphore);
+        debug_print("sdl2: startup semaphore wait returned");
         SDL_DestroySemaphore(startup_data.startup_semaphore);
+        debug_print("sdl2: startup semaphore destroyed");
     }
 
     return device->id;

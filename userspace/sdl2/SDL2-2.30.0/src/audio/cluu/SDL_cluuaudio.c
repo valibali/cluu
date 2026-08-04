@@ -37,6 +37,8 @@
 #include "../SDL_audio_c.h"
 #include "SDL_cluuaudio.h"
 
+extern void debug_print(const char *msg);
+
 /* ── FrameRing operations (matches audiod/src/ring.rs) ───────────────── */
 
 static unsigned int cluu_ring_available_read(unsigned char *buf)
@@ -143,7 +145,8 @@ static unsigned long cluu_registry_subscribe(SDL_PrivateAudioData *h,
         }
         if (ret >= (long)CLUU_MSG_SIZE) {
             SDL_memcpy(&reply, recv_buf, CLUU_MSG_SIZE);
-            if (reply.tag.label == CLUU_REGISTRY_GRANT_DELIVER_LABEL) {
+            if (reply.tag.label == CLUU_REGISTRY_GRANT_DELIVER_LABEL &&
+                reply.tag.words >= 2 && reply.words[1] != 0) {
                 return reply.words[1];
             }
         }
@@ -241,10 +244,13 @@ static int CLUU_OpenDevice(_THIS, const char *devname)
     if (cluu_audiod_open_stream(h, CLUU_AUDIO_OUTPUT_RATE, CLUU_AUDIO_OUTPUT_CHANNELS) < 0) {
         return SDL_SetError("CLUU audio: audiod stream open failed");
     }
+    debug_print("sdl2-cluu: audiod stream reply received");
 
     num_pages = (h->ring_bytes + CLUU_AUDIO_PAGE_BYTES - 1) / CLUU_AUDIO_PAGE_BYTES;
+    debug_print("sdl2-cluu: mapping audio ring");
     ring_va = (unsigned long)cluu_invoke(h->space_cap, CLUU_INVOKE_SPACE_MAP_AUTO,
             h->ring_frame_token, 0x03, num_pages, 0);
+    debug_print("sdl2-cluu: audio ring map returned");
     if ((long)ring_va < 0) {
         return SDL_SetError("CLUU audio: failed to map SHM ring");
     }
@@ -254,6 +260,7 @@ static int CLUU_OpenDevice(_THIS, const char *devname)
     if (!h->scratch) {
         return SDL_OutOfMemory();
     }
+    debug_print("sdl2-cluu: audio scratch allocated");
     SDL_memset(h->scratch, 0, h->period_bytes);
 
     /* Device format: fixed S16 stereo 44100. SDL's AudioStream converts
@@ -263,6 +270,7 @@ static int CLUU_OpenDevice(_THIS, const char *devname)
     _this->spec.channels = CLUU_AUDIO_OUTPUT_CHANNELS;
     _this->spec.samples = (h->period_bytes / CLUU_FRAME_BYTES);
     SDL_CalculateAudioSpec(&_this->spec);
+    debug_print("sdl2-cluu: audio device open complete");
 
     return 0;
 }
