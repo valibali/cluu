@@ -120,7 +120,15 @@ int SDL_CondWaitTimeout(SDL_cond *cond, SDL_mutex *mutex, Uint32 ms)
     }
 
 tryagain:
+#ifdef SDL_MUTEX_FAKE_RECURSIVE
+    /* pthread_cond_timedwait releases and reacquires native mutex directly;
+       keep SDL's emulated owner field synchronized with that transition. */
+    mutex->owner = 0;
+#endif
     retval = pthread_cond_timedwait(&cond->cond, &mutex->id, &abstime);
+#ifdef SDL_MUTEX_FAKE_RECURSIVE
+    mutex->owner = pthread_self();
+#endif
     switch (retval) {
     case EINTR:
         goto tryagain;

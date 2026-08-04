@@ -188,6 +188,11 @@ SDL_threadID SDL_ThreadID(void)
 
 int SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
 {
+#if defined(__CLUU__)
+    /* CLUU pthread scheduling is fixed; host Linux priority APIs do not exist. */
+    (void)priority;
+    return 0;
+#else
 #if defined(__NACL__) || defined(__RISCOS__) || defined(__OS2__)
     /* FIXME: Setting thread priority does not seem to be supported in NACL */
     return 0;
@@ -283,6 +288,7 @@ int SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
     return 0;
 #endif /* linux */
 #endif /* #if __NACL__ || __RISCOS__ */
+#endif /* __CLUU__ */
 }
 
 void SDL_SYS_WaitThread(SDL_Thread *thread)

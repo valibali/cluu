@@ -26,6 +26,8 @@
 #include "SDL_thread.h"
 #include "SDL_systhread_c.h"
 
+extern void cluu_debug(const char *msg);
+
 #ifdef SDL_THREADS_DISABLED
 
 SDL_sem *SDL_CreateSemaphore(Uint32 initial_value)
@@ -101,18 +103,27 @@ SDL_sem *SDL_CreateSemaphore(Uint32 initial_value)
 void SDL_DestroySemaphore(SDL_sem *sem)
 {
     if (sem) {
+        cluu_debug("sdl2: destroying startup semaphore");
         sem->count = 0xFFFFFFFF;
         while (sem->waiters_count > 0) {
             SDL_CondSignal(sem->count_nonzero);
             SDL_Delay(10);
         }
-        SDL_DestroyCond(sem->count_nonzero);
+        cluu_debug("sdl2: semaphore waiters drained");
+        cluu_debug("sdl2: locking semaphore mutex before condition teardown");
         if (sem->count_lock) {
             SDL_LockMutex(sem->count_lock);
+            cluu_debug("sdl2: semaphore mutex locked");
             SDL_UnlockMutex(sem->count_lock);
+        }
+        SDL_DestroyCond(sem->count_nonzero);
+        cluu_debug("sdl2: semaphore condition destroyed");
+        if (sem->count_lock) {
             SDL_DestroyMutex(sem->count_lock);
         }
+        cluu_debug("sdl2: semaphore mutex destroyed; freeing semaphore");
         SDL_free(sem);
+        cluu_debug("sdl2: startup semaphore freed");
     }
 }
 
@@ -138,6 +149,8 @@ int SDL_SemTryWait(SDL_sem *sem)
 int SDL_SemWaitTimeout(SDL_sem *sem, Uint32 timeout)
 {
     int retval;
+    int lock_result;
+    int unlock_result;
 
     if (!sem) {
         return SDL_InvalidParamError("sem");
@@ -148,7 +161,10 @@ int SDL_SemWaitTimeout(SDL_sem *sem, Uint32 timeout)
         return SDL_SemTryWait(sem);
     }
 
-    SDL_LockMutex(sem->count_lock);
+    lock_result = SDL_LockMutex(sem->count_lock);
+    if (lock_result != 0) {
+        cluu_debug("sdl2: semaphore wait mutex lock failed");
+    }
     ++sem->waiters_count;
     retval = 0;
     while ((sem->count == 0) && (retval != SDL_MUTEX_TIMEDOUT)) {
@@ -159,7 +175,10 @@ int SDL_SemWaitTimeout(SDL_sem *sem, Uint32 timeout)
     if (retval == 0) {
         --sem->count;
     }
-    SDL_UnlockMutex(sem->count_lock);
+    unlock_result = SDL_UnlockMutex(sem->count_lock);
+    if (unlock_result != 0) {
+        cluu_debug("sdl2: semaphore wait mutex unlock failed");
+    }
 
     return retval;
 }
@@ -184,16 +203,25 @@ Uint32 SDL_SemValue(SDL_sem *sem)
 
 int SDL_SemPost(SDL_sem *sem)
 {
+    int lock_result;
+    int unlock_result;
+
     if (!sem) {
         return SDL_InvalidParamError("sem");
     }
 
-    SDL_LockMutex(sem->count_lock);
+    lock_result = SDL_LockMutex(sem->count_lock);
+    if (lock_result != 0) {
+        cluu_debug("sdl2: semaphore post mutex lock failed");
+    }
     if (sem->waiters_count > 0) {
         SDL_CondSignal(sem->count_nonzero);
     }
     ++sem->count;
-    SDL_UnlockMutex(sem->count_lock);
+    unlock_result = SDL_UnlockMutex(sem->count_lock);
+    if (unlock_result != 0) {
+        cluu_debug("sdl2: semaphore post mutex unlock failed");
+    }
 
     return 0;
 }

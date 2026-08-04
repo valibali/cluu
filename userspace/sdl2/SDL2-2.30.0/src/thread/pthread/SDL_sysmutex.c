@@ -24,20 +24,11 @@
 #include <pthread.h>
 
 #include "SDL_thread.h"
+#include "SDL_sysmutex_c.h"
 
-#if !(defined(SDL_THREAD_PTHREAD_RECURSIVE_MUTEX) || \
-    defined(SDL_THREAD_PTHREAD_RECURSIVE_MUTEX_NP))
+#ifdef SDL_MUTEX_FAKE_RECURSIVE
 #define FAKE_RECURSIVE_MUTEX
 #endif
-
-struct SDL_mutex
-{
-    pthread_mutex_t id;
-#ifdef FAKE_RECURSIVE_MUTEX
-    int recursive;
-    pthread_t owner;
-#endif
-};
 
 SDL_mutex *SDL_CreateMutex(void)
 {

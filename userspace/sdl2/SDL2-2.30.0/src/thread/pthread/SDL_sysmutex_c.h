@@ -20,12 +20,23 @@
 */
 #include "../../SDL_internal.h"
 
+#include <pthread.h>
+
 #ifndef SDL_mutex_c_h_
 #define SDL_mutex_c_h_
+
+#if !(defined(SDL_THREAD_PTHREAD_RECURSIVE_MUTEX) || \
+      defined(SDL_THREAD_PTHREAD_RECURSIVE_MUTEX_NP))
+#define SDL_MUTEX_FAKE_RECURSIVE 1
+#endif
 
 struct SDL_mutex
 {
     pthread_mutex_t id;
+#ifdef SDL_MUTEX_FAKE_RECURSIVE
+    int recursive;
+    pthread_t owner;
+#endif
 };
 
 #endif /* SDL_mutex_c_h_ */
