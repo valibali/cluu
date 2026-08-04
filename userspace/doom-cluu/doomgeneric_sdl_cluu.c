@@ -27,6 +27,7 @@
 #include "doomkeys.h"
 #include "m_argv.h"
 #include "doomgeneric.h"
+#include "i_system.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,10 +137,10 @@ static void addKeyToQueue(int pressed, unsigned int keyCode){
   s_KeyQueueWriteIndex %= KEYQUEUE_SIZE;
 }
 static void handleKeyInput(){
-  SDL_Event e;
-  while (SDL_PollEvent(&e)){
+    SDL_Event e;
+    while (SDL_PollEvent(&e)){
     if (e.type == SDL_QUIT){
-      exit(1);
+      I_Quit();
     }
     if (e.type == SDL_KEYDOWN) {
       addKeyToQueue(1, e.key.keysym.sym);
@@ -152,10 +153,15 @@ static void handleKeyInput(){
 
 void DG_Init(){
   SDL_SetHint(SDL_HINT_VIDEODRIVER, "cluu");
-  SDL_Init(SDL_INIT_VIDEO);
+  SDL_SetHint(SDL_HINT_AUDIODRIVER, "cluu");
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+    cluu_debug("doom-cluu: init failed");
+    exit(1);
+  }
 
   Uint32 win_flags = SDL_WINDOW_SHOWN;
   if (M_CheckParm("-fullscreen") > 0) {
+      cluu_debug("doom-cluu: fullscreen mode requested");
       win_flags |= SDL_WINDOW_FULLSCREEN;
   }
 
@@ -166,13 +172,25 @@ void DG_Init(){
                             DOOMGENERIC_RESY,
                             win_flags
                             );
+  if (window == NULL) {
+    cluu_debug("doom-cluu: init failed");
+    exit(1);
+  }
 
   /* CLUU: software renderer — no GPU on CLUU. */
   renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+  if (renderer == NULL) {
+    cluu_debug("doom-cluu: init failed");
+    exit(1);
+  }
   SDL_RenderClear(renderer);
   SDL_RenderPresent(renderer);
 
   texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_TARGET, DOOMGENERIC_RESX, DOOMGENERIC_RESY);
+  if (texture == NULL) {
+    cluu_debug("doom-cluu: init failed");
+    exit(1);
+  }
 }
 
 void DG_DrawFrame()
@@ -182,15 +200,6 @@ void DG_DrawFrame()
   SDL_RenderClear(renderer);
   SDL_RenderCopy(renderer, texture, NULL, NULL);
   SDL_RenderPresent(renderer);
-
-  /* CLUU: emit pixel-region marker on first frame (harness expects
-   * "sdl2-cluu: pixel region" — was in the old sdl2-shim, now emitted
-   * here since the real SDL2 CLUU video backend doesn't print it). */
-  static int s_first_frame = 1;
-  if (s_first_frame) {
-    s_first_frame = 0;
-    cluu_debug("sdl2-cluu: pixel region");
-  }
 
   handleKeyInput();
 }

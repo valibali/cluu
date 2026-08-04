@@ -174,6 +174,7 @@ static boolean I_Cluu_InitSound(boolean use_sfx_prefix)
     sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &sdl_audio_have,
                                          SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
                                          SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
+    cluu_debug("doom-cluu: SDL_OpenAudioDevice returned");
     if (sdl_audio_dev == 0) {
         cluu_debug("doom-cluu: SDL_OpenAudioDevice failed - continuing without sound");
         sound_initialized = 0;
@@ -184,6 +185,7 @@ static boolean I_Cluu_InitSound(boolean use_sfx_prefix)
     audio_stream = SDL_NewAudioStream(
         AUDIO_S16LSB, 1, DOOM_SAMPLERATE,
         sdl_audio_have.format, sdl_audio_have.channels, sdl_audio_have.freq);
+    cluu_debug("doom-cluu: SDL_NewAudioStream returned");
     if (!audio_stream) {
         cluu_debug("doom-cluu: SDL_NewAudioStream failed");
         SDL_CloseAudioDevice(sdl_audio_dev);
@@ -192,6 +194,7 @@ static boolean I_Cluu_InitSound(boolean use_sfx_prefix)
     }
 
     SDL_PauseAudioDevice(sdl_audio_dev, 0);  /* Start playback. */
+    cluu_debug("doom-cluu: SDL_PauseAudioDevice returned");
     sound_initialized = 1;
     cluu_debug("doom-cluu: I_Cluu_InitSound ok (SDL2 audio)");
     return true;
