@@ -279,7 +279,9 @@ pub fn spawn_process_with_argv_and_redirs(
             })
             .collect()
     };
-    let argv: Vec<String> = args.iter().map(|s| String::from(*s)).collect();
+    let image_basename = name.rsplit('/').next().unwrap_or(name);
+    let mut argv = alloc::vec![String::from(image_basename)];
+    argv.extend(args.iter().map(|s| String::from(*s)));
     let env: Vec<(String, String)> = env_pairs
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -318,11 +320,9 @@ pub fn spawn_process_with_argv_and_redirs(
                 alloc::format!("/bin/{}", name)
             };
             let cwd = libcluu::posix::current_dir_string();
-            let mut full_argv = alloc::vec![alloc::string::String::from(image_path.rsplit('/').next().unwrap_or(&image_path))];
-            full_argv.extend(argv.iter().cloned());
             let spawn_req = SpawnReq {
                 image_path,
-                argv: full_argv,
+                argv: argv.clone(),
                 envp: env.clone(),
                 cwd,
                 fd_inherit: fd_entries,
